@@ -809,9 +809,6 @@ class OodaRunner:
             try:
                 active_window = window_summary(self.window_probe())
             except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
-                # Warn loudly on the first failure of a run, then stay quiet:
-                # a permanently broken probe (consent missing) is not news
-                # twenty times, but the first occurrence must be visible.
                 if self._window_probe_warned:
                     LOGGER.debug("focused-window probe still failing: %s", exc)
                 else:
@@ -828,37 +825,7 @@ class OodaRunner:
                     LOGGER.warning("ui-element probe failed: %s", exc)
         screenshot_b64 = state.screenshot_b64
         if self.sensor is not None and self.vision_enabled:
-            try:
-                from computeruse.vision.capture import (
-                    capture_to_base64_png,
-                    frame_fingerprint,
-                    to_logical_resolution,
-                )
-
-                capture = self.sensor()
-                fingerprint = frame_fingerprint(capture)
-                if fingerprint == self._last_capture_hash and self._last_screenshot_b64 is not None:
-                    screenshot_b64 = self._last_screenshot_b64
-                else:
-                    # The VLM reports coordinates in *image* space; sending a
-                    # physical-pixel (2x Retina) frame would make its clicks
-                    # silently land 2x off in actuation's logical-point space.
-                    # Downscale to logical resolution so image px == points.
-                    screenshot_b64 = capture_to_base64_png(to_logical_resolution(capture))
-                    self._last_capture_hash = fingerprint
-                    self._last_screenshot_b64 = screenshot_b64
-            except Exception as exc:  # noqa: BLE001
-                from computeruse.vision.capture import fallback_screencapture_b64
-
-                fallback_b64 = fallback_screencapture_b64()
-                if fallback_b64 is not None:
-                    screenshot_b64 = fallback_b64
-                    self._last_screenshot_b64 = screenshot_b64
-                elif not self._screenshot_warned:
-                    self._screenshot_warned = True
-                    LOGGER.warning("screenshot capture failed during observe: %s", exc)
-                else:
-                    LOGGER.debug("screenshot capture still failing: %s", exc)
+            screenshot_b64 = self._probe_screenshot() or state.screenshot_b64
         if (
             active_window == state.active_window
             and ui_elements == state.ui_elements
@@ -905,6 +872,43 @@ class OodaRunner:
                 f"action {decision.action.type!r} ({decision.action.model_dump(exclude_none=True)}) "
                 "requires human confirmation before it can run"
             )
+
+    def _probe_screenshot(self) -> str | None:
+        """Capture, downscale to logical resolution, and encode as base64 PNG.
+
+        Uses the screenshot cache: if the frame fingerprint matches the
+        previous capture, reuses the cached base64 string — avoids the full
+        PNG encode on an idle screen (the dominant case).
+        """
+        try:
+            from computeruse.vision.capture import (
+                capture_to_base64_png,
+                fallback_screencapture_b64,
+                frame_fingerprint,
+                to_logical_resolution,
+            )
+
+            capture = self.sensor()  # type: ignore[misc]
+            fingerprint = frame_fingerprint(capture)
+            if fingerprint == self._last_capture_hash and self._last_screenshot_b64 is not None:
+                return self._last_screenshot_b64
+            screenshot_b64 = capture_to_base64_png(to_logical_resolution(capture))
+            self._last_capture_hash = fingerprint
+            self._last_screenshot_b64 = screenshot_b64
+            return screenshot_b64
+        except Exception as exc:  # noqa: BLE001
+            from computeruse.vision.capture import fallback_screencapture_b64
+
+            fallback_b64 = fallback_screencapture_b64()
+            if fallback_b64 is not None:
+                self._last_screenshot_b64 = fallback_b64
+                return fallback_b64
+            if not self._screenshot_warned:
+                self._screenshot_warned = True
+                LOGGER.warning("screenshot capture failed during observe: %s", exc)
+            else:
+                LOGGER.debug("screenshot capture still failing: %s", exc)
+            return None
 
     def _validate_bounds(self, action: Action, capture: ScreenCapture) -> None:
         """Fail-closed: reject coordinates outside the observed main display.
