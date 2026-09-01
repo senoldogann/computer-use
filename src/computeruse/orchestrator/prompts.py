@@ -80,15 +80,20 @@ ACTION_CONTRACT: Final[str] = (
     "   - When typing into any text input: ensure the field is focused and cleared before entering text.\n"
     "   - If target content (e.g. search results, repo links) is ALREADY visible on screen, DO NOT touch the address bar — click the visible target directly.\n"
     "\n"
-    "6. SCROLL AWARENESS & PAGE NAVIGATION:\n"
-    "   - Web pages are often taller than the viewport. If a target element (button, link, avatar, menu item) is NOT visible on the screenshot, it may be off-screen — scroll to find it before giving up.\n"
+    "6. SCROLLING & OFF-SCREEN TARGETS (CRITICAL):\n"
+    "   - Web pages are often taller than the viewport. If the element you need (menu, button, link, avatar, sign-out option) is NOT visible in the current screenshot, it may be off-screen — DO NOT guess its coordinate and DO NOT click blindly. Scroll to bring it into view.\n"
     "   - To scroll DOWN (see content below): first move the cursor over the page content area, then mouse_scroll with dy=positive (e.g. {\"dy\": 300}).\n"
     "   - To scroll UP (see content above): mouse_scroll with dy=negative (e.g. {\"dy\": -300}).\n"
-    "   - Always verify the scroll worked: the visible content should change. If it didn't, you may not be over a scrollable area — move to the page center first.\n"
+    "   - Re-observe the new screenshot after each scroll. Repeat small scrolls until the target is visible; only then click the center coordinate read from the screenshot.\n"
+    "   - If scrolling produces no visible change you may not be over a scrollable area — move to the page center first.\n"
     "   - When looking for a UI element (avatar, settings, sign out) that is not on screen: scroll UP first (page headers/menus are usually at the top), then scroll down if needed.\n"
     "   - Do NOT click on browser chrome (tab bar, address bar, toolbar) when you mean to click a page element. Page content is below the toolbar/bookmarks bar.\n"
     "\n"
-    "7. ERROR RECOVERY & ADAPTATION:\n"
+    "7. NEVER GUESS VIA KEYBOARD FOCUS (Tab / arrows):\n"
+    "   - If a UI element is not visible, DO NOT press Tab, Shift+Tab, arrows, or other focus-steering keys to 'find' it. Keyboard focus routing is unpredictable across web apps and often lands on the wrong control (browser profile popups, address bar, unrelated buttons).\n"
+    "   - Instead: scroll to reveal the element, then click the visible element directly.\n"
+    "\n"
+    "8. ERROR RECOVERY & ADAPTATION:\n"
     "   - Unexpected states (dialogs, popups, login screens, wrong window focus, loading delays, unchanged UI) are normal.\n"
     "   - When an unexpected state appears, stop following your previous plan and re-plan from the new visible state.\n"
     "   - If a click produces no visible change, the target may be wrong or off-screen. Try: (a) scroll to find the real target, (b) use a different interaction (e.g. navigate via URL instead of clicking), (c) wait for a loading state to finish.\n"
@@ -96,17 +101,17 @@ ACTION_CONTRACT: Final[str] = (
     "   - The persistent macOS top menu bar (y=0..25) is permanent system UI, not an open popup menu. Do not spam Escape.\n"
     "   - Browser tabs open at the top of the window. If you see unexpected tabs labeled 'Logout' or similar, your previous click may have opened a new tab instead of navigating — close extra tabs with Cmd+W and return to the original tab.\n"
     "\n"
-    "8. ACTION MINIMIZATION & EFFICIENCY:\n"
+    "9. ACTION MINIMIZATION & EFFICIENCY:\n"
     "   - Prefer the smallest reliable action that advances the goal.\n"
     "   - Do not emit mouse_move before mouse_click unless hover behavior, tooltip inspection, or drag preparation is explicitly needed.\n"
     "   - Prefer clipboard_paste for long text, queries, prompts, and URLs.\n"
     "\n"
-    "9. SUCCESS VERIFICATION:\n"
+    "10. SUCCESS VERIFICATION:\n"
     "   - Emit 'finish' ONLY when the requested goal has been visibly verified on the screenshot.\n"
     "   - Do not consider an action itself proof of success. The final screen must show visible evidence that the task is complete.\n"
     "   - Once success is verified, immediately emit finish with status 'success'.\n"
     "\n"
-    "10. IDE INPUT HANDLING:\n"
+    "11. IDE INPUT HANDLING:\n"
     "   - Locate the current IDE composer from the screenshot or AX elements; never rely on a fixed coordinate.\n"
     "   - Focus the composer, paste the complete prompt, submit with Return, then verify the prompt appears in the conversation before finishing."
 )
@@ -203,7 +208,7 @@ def decision_prompt(
         "",
         state_context(state, max_steps=max_steps),
         "",
-        'Reply now with exactly one JSON decision object.',
+        'Reply now with exactly one JSON decision object. JSON object ONLY — no markdown, no prose, no extra braces outside the object.',
     ]
     if correction is not None:
         parts.append(f"\nYour previous reply was rejected: {correction}\nReply again.")
@@ -304,6 +309,47 @@ def _normalize_action_payload(payload: dict[str, object]) -> dict[str, object]:
     return {**payload, "action": action}
 
 
+def _first_json_object(text: str) -> str | None:
+    """First balanced ``{...}`` span in ``text`` that parses as JSON (pure).
+
+    Braces belonging to prose (``"Plan {step 1}:"``) or to JSON string
+    values (``"thought": "hit {" ``) must not truncate the extraction:
+    candidate spans are bracket-matched *string-aware*, and only a span
+    that ``json.loads`` accepts is returned. When a candidate span fails
+    to parse, the scan resumes at the next ``{`` — so prose braces before
+    the real payload are skipped rather than trusted.
+    """
+    for start, opening in enumerate(text):
+        if opening != "{":
+            continue
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    span = text[start : index + 1]
+                    try:
+                        json.loads(span)
+                    except json.JSONDecodeError:
+                        break
+                    return span
+    return None
+
+
 def parse_decision(raw: str) -> AgentTurn:
     """Parse a model reply into a validated decision (pure, with gate).
 
@@ -312,8 +358,31 @@ def parse_decision(raw: str) -> AgentTurn:
     instead of silently guessing (Law 6.3).
     """
     stripped = raw.strip()
-    block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
-    candidate = block.group(1) if block is not None else stripped[stripped.find("{") : stripped.rfind("}") + 1]
+
+    # Prefer a Markdown fenced JSON block when present (e.g.
+    # ```json\n{"thought":...}\n```). Use a single matching pair so
+    # prose that mentions braces earlier (e.g. "Plan {step 1}:") is
+    # not mistaken for the payload.
+    block = re.search(
+        r"""```(?:json)?\s*(\{.*?\})\s*```""",
+        stripped,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if block is not None:
+        candidate = block.group(1)
+    else:
+        # Fallback: take the first *parseable* balanced ``{...}`` span.
+        # A naive first-``{``-to-last-``}`` slice is wrong twice over: an
+        # earlier prose brace (``"Plan {step 1}:"``) truncates the span,
+        # and a naive ``rfind("}")`` over-extends past stray closing
+        # braces in explanatory text. ``_first_json_object`` handles both.
+        candidate = _first_json_object(stripped)
+        if candidate is None:
+            raise InvalidDecisionError(
+                cause="no JSON object found in the reply",
+                hint="your reply must contain exactly one JSON object matching the action contract above",
+            )
+
     if not candidate or not candidate.startswith("{"):
         raise InvalidDecisionError(
             cause="no JSON object found in the reply",
