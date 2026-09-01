@@ -1040,7 +1040,8 @@ class OodaRunner:
             time.sleep(interval_s)
             try:
                 after_title = self.window_probe().window_title
-            except Exception:  # noqa: BLE001 - probe is best-effort
+            except Exception as exc:  # noqa: BLE001 - probe is best-effort
+                LOGGER.debug("window probe failed during settle poll: %s", exc)
                 continue
             if after_title != before_title:
                 return  # Title changed — navigation landed.

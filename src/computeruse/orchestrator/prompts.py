@@ -69,6 +69,7 @@ ACTION_CONTRACT: Final[str] = (
     "   - Derive all click coordinates (x, y) directly from visible UI evidence on the current screenshot.\n"
     "   - Coordinate Space: The attached screenshot is at LOGICAL resolution — 1 image pixel == 1 screen point. Report x,y EXACTLY as they appear in the image; never apply Retina/scale math.\n"
     "   - Click directly in the center of the target link, button, or input field you wish to activate.\n"
+    "   - AX UI elements list exact native-app coordinates (toolbar, menu, address bar). For web page content (search results, links, article text), the AX tree is often empty — ground on the screenshot directly in that case.\n"
     "\n"
     "5. SAFE BROWSER NAVIGATION & TEXT INPUT:\n"
     "   - When entering a URL or search query in Chrome/Safari: ALWAYS use Cmd+L first to select all existing text cleanly before pasting:\n"
@@ -128,6 +129,15 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # Law 2 OBSERVE: what the host currently shows, so the model grounds
         # its next coordinate on the real active window (ADR-2).
         lines.append(f"Active window: {state.active_window}")
+    if state.ui_elements:
+        # ADR-2 AX grounding: real element coordinates from the host's
+        # accessibility tree. These are EXACT and reliable for native UI
+        # (toolbar buttons, menu items, address bars). For web content
+        # (links, search results, article text), the AX tree is often empty
+        # or truncated — in that case, ignore these and ground on the
+        # screenshot directly.
+        lines.append("AX UI elements (exact coordinates from accessibility tree):")
+        lines.extend(f"- {el}" for el in state.ui_elements)
     if state.screenshot_b64:
         lines.append(
             "PRIMARY PERCEPTION (VISION-FIRST): A live screenshot is attached at LOGICAL "
