@@ -153,6 +153,14 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # screenshot directly.
         lines.append("AX UI elements (exact coordinates from accessibility tree):")
         lines.extend(f"- {el}" for el in state.ui_elements)
+    if state.open_tabs:
+        # Browser tab awareness: the agent must know which tabs are open
+        # to detect stray tabs (e.g. accidental Cmd+click opens) and to
+        # decide whether to close or switch tabs.
+        tab_count = len(state.open_tabs)
+        lines.append(f"Open browser tabs ({tab_count}):")
+        for idx, tab_title in enumerate(state.open_tabs, 1):
+            lines.append(f"  {idx}. {tab_title}")
     if state.screenshot_b64:
         lines.append(
             "PRIMARY PERCEPTION (VISION-FIRST): A live screenshot is attached at LOGICAL "

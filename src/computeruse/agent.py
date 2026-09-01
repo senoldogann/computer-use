@@ -40,7 +40,7 @@ from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.memory.semantic import SemanticStore
 from computeruse.orchestrator.client import ActuationClient
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState
 from computeruse.orchestrator.schemas import Action, AgentTurn
 from computeruse.security.autonomy import (
     AutonomyLevel,
@@ -53,7 +53,7 @@ from computeruse.skills.distiller import DistillResult, Trajectory, distill
 from computeruse.skills.registry import SkillRegistry
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
-from computeruse.vision.ax import interactive_summaries
+from computeruse.vision.ax import interactive_summaries, open_tabs_from_tree
 from computeruse.vision.focus import FocusedWindow
 
 
@@ -232,7 +232,7 @@ class Agent:
             # summarized into the compact lines the provider sees every turn —
             # so a decision's coordinates come from real elements, and the
             # pixel pipeline still verifies whatever the provider picks.
-            def ax_probe() -> tuple[str, ...]:
+            def ax_probe() -> AxProbeResult:
                 current_pid: int | None = None
                 try:
                     current_fw = client.focused_window()
@@ -241,9 +241,10 @@ class Agent:
                     if focused is not None:
                         current_pid = focused.pid
                 if current_pid is None or current_pid <= 0:
-                    return ()
+                    return AxProbeResult()
+                tree = client.ax_snapshot(pid=current_pid, max_depth=12)
                 summaries = interactive_summaries(
-                    client.ax_snapshot(pid=current_pid, max_depth=12),
+                    tree,
                     max_count=AX_MAX_ELEMENTS,
                 )
                 if len(summaries) >= AX_MAX_ELEMENTS:
@@ -256,7 +257,10 @@ class Agent:
                         "be missing; rely on the screenshot for coordinates)"
                     )
                     summaries = summaries + (truncation_note,)
-                return summaries
+                return AxProbeResult(
+                    summaries=summaries,
+                    open_tabs=open_tabs_from_tree(tree),
+                )
 
             def focused_text_value_probe() -> str | None:
                 """Value of the focused text field via the driver's AX tree."""

@@ -108,6 +108,18 @@ SKILL_MOUNT_MIN_SCORE: Final[int] = 2
 
 
 @dataclass(frozen=True)
+class AxProbeResult:
+    """Result of an AX-tree probe: element summaries + open browser tabs.
+
+    Returned as a single object so the driver's ``ax_snapshot`` RPC is
+    called exactly once per probe cycle (Law 4.3: minimal context budget).
+    """
+
+    summaries: tuple[str, ...] = ()
+    open_tabs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WorkingState:
     """Immutable rolling scratchpad (Law 4: working context).
 
@@ -131,6 +143,11 @@ class WorkingState:
     # picks real coordinates instead of hallucinating them. Empty when no
     # probe is configured or the probe failed. Refreshed before every decision.
     ui_elements: tuple[str, ...] = ()
+    # Browser tab awareness: open tab titles extracted from the AX tree.
+    # The agent needs this to detect stray tabs (accidental background-tab
+    # opens from Cmd+click or similar) and to decide whether to close or
+    # switch tabs. Empty for non-browser apps or when no probe is configured.
+    open_tabs: tuple[str, ...] = ()
     # Law 3.2: the skill definition mounted into active context (Stage 2 —
     # full instructions on demand). None until the RETRIEVE step mounts a
     # scan match or the provider explicitly emits ``load_skill``.
@@ -421,7 +438,7 @@ class OodaRunner:
     # the provider sees each turn. Off = no screenshot is attached.
     vision_enabled: bool = False
     window_probe: Callable[[], FocusedWindow] | None = None
-    ax_probe: Callable[[], tuple[str, ...]] | None = None
+    ax_probe: Callable[[], AxProbeResult] | None = None
     # Semantic postcondition probe for typed/pasted text: returns the focused
     # text field's current AXValue, or None when not determinable. When set,
     # type_text/clipboard_paste are verified against it after actuation — a
@@ -820,6 +837,7 @@ class OodaRunner:
         """
         active_window = state.active_window
         ui_elements = state.ui_elements
+        open_tabs = state.open_tabs
         if self.window_probe is not None:
             try:
                 active_window = window_summary(self.window_probe())
@@ -831,7 +849,9 @@ class OodaRunner:
                     LOGGER.warning("focused-window probe failed: %s", exc)
         if self.ax_probe is not None:
             try:
-                ui_elements = self.ax_probe()
+                ax_result = self.ax_probe()
+                ui_elements = ax_result.summaries
+                open_tabs = ax_result.open_tabs
             except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
                 if self._ax_probe_warned:
                     LOGGER.debug("ui-element probe still failing: %s", exc)
@@ -844,6 +864,7 @@ class OodaRunner:
         if (
             active_window == state.active_window
             and ui_elements == state.ui_elements
+            and open_tabs == state.open_tabs
             and screenshot_b64 == state.screenshot_b64
         ):
             return state
@@ -855,6 +876,7 @@ class OodaRunner:
             knowledge=state.knowledge,
             active_window=active_window,
             ui_elements=ui_elements,
+            open_tabs=open_tabs,
             skill=state.skill,
             screenshot_b64=screenshot_b64,
             plan=state.plan,

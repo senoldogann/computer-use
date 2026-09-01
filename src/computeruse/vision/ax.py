@@ -195,3 +195,29 @@ def interactive_summaries(
 
     walk(root, 0)
     return tuple(summaries)
+
+
+def open_tabs_from_tree(root: AXElement) -> tuple[str, ...]:
+    """Extract open browser tab titles from the AX tree (pure).
+
+    Chrome and Safari expose their tab bar as a hierarchy of ``Tab``
+    elements whose ``title`` is the tab's page title. This function
+    collects them so the agent knows which tabs are open — essential
+    for detecting stray tabs (e.g. accidental background-tab opens
+    from a leaked Cmd+click) and for deciding whether to close or
+    switch tabs.
+
+    Returns a deterministic tuple of tab titles. Empty when no ``Tab``
+    elements exist (non-browser apps, or the AX tree is absent).
+    Duplicate titles are preserved — they reflect real open tabs.
+    """
+    tabs: list[str] = []
+
+    def walk(node: AXElement) -> None:
+        if node.role == "Tab" and node.title:
+            tabs.append(node.title)
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return tuple(tabs)

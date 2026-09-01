@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 from computeruse.agent import Agent, AgentConfig
 from computeruse.orchestrator.client import ActuationClient
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState
 from computeruse.orchestrator.prompts import decision_prompt
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.security.autonomy import AutonomyLevel
@@ -24,6 +24,7 @@ from computeruse.vision import (
     find_elements,
     interactive_summaries,
 )
+from computeruse.vision.ax import open_tabs_from_tree
 from tests.smoke.conftest import SOCKET_PATH
 
 APP_PID = 4242
@@ -215,7 +216,7 @@ def test_loop_refreshes_elements_before_every_decision() -> None:
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _action: None,
-        ax_probe=lambda: FIXTURE_SUMMARIES,
+        ax_probe=lambda: AxProbeResult(summaries=FIXTURE_SUMMARIES),
     )
     state = runner.run("ground me")
     # Both turns see the elements; the pure reduction preserves them.
@@ -318,3 +319,45 @@ def test_agent_grounds_provider_coordinates_from_ax(tmp_path) -> None:
     # The grounded click landed on the Reload button's center (232+22, 68+12).
     assert (first.x, first.y) == (254, 80)
     assert result.distilled is not None and result.distilled.kind == "skill"
+
+
+def test_open_tabs_from_tree_extracts_tab_titles() -> None:
+    """Browser tab titles are extracted from the AX tree (pure)."""
+    tab_bar = AXElement(
+        role="TabGroup",
+        children=(
+            AXElement(role="Tab", title="GitHub - senoldogann/computer-use", x=0, y=0, width=200, height=30),
+            AXElement(role="Tab", title="Logout", x=200, y=0, width=200, height=30),
+            AXElement(role="Tab", title="Logout", x=400, y=0, width=200, height=30),
+        ),
+    )
+    toolbar = AXElement(role="Toolbar", children=(tab_bar,))
+    root = AXElement(role="Window", children=(toolbar,))
+    tabs = open_tabs_from_tree(root)
+    assert tabs == (
+        "GitHub - senoldogann/computer-use",
+        "Logout",
+        "Logout",
+    )
+    # Empty tree returns empty tuple.
+    assert open_tabs_from_tree(AXElement(role="Window")) == ()
+    # Non-tab elements are ignored.
+    assert open_tabs_from_tree(
+        AXElement(role="Window", children=(AXElement(role="Button", title="Click"),))
+    ) == ()
+
+
+def test_ax_probe_result_carries_open_tabs() -> None:
+    """AxProbeResult delivers tab titles alongside element summaries."""
+    from computeruse.orchestrator.loop import AxProbeResult
+
+    result = AxProbeResult(
+        summaries=("Button \"OK\" at (100,200) 40x20",),
+        open_tabs=("GitHub", "Tab2"),
+    )
+    assert result.summaries == ("Button \"OK\" at (100,200) 40x20",)
+    assert result.open_tabs == ("GitHub", "Tab2")
+    # Default has empty tabs.
+    default = AxProbeResult()
+    assert default.summaries == ()
+    assert default.open_tabs == ()
