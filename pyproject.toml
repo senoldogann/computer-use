@@ -28,10 +28,6 @@ pythonpath = ["src", "tests"]
 include = ["src"]
 pythonVersion = "3.12"
 strict = ["src"]
-# Point pyright at the project's own virtualenv so ``reportMissingImports``
-# doesn't fire for the deps in ``uv.lock`` when running from a checkout.
-venvPath = "."
-venv = ".venv"
 
 [build-system]
 requires = ["hatchling"]
