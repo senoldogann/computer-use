@@ -578,6 +578,15 @@ class OodaRunner:
                         self._verify_activation(outcome.action)
                     elif isinstance(outcome.action, (TypeText, ClipboardPaste)):
                         self._verify_text_insertion(outcome.action)
+                    # Even without --verify, page-navigation actions
+                    # (Return, Escape) need a settle delay before the next
+                    # OBSERVE captures — otherwise the model sees the
+                    # pre-navigation frame and acts on stale state.
+                    elif (
+                        not self.verify_enabled
+                        and action_verification_kind(outcome.action) == "full"
+                    ):
+                        self._wait_for_settle()
                 elif outcome.route == "internal_wait":
                     self._sleep_for(outcome.action)
                 elif outcome.route == "internal_skill":
