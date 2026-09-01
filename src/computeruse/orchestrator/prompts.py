@@ -69,6 +69,7 @@ ACTION_CONTRACT: Final[str] = (
     "   - Derive all click coordinates (x, y) directly from visible UI evidence on the current screenshot.\n"
     "   - Coordinate Space: The attached screenshot is at LOGICAL resolution — 1 image pixel == 1 screen point. Report x,y EXACTLY as they appear in the image; never apply Retina/scale math.\n"
     "   - Click directly in the center of the target link, button, or input field you wish to activate.\n"
+    "   - AX UI elements list exact native-app coordinates (toolbar, menu, address bar). For web page content (search results, links, article text), the AX tree is often empty — ground on the screenshot directly in that case.\n"
     "\n"
     "5. SAFE BROWSER NAVIGATION & TEXT INPUT:\n"
     "   - When entering a URL or search query in Chrome/Safari: ALWAYS use Cmd+L first to select all existing text cleanly before pasting:\n"
@@ -80,24 +81,25 @@ ACTION_CONTRACT: Final[str] = (
     "   - If target content (e.g. search results, repo links) is ALREADY visible on screen, DO NOT touch the address bar — click the visible target directly.\n"
     "\n"
     "6. SCROLLING & OFF-SCREEN TARGETS (CRITICAL):\n"
-    "   - Web app content frequently overflows the visible area. If the element you need (menu, button, link, sign-out option) is NOT visible in the current screenshot, DO NOT guess its coordinate and DO NOT click blindly.\n"
-    "   - First scroll the page to bring the target into view:\n"
-    "     Step 1: mouse_move to a safe scrollable region (e.g. the sidebar, the page body, or just above/below the visible content), then mouse_scroll with a negative dy to scroll up or positive dy to scroll down.\n"
-    "     Step 2: re-observe the new screenshot. Repeat small scrolls until the target is visible.\n"
-    "   - Only after the target is clearly visible and its center coordinate can be read from the screenshot should you click it.\n"
-    "   - Never scroll at an arbitrary point and assume the target moved — verify by the next screenshot.\n"
-    "   - When the target sits in a top-right account menu or dropdown, and the page is scrolled, the menu may be partially off-screen; scroll up first if the top of the page / header is not fully visible.\n"
+    "   - Web pages are often taller than the viewport. If the element you need (menu, button, link, avatar, sign-out option) is NOT visible in the current screenshot, it may be off-screen — DO NOT guess its coordinate and DO NOT click blindly. Scroll to bring it into view.\n"
+    "   - To scroll DOWN (see content below): first move the cursor over the page content area, then mouse_scroll with dy=positive (e.g. {\"dy\": 300}).\n"
+    "   - To scroll UP (see content above): mouse_scroll with dy=negative (e.g. {\"dy\": -300}).\n"
+    "   - Re-observe the new screenshot after each scroll. Repeat small scrolls until the target is visible; only then click the center coordinate read from the screenshot.\n"
+    "   - If scrolling produces no visible change you may not be over a scrollable area — move to the page center first.\n"
+    "   - When looking for a UI element (avatar, settings, sign out) that is not on screen: scroll UP first (page headers/menus are usually at the top), then scroll down if needed.\n"
+    "   - Do NOT click on browser chrome (tab bar, address bar, toolbar) when you mean to click a page element. Page content is below the toolbar/bookmarks bar.\n"
     "\n"
-    "7. AVOID GUESSING VIA KEYBOARD FOCUS (Tab / arrows) WHEN THE TARGET IS NOT VISIBLE:\n"
-    "   - If the UI element you need is not visible, DO NOT press Tab, Shift+Tab, arrows, or other focus-steering keys to 'find' it. Keyboard focus routing is unpredictable across web apps and often lands on the wrong control (e.g. browser profile popups, address bar, unrelated buttons).\n"
+    "7. NEVER GUESS VIA KEYBOARD FOCUS (Tab / arrows):\n"
+    "   - If a UI element is not visible, DO NOT press Tab, Shift+Tab, arrows, or other focus-steering keys to 'find' it. Keyboard focus routing is unpredictable across web apps and often lands on the wrong control (browser profile popups, address bar, unrelated buttons).\n"
     "   - Instead: scroll to reveal the element, then click the visible element directly.\n"
-    "   - Do not spam Escape to dismiss system UI; the macOS top menu bar (y=0..25) is permanent, not a popup.\n"
     "\n"
     "8. ERROR RECOVERY & ADAPTATION:\n"
     "   - Unexpected states (dialogs, popups, login screens, wrong window focus, loading delays, unchanged UI) are normal.\n"
     "   - When an unexpected state appears, stop following your previous plan and re-plan from the new visible state.\n"
-    "   - If an action fails or produces no visible change twice, choose a different interaction strategy (do not repeat the same failing action).\n"
+    "   - If a click produces no visible change, the target may be wrong or off-screen. Try: (a) scroll to find the real target, (b) use a different interaction (e.g. navigate via URL instead of clicking), (c) wait for a loading state to finish.\n"
+    "   - If an action fails or produces no visible change twice, choose a fundamentally different approach (do not repeat the same click at nearby coordinates).\n"
     "   - The persistent macOS top menu bar (y=0..25) is permanent system UI, not an open popup menu. Do not spam Escape.\n"
+    "   - Browser tabs open at the top of the window. If you see unexpected tabs labeled 'Logout' or similar, your previous click may have opened a new tab instead of navigating — close extra tabs with Cmd+W and return to the original tab.\n"
     "\n"
     "9. ACTION MINIMIZATION & EFFICIENCY:\n"
     "   - Prefer the smallest reliable action that advances the goal.\n"
@@ -142,6 +144,15 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # Law 2 OBSERVE: what the host currently shows, so the model grounds
         # its next coordinate on the real active window (ADR-2).
         lines.append(f"Active window: {state.active_window}")
+    if state.ui_elements:
+        # ADR-2 AX grounding: real element coordinates from the host's
+        # accessibility tree. These are EXACT and reliable for native UI
+        # (toolbar buttons, menu items, address bars). For web content
+        # (links, search results, article text), the AX tree is often empty
+        # or truncated — in that case, ignore these and ground on the
+        # screenshot directly.
+        lines.append("AX UI elements (exact coordinates from accessibility tree):")
+        lines.extend(f"- {el}" for el in state.ui_elements)
     if state.screenshot_b64:
         lines.append(
             "PRIMARY PERCEPTION (VISION-FIRST): A live screenshot is attached at LOGICAL "
@@ -197,8 +208,7 @@ def decision_prompt(
         "",
         state_context(state, max_steps=max_steps),
         "",
-        'Reply now with exactly one JSON decision object.'
-        ' JSON object ONLY — no markdown, no prose, no extra braces outside the object.',
+        'Reply now with exactly one JSON decision object. JSON object ONLY — no markdown, no prose, no extra braces outside the object.',
     ]
     if correction is not None:
         parts.append(f"\nYour previous reply was rejected: {correction}\nReply again.")
@@ -299,6 +309,47 @@ def _normalize_action_payload(payload: dict[str, object]) -> dict[str, object]:
     return {**payload, "action": action}
 
 
+def _first_json_object(text: str) -> str | None:
+    """First balanced ``{...}`` span in ``text`` that parses as JSON (pure).
+
+    Braces belonging to prose (``"Plan {step 1}:"``) or to JSON string
+    values (``"thought": "hit {" ``) must not truncate the extraction:
+    candidate spans are bracket-matched *string-aware*, and only a span
+    that ``json.loads`` accepts is returned. When a candidate span fails
+    to parse, the scan resumes at the next ``{`` — so prose braces before
+    the real payload are skipped rather than trusted.
+    """
+    for start, opening in enumerate(text):
+        if opening != "{":
+            continue
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    span = text[start : index + 1]
+                    try:
+                        json.loads(span)
+                    except json.JSONDecodeError:
+                        break
+                    return span
+    return None
+
+
 def parse_decision(raw: str) -> AgentTurn:
     """Parse a model reply into a validated decision (pure, with gate).
 
@@ -320,34 +371,17 @@ def parse_decision(raw: str) -> AgentTurn:
     if block is not None:
         candidate = block.group(1)
     else:
-        # Fallback: find the *outer* JSON object boundaries. We must
-        # skip any leading brace characters that belong to prose (still
-        # bound by ``stripped``) and then take the first ``{`` and the
-        # *matching* final ``}`` — a naive rfind("}") is wrong when
-        # there are closing braces earlier in explanatory text.
-        start = stripped.find("{")
-        if start < 0:
+        # Fallback: take the first *parseable* balanced ``{...}`` span.
+        # A naive first-``{``-to-last-``}`` slice is wrong twice over: an
+        # earlier prose brace (``"Plan {step 1}:"``) truncates the span,
+        # and a naive ``rfind("}")`` over-extends past stray closing
+        # braces in explanatory text. ``_first_json_object`` handles both.
+        candidate = _first_json_object(stripped)
+        if candidate is None:
             raise InvalidDecisionError(
                 cause="no JSON object found in the reply",
                 hint="your reply must contain exactly one JSON object matching the action contract above",
             )
-        depth = 0
-        end = -1
-        for i in range(start, len(stripped)):
-            ch = stripped[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if end <= 0:
-            raise InvalidDecisionError(
-                cause="no JSON object found in the reply",
-                hint="your reply must contain exactly one JSON object matching the action contract above",
-            )
-        candidate = stripped[start:end]
 
     if not candidate or not candidate.startswith("{"):
         raise InvalidDecisionError(

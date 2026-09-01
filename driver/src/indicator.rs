@@ -4,20 +4,23 @@
 //! Law 5.2's "the user must always know what the agent is doing" is, at its
 //! most literal, a *visual* promise: while the driver runs there is a status
 //! item in the menu bar, and the agent's intended pointer is surrounded by a
-//! translucent sea-blue halo so a human can see where the next click will
-//! land — without touching the OS cursor itself (the real pointer still moves
-//! via CGEvent; this is a HUD overlay, not a synthetic bypass).
+//! translucent emerald-green halo with an animated sparkle ring so a human
+//! can see where the next click will land — without touching the OS cursor
+//! itself (the real pointer still moves via CGEvent; this is a HUD overlay,
+//! not a synthetic bypass).
 //!
 //! AppKit requires its UI on the main thread, so this module owns the
 //! driver's main thread: the Unix-socket accept loop moves to a worker thread
 //! when the real backend starts the indicator (see ``main.rs``). The halo
-//! follows the cursor by polling its location on a 30 Hz timer on the main
+//! follows the cursor by polling its location on a 60 Hz timer on the main
 //! run loop — cheap, and it tracks *any* cursor motion, including moves the
-//! agent posts.
+//! agent posts. The sparkle ring animates at 60 Hz with a phase counter so
+//! the isilti (shimmer) is smooth and continuous.
 
 #![cfg(target_os = "macos")]
 
 use core::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use block2::StackBlock;
 use objc2::rc::Retained;
@@ -32,18 +35,25 @@ use objc2_core_foundation::{CGRect, CGPoint, CGSize};
 use objc2_core_graphics::{CGColor, CGContext};
 use objc2_foundation::{NSTimer, NSString};
 
-/// Side length of the halo panel, in logical points. The halo is deliberately
-/// larger than a cursor so it reads as the agent's "presence", not a second
-/// pointer.
-const PANEL: f64 = 72.0;
+/// Side length of the halo panel, in logical points. Larger than a cursor
+/// so the ambient glow + sparkle ring read as "agent presence".
+const PANEL: f64 = 80.0;
 
 /// Emerald green (#50A574): the agent's visual signature.
 const BRAND_GREEN: (f64, f64, f64) = (80.0 / 255.0, 165.0 / 255.0, 116.0 / 255.0);
 
+/// A lighter emerald tint for the sparkle ring's leading edge.
+const BRAND_LIGHT: (f64, f64, f64) = (120.0 / 255.0, 200.0 / 255.0, 150.0 / 255.0);
+
+/// Animation phase counter — increments at 60 Hz so the sparkle rotates
+/// smoothly. Wrapped to 0 after a full cycle (360 ticks = 6 seconds).
+static PHASE: AtomicU64 = AtomicU64::new(0);
+
 // A borderless, transparent, click-through window that draws the cursor
 // halo. The custom view always draws the cursor centred in its bounds; the
 // panel itself is repositioned to follow the cursor, so the view needs no
-// shared state (Law 6: the drawing is a pure function of the view size).
+// shared state (Law 6: the drawing is a pure function of the view size +
+// the global phase counter).
 define_class!(
     #[unsafe(super(NSView))]
     pub struct CursorHaloView;
@@ -58,7 +68,8 @@ define_class!(
             let bounds = self.bounds();
             let cx = bounds.size.width / 2.0;
             let cy = bounds.size.height / 2.0;
-            draw_cursor(&ctx, cx, cy);
+            let phase = PHASE.load(Ordering::Relaxed) as f64;
+            draw_cursor(&ctx, cx, cy, phase);
         }
     }
 );
@@ -74,9 +85,7 @@ impl CursorHaloView {
 
 // SAFETY: -[NSStatusBarButton setImage:] and -[NSStatusBarButton setToolTip:]
 // are inherited from NSButton and take exactly these argument types; both are
-// stable AppKit selectors. (Rust sees no inheritance for inherent methods, so
-// the raw message send is the pragmatic way to reach a superclass selector
-// from a third-party crate.)
+// stable AppKit selectors.
 fn attach_icon(button: &NSStatusBarButton, icon: &NSImage) {
     let tip = NSString::from_str("Computer Use agent active");
     unsafe {
@@ -86,27 +95,20 @@ fn attach_icon(button: &NSStatusBarButton, icon: &NSImage) {
 }
 
 /// Entry point: run the AppKit main loop with the indicator installed.
-/// Never returns (``NSApplication::run`` blocks until the process is killed,
-/// which is exactly the driver's lifetime under ``--real``).
 pub fn run() -> ! {
     run_loop(true)
 }
 
-/// Run the indicator loop without the menu-bar status item. Used when the
-/// driver is spawned by the menu-bar launcher app (``actuation-menu``), which
-/// owns the single status icon — the halo overlay stays, so the caller still
-/// sees exactly where the agent is acting (Law 5.2), without a second icon.
+/// Run halo-only (no status item) when spawned by the menu-bar launcher.
 pub fn run_halo() -> ! {
     run_loop(false)
 }
 
-/// Shared AppKit main loop. ``show_status`` controls whether the busy menu-bar
-/// item is installed; the cursor halo runs regardless.
+/// Shared AppKit main loop. ``show_status`` controls the busy menu-bar item;
+/// the animated cursor halo runs regardless.
 fn run_loop(show_status: bool) -> ! {
     let mtm = MainThreadMarker::new().expect("indicator must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    // Accessory: a menu-bar utility — no Dock icon, no focus stealing. The
-    // agent must never yank the user's focus just by running.
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     if show_status {
@@ -119,30 +121,43 @@ fn run_loop(show_status: bool) -> ! {
 
     let panel = build_panel(mtm);
     let panel_ref = panel.clone();
+    // Keep a raw pointer to the content view so the timer block can trigger
+    // redraws for the sparkle animation. The panel and view live for the
+    // process lifetime (never deallocated), so the pointer stays valid.
+    let content = panel.contentView();
+    let view_ref: *const NSView = match content {
+        Some(ref view) => view.as_ref() as *const NSView,
+        None => core::ptr::null(),
+    };
+    // 60 Hz timer: follow the cursor AND drive the sparkle animation.
+    // The phase counter increments every tick so the rotating sparkle ring
+    // is smooth (previously 30 Hz made it feel choppy).
     let timer_block = StackBlock::new(move |_: NonNull<NSTimer>| {
         follow_cursor(&panel_ref);
+        // Advance the animation phase and mark the view for redraw.
+        let phase = PHASE.fetch_add(1, Ordering::Relaxed) + 1;
+        if phase.is_multiple_of(360) {
+            PHASE.store(0, Ordering::Relaxed);
+        }
+        // Trigger a redraw so the sparkle animates even when the cursor is still.
+        if !view_ref.is_null() {
+            let view: &NSView = unsafe { &*view_ref };
+            unsafe {
+                let _: () = msg_send![view, setNeedsDisplay: true];
+            }
+        }
     });
-    // 30 Hz polling tracks every cursor motion (agent-posted or human) with
-    // zero event-tap complexity; a scheduled timer runs on the current run
-    // loop, which is the AppKit main loop here.
-    //
-    // SAFETY: the block captures only the halo panel, which lives and is
-    // invoked on the main thread (the timer fires on the main run loop), so
-    // the "block must be sendable" requirement is satisfied in practice.
     let _timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 30.0, true, &timer_block)
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 60.0, true, &timer_block)
     };
 
     app.run();
-    std::process::exit(0);
+    std::process::exit(0)
 }
 
 /// Build the borderless, transparent halo panel above everything else.
 fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(PANEL, PANEL));
-    // SAFETY: window creation requires the caller to manage release-on-close;
-    // we keep the Retained handle for the driver's lifetime and the panel is
-    // never released early (it lives as long as the process).
     let panel = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -152,12 +167,9 @@ fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
             false,
         )
     };
-    // Status-window level: above normal windows *and* full-screen apps, so
-    // the halo stays visible no matter what the agent brings to the front.
     panel.setLevel(NSStatusWindowLevel);
     panel.setOpaque(false);
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
-    // The halo must never intercept clicks — it is pure presentation.
     panel.setIgnoresMouseEvents(true);
     panel.setHasShadow(false);
     panel.setCollectionBehavior(
@@ -168,9 +180,7 @@ fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
     panel
 }
 
-/// Reposition the halo panel so its centre sits on the cursor. AppKit window
-/// coordinates grow from the *bottom*-left of the main screen, while the
-/// driver's global coordinates grow from the top-left — flip Y once.
+/// Reposition the halo panel so its centre sits on the cursor.
 fn follow_cursor(panel: &NSWindow) {
     let Some((x, y)) = cursor_location() else {
         return;
@@ -180,8 +190,7 @@ fn follow_cursor(panel: &NSWindow) {
     panel.setFrameOrigin(origin);
 }
 
-/// Current cursor position in the driver's global logical space (top-left
-/// origin, Y grows down) — the same probe CGEvent trick as ``ax.rs``.
+/// Current cursor position in the driver's global logical space.
 fn cursor_location() -> Option<(f64, f64)> {
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::event::CGEvent;
@@ -197,14 +206,27 @@ fn screen_height() -> f64 {
     core_graphics::display::CGDisplay::main().bounds().size.height
 }
 
-/// Draw the cursor indicator matching the top-bar brand (#50A574 squircle
-/// with white paper airplane pointer) at the panel centre.
-fn draw_cursor(ctx: &CGContext, cx: f64, cy: f64) {
-    // Soft outer ambient glow
-    draw_disc(ctx, cx, cy, 32.0, 0.15);
-    draw_disc(ctx, cx, cy, 22.0, 0.25);
+// ---------------------------------------------------------------------------
+// Drawing: emerald squircle + white airplane + animated sparkle ring
+// ---------------------------------------------------------------------------
 
-    // #50A574 squircle matching top-bar mark (22x22, radius 6.5)
+/// Draw the cursor indicator: ambient glow + brand squircle with airplane
+/// + a rotating sparkle ring whose phase is driven by ``phase``.
+///
+/// The sparkle is a 4-arc ring that rotates around the squircle, with
+/// the leading arc brightest (BRAND_LIGHT) and trailing arcs fading —
+/// creating the "isilti" (shimmer) effect. At rest (phase=0) the ring is
+/// a subtle dotted halo; in motion it reads as a rotating sparkle.
+fn draw_cursor(ctx: &CGContext, cx: f64, cy: f64, phase: f64) {
+    // --- Layer 1: Soft ambient glow (pulsing) ---
+    let pulse = 0.5 + 0.5 * (phase * 0.06).sin();
+    draw_disc(ctx, cx, cy, 36.0, 0.06 + 0.04 * pulse);
+    draw_disc(ctx, cx, cy, 26.0, 0.12 + 0.06 * pulse);
+
+    // --- Layer 2: Sparkle ring (rotating, animated) ---
+    draw_sparkle_ring(ctx, cx, cy, 18.0, phase);
+
+    // --- Layer 3: Brand squircle (#50A574, 22x22, radius 6.5) ---
     let size = 22.0;
     let rect = CGRect::new(
         CGPoint::new(cx - size / 2.0, cy - size / 2.0),
@@ -218,7 +240,7 @@ fn draw_cursor(ctx: &CGContext, cx: f64, cy: f64) {
     );
     CGContext::fill_path(Some(ctx));
 
-    // Subtle white specular border on the squircle
+    // Subtle white specular border
     CGContext::begin_path(Some(ctx));
     add_rounded_rect_path(ctx, rect, 6.5);
     CGContext::set_stroke_color_with_color(
@@ -228,18 +250,57 @@ fn draw_cursor(ctx: &CGContext, cx: f64, cy: f64) {
     CGContext::set_line_width(Some(ctx), 0.75);
     CGContext::stroke_path(Some(ctx));
 
-    // White paper airplane pointer inside the squircle
+    // --- Layer 4: White paper airplane pointer ---
     CGContext::begin_path(Some(ctx));
-    CGContext::move_to_point(Some(ctx), cx + 5.5, cy + 0.0); // airplane nose / tip
-    CGContext::add_line_to_point(Some(ctx), cx - 5.5, cy - 5.0); // bottom wing
-    CGContext::add_line_to_point(Some(ctx), cx - 2.5, cy + 0.0); // inner notch
-    CGContext::add_line_to_point(Some(ctx), cx - 5.5, cy + 5.0); // top wing
+    CGContext::move_to_point(Some(ctx), cx + 5.5, cy + 0.0);
+    CGContext::add_line_to_point(Some(ctx), cx - 5.5, cy - 5.0);
+    CGContext::add_line_to_point(Some(ctx), cx - 2.5, cy + 0.0);
+    CGContext::add_line_to_point(Some(ctx), cx - 5.5, cy + 5.0);
     CGContext::close_path(Some(ctx));
     CGContext::set_fill_color_with_color(
         Some(ctx),
         Some(&CGColor::new_srgb(1.0, 1.0, 1.0, 0.98)),
     );
     CGContext::fill_path(Some(ctx));
+}
+
+/// Draw a rotating sparkle ring: 4 arcs at 90° intervals around (cx,cy).
+///
+/// The leading arc (at the rotation angle) is brightest, each trailing arc
+/// fades — creating a comet-like shimmer that rotates around the cursor at
+/// ~6 seconds per revolution. The ring sits at ``radius`` (outside the
+/// squircle) so it reads as a halo, not a border.
+fn draw_sparkle_ring(ctx: &CGContext, cx: f64, cy: f64, radius: f64, phase: f64) {
+    let rotation = (phase * 1.5).to_radians(); // ~6s per revolution at 60Hz
+    let _arc_span = 0.5; // ~28° per arc (reserved for future arc-based rendering)
+    let dot_count = 6;
+    for i in 0..dot_count {
+        let frac = i as f64 / dot_count as f64;
+        let angle = rotation + frac * std::f64::consts::TAU;
+        // Brightness fades from leading (i=0) to trailing dot.
+        let brightness = 1.0 - frac;
+        let alpha = 0.15 + 0.55 * brightness;
+        let dot_r = 1.5 + 1.0 * brightness;
+
+        let dx = cx + radius * angle.cos();
+        let dy = cy + radius * angle.sin();
+
+        CGContext::begin_path(Some(ctx));
+        CGContext::add_ellipse_in_rect(
+            Some(ctx),
+            CGRect::new(
+                CGPoint::new(dx - dot_r, dy - dot_r),
+                CGSize::new(dot_r * 2.0, dot_r * 2.0),
+            ),
+        );
+        let color = if brightness > 0.7 {
+            &CGColor::new_srgb(BRAND_LIGHT.0, BRAND_LIGHT.1, BRAND_LIGHT.2, alpha)
+        } else {
+            &CGColor::new_srgb(BRAND_GREEN.0, BRAND_GREEN.1, BRAND_GREEN.2, alpha)
+        };
+        CGContext::set_fill_color_with_color(Some(ctx), Some(color));
+        CGContext::fill_path(Some(ctx));
+    }
 }
 
 /// Helper to add a rounded rectangle path to a CGContext.
@@ -276,16 +337,10 @@ fn draw_disc(ctx: &CGContext, cx: f64, cy: f64, radius: f64, alpha: f64) {
     CGContext::fill_path(Some(ctx));
 }
 
-/// The menu-bar icon: an SF Symbol loaded straight from the OS. Drawing an
-/// ``NSImage`` programmatically for a status item proved unreliable in
-/// practice (the CGContext block can produce an empty image → invisible
-/// icon), so we let AppKit supply a guaranteed template glyph instead. The
-/// sleeping vs. active distinction is a dash/dot suffixed symbol name, but
-/// both render adaptively on any menu bar.
+/// The menu-bar icon: an SF Symbol loaded straight from the OS.
 fn status_icon() -> Retained<NSImage> {
     let name = NSString::from_str("cursorarrow");
     let desc = NSString::from_str("Computer Use agent busy");
-    // SAFETY: standard NSImage class factory; returns nil only on pre-11 macOS.
     let symbol: Option<Retained<NSImage>> = unsafe {
         msg_send![NSImage::class(), imageWithSystemSymbolName: &*name, accessibilityDescription: &*desc]
     };
@@ -293,7 +348,7 @@ fn status_icon() -> Retained<NSImage> {
         image.setTemplate(true);
         return image;
     }
-    // Fallback: a plain filled disc (template) so the busy state never vanishes.
+    // Fallback: a plain filled disc (template).
     let size = CGSize::new(18.0, 18.0);
     let block = StackBlock::new(|_rect: CGRect| -> Bool {
         let Some(gc) = NSGraphicsContext::currentContext() else {

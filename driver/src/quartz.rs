@@ -35,6 +35,19 @@ fn quartz_button(button: Button) -> CGMouseButton {
     }
 }
 
+/// Quartz keycodes for the modifier keys themselves (kVK_Command,
+/// kVK_Shift, kVK_Option, kVK_Control) — used to post real flagsChanged
+/// press/release events around a hotkey so the HID system state tracks
+/// the press *and the release*.
+fn modifier_keycode(modifier: Modifier) -> u16 {
+    match modifier {
+        Modifier::Command => 55,
+        Modifier::Shift => 56,
+        Modifier::Alt => 58,
+        Modifier::Control => 59,
+    }
+}
+
 /// Maps a modifier to its Quartz flag bit.
 fn modifier_flag(modifier: Modifier) -> CGEventFlags {
     match modifier {
@@ -146,6 +159,32 @@ impl QuartzBackend {
                 std::thread::sleep(Duration::from_millis(60));
             }
         }
+        Ok(())
+    }
+
+    /// Post a real modifier press/release (flagsChanged) event.
+    ///
+    /// Labeling only the letter key-down/up with modifier flags is not
+    /// enough: the HID system's held-modifier state is only updated by
+    /// actual modifier key events. Without an explicit release event the OS
+    /// keeps reporting the modifier as held, and every *later* mouse event
+    /// inherits the flag — a click becomes Cmd+click and Chrome opens the
+    /// target in a new background tab instead of navigating (observed as
+    /// mystery "Logout" tabs in the field).
+    fn post_modifier_event(&self, modifier: Modifier, pressed: bool) -> Result<(), BackendError> {
+        let flags = if pressed {
+            modifier_flag(modifier)
+        } else {
+            CGEventFlags::empty()
+        };
+        let event = CGEvent::new_keyboard_event(
+            self.source.clone(),
+            modifier_keycode(modifier),
+            pressed,
+        )
+        .map_err(|()| BackendError("failed to create modifier event".to_string()))?;
+        event.set_flags(flags);
+        event.post(CGEventTapLocation::HID);
         Ok(())
     }
 }
@@ -292,8 +331,12 @@ impl Backend for QuartzBackend {
         let keycode = keycode_of(key)
             .ok_or_else(|| BackendError(format!("unsupported hotkey key {key:?}")))?;
         let mut flags = CGEventFlags::empty();
+        // Press each modifier with a real flagsChanged event first so the
+        // HID state records the press (not just per-event flag labels).
         for modifier in modifiers {
             flags.insert(modifier_flag(*modifier));
+            self.post_modifier_event(*modifier, true)?;
+            std::thread::sleep(Duration::from_millis(20));
         }
         let down = CGEvent::new_keyboard_event(self.source.clone(), keycode, true)
             .map_err(|()| BackendError("failed to create key-down".to_string()))?;
@@ -304,6 +347,12 @@ impl Backend for QuartzBackend {
             .map_err(|()| BackendError("failed to create key-up".to_string()))?;
         up.set_flags(flags);
         up.post(CGEventTapLocation::HID);
+        // Release the modifiers explicitly — this is the step that clears
+        // the held-modifier state so later clicks are plain clicks.
+        for modifier in modifiers {
+            std::thread::sleep(Duration::from_millis(20));
+            self.post_modifier_event(*modifier, false)?;
+        }
         Ok(())
     }
 
