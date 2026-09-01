@@ -221,12 +221,27 @@ def repetition_diagnostic(action: Action, repeats: int) -> str:
     only two exits are a genuine change of action or a ``finish`` (pure).
     """
     payload = action.model_dump(exclude_none=True)
-    return (
+    base_hint = (
         f"action repetition detected: you have performed the identical action "
         f"{repeats} times in a row ({payload}) with no visible progress. "
-        f"Repeating it will not achieve the goal. If the goal is already "
-        f"complete, emit finish immediately; otherwise pick a genuinely "
-        f"different action (different target or different type)."
+        f"Repeating it will not achieve the goal. "
+    )
+    # Action-specific guidance: give the model a concrete recovery path
+    # instead of a generic "do something different". A model stuck clicking
+    # the same spot usually needs to scroll or try a URL navigation.
+    if isinstance(action, MouseClick):
+        return (
+            base_hint
+            + "The click target may be wrong, off-screen, or the page may be "
+            "scrolled. Try: (a) scroll up/down with mouse_scroll to find the "
+            "real target, (b) navigate via the URL bar instead of clicking, "
+            "(c) press Escape to dismiss any overlay, or (d) emit finish if "
+            "the goal is already complete."
+        )
+    return (
+        base_hint
+        + "If the goal is already complete, emit finish immediately; otherwise "
+        "pick a genuinely different action (different target or different type)."
     )
 
 
