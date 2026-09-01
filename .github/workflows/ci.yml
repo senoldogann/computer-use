@@ -37,6 +37,9 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('driver/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      - name: Build driver binary
+        run: cargo build
+
       - name: Run tests
         run: cargo test --all-targets
 
