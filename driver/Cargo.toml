@@ -1,0 +1,62 @@
+[package]
+name = "actuation-driver"
+version = "0.1.0"
+edition = "2021"
+description = "Rust micro-driver for physical OS actuation, speaking JSON-RPC over a Unix socket."
+
+[lib]
+name = "actuation_driver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "actuation-driver"
+path = "src/main.rs"
+
+[[bin]]
+name = "actuation-menu"
+path = "src/bin/menu.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", features = ["highsierra"] }
+core-foundation = "0.10"
+foreign-types = "0.5"
+objc2 = "0.6"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+libc = "0.2"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSWindow",
+    "NSPanel",
+    "NSView",
+    "NSColor",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSBitmapImageRep",
+    "NSFont",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "block2",
+] }
+objc2-foundation = { version = "0.3", features = ["NSTimer", "NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3", features = [
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKUserContentController",
+    "WKScriptMessageHandler",
+    "WKScriptMessage",
+] }
+block2 = "0.6"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[profile.release]
+lto = true

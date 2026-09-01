@@ -1,0 +1,283 @@
+"""Capture connector tests: pure decode + end-to-end through the real driver.
+
+The OODA OBSERVE step's sensor is the driver's ``screenshot`` method. These
+tests pin down (1) the pure BGRA→luma decode, (2) the response→model contract,
+and (3) the full path: real compiled driver → typed client → luma grid → diff
+verdict, plus the coordinate mapping that ties global logical points to actual
+pixels (ADR-2: pixels as verifier).
+"""
+
+from __future__ import annotations
+
+import base64
+
+import pytest
+
+from computeruse.orchestrator.client import ActuationClient
+from computeruse.vision import (
+    ChangeKind,
+    ScreenCapture,
+    to_luma_grid,
+    verify_capture_region,
+)
+from computeruse.vision.coordinates import (
+    DisplayGeometry,
+    Point,
+    Rect,
+    Size,
+    point_to_screenshot_offset,
+)
+from tests.smoke.conftest import SOCKET_PATH, rpc_call
+
+# --- Pure decode -------------------------------------------------------------
+
+
+def test_to_luma_grid_reads_bgra_not_rgba() -> None:
+    """Byte order matters: prove the decoder reads BGRA by using an R-only pixel.
+
+    An R-only pixel (BGRA bytes ``[0, 0, 255, 255]``) must yield Rec.709 red
+    luminance (0.2126). If the decoder wrongly read RGBA it would see blue and
+    return 0.0722.
+    """
+    capture = ScreenCapture(
+        display_id=0,
+        width=2,
+        height=1,
+        scale=2.0,
+        data=bytes([0, 0, 255, 255, 255, 255, 255, 255]),  # red, white
+    )
+    grid = to_luma_grid(capture)
+    assert len(grid) == 1
+    assert len(grid[0]) == 2
+    assert grid[0][0] == pytest.approx(0.2126)
+    assert grid[0][1] == pytest.approx(1.0)
+
+
+def test_to_luma_grid_ignores_alpha() -> None:
+    """Alpha must not leak into luminance (premultiplied BGRA has alpha set)."""
+    capture = ScreenCapture(
+        display_id=0,
+        width=1,
+        height=1,
+        scale=1.0,
+        data=bytes([0, 0, 255, 0]),  # red with zero alpha
+    )
+    assert to_luma_grid(capture)[0][0] == pytest.approx(0.2126)
+
+
+def test_from_response_round_trip() -> None:
+    payload = bytes([0, 0, 255, 255, 255, 255, 255, 255])
+    raw = {
+        "ok": "screenshot",
+        "display_id": 0,
+        "format": "bgra8",
+        "width": 2,
+        "height": 1,
+        "scale": 2.0,
+        "data_base64": base64.b64encode(payload).decode("ascii"),
+    }
+    capture = ScreenCapture.from_response(raw)
+    assert capture.width == 2
+    assert capture.height == 1
+    assert capture.scale == 2.0
+    assert capture.data == payload
+    assert to_luma_grid(capture)[0][0] == pytest.approx(0.2126)
+
+
+def test_from_response_rejects_non_screenshot() -> None:
+    with pytest.raises(ValueError, match="expected a screenshot response"):
+        ScreenCapture.from_response({"ok": "ack"})
+
+
+def test_from_response_rejects_truncated_payload() -> None:
+    """A frame whose byte count disagrees with its dimensions is corrupt."""
+    raw = {
+        "ok": "screenshot",
+        "display_id": 0,
+        "format": "bgra8",
+        "width": 4,
+        "height": 4,  # needs 64 bytes
+        "scale": 1.0,
+        "data_base64": base64.b64encode(b"\x00" * 63).decode("ascii"),
+    }
+    with pytest.raises(ValueError, match="expected 64"):
+        ScreenCapture.from_response(raw)
+
+
+# --- End-to-end through the real compiled driver -----------------------------
+
+
+def test_screenshot_protocol_shape() -> None:
+    """The wire contract: a screenshot response reports its own geometry."""
+    payload = rpc_call({"method": "screenshot", "params": {"display_id": 0}})
+    assert payload.get("ok") == "screenshot"
+    assert payload.get("format") == "bgra8"
+    assert isinstance(payload.get("data_base64"), str)
+
+
+def test_typed_capture_round_trip_via_client() -> None:
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        capture = client.capture()
+    assert capture.pixel_format == "bgra8"
+    assert capture.scale == 2.0
+    grid = to_luma_grid(capture)
+    assert len(grid) == capture.height == 36
+    assert all(len(row) == capture.width == 64 for row in grid)
+
+
+def test_simulated_checkerboard_matches_expected_luma() -> None:
+    """The simulated backend's frame is a deterministic 8×8 checkerboard."""
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        capture = client.capture()
+    grid = to_luma_grid(capture)
+    top_left = Rect(Point(0, 0), Size(8, 8))
+    second = Rect(Point(8, 0), Size(8, 8))
+    assert all(
+        grid[y][x] == pytest.approx(1.0)
+        for y in range(int(top_left.origin.y), 8)
+        for x in range(int(top_left.origin.x), 8)
+    )
+    assert all(
+        grid[y][x] == pytest.approx(0.0)
+        for y in range(int(second.origin.y), 8)
+        for x in range(int(second.origin.x), 8)
+    )
+
+
+def test_global_point_maps_to_expected_pixel() -> None:
+    """ADR-2 end to end: logical point → display px → screenshot offset → luma.
+
+    The simulated frame has scale 2.0 and a 32×18pt display, so global point
+    (20, 4) lands at pixel (40, 8) — checkerboard block (5, 1) → white → 1.0.
+    """
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        capture = client.capture()
+    geometry = DisplayGeometry(
+        display_id=0,
+        frame=Rect(Point(0, 0), Size(32, 18)),
+        scale=2.0,
+    )
+    px = point_to_screenshot_offset(
+        Point(20, 4), geometry, Size(capture.width, capture.height)
+    )
+    grid = to_luma_grid(capture)
+    assert grid[int(px.y)][int(px.x)] == pytest.approx(1.0)
+
+
+def test_identical_captures_verify_unchanged() -> None:
+    """OBSERVE twice without any action → ORIENT must say nothing changed."""
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        first = client.capture()
+        second = client.capture()
+    assert first.data == second.data  # deterministic sensor
+    region = Rect(Point(0, 0), Size(16, 16))
+    verification = verify_capture_region(first, second, region)
+    assert verification.verdict.kind is ChangeKind.UNCHANGED
+
+
+def test_edited_region_verifies_changed_and_neighbour_stable() -> None:
+    """A real change in one block is detected; an untouched block is not."""
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        before = client.capture()
+        after = client.capture()
+
+    # Flip the top-left 16×16 block to black in the "after" frame. The
+    # checked region is 16×16 logical points = 32×32 physical pixels (scale
+    # 2.0), so a *smaller* flip (e.g. 8×8) covers only 6.25% of the region
+    # and sits under verdict()'s 15% change threshold — the change must be
+    # big enough to be a real, detectable edit.
+    mutated = bytearray(after.data)
+    for y in range(16):
+        base = y * after.width * 4
+        mutated[base : base + 16 * 4] = b"\x00\x00\x00\xff" * 16
+    after = ScreenCapture(
+        display_id=after.display_id,
+        width=after.width,
+        height=after.height,
+        scale=after.scale,
+        data=bytes(mutated),
+    )
+
+    # Region covering the flipped block plus untouched blocks: CHANGED.
+    changed = verify_capture_region(
+        before, after, Rect(Point(0, 0), Size(12, 12))
+    )
+    assert changed.verdict.kind is ChangeKind.CHANGED
+    assert changed.changed
+
+    # A region entirely outside the edit: still UNCHANGED.
+    stable = verify_capture_region(
+        before, after, Rect(Point(12, 0), Size(12, 12))
+    )
+    assert stable.verdict.kind is ChangeKind.UNCHANGED
+
+
+def test_to_logical_resolution_halves_retina_frame() -> None:
+    """A 2x Retina frame downscales to logical points with scale 1.0."""
+    from computeruse.vision.capture import to_logical_resolution
+
+    # 4x4 physical px (2x2 logical points), solid red.
+    capture = ScreenCapture(
+        display_id=0,
+        width=4,
+        height=4,
+        scale=2.0,
+        data=bytes([0, 0, 255, 255] * 16),
+    )
+    down = to_logical_resolution(capture)
+    assert down.width == 2
+    assert down.height == 2
+    assert down.scale == 1.0
+    assert len(down.data) == 2 * 2 * 4
+    # Box-averaged block is still solid red.
+    assert down.data[0:4] == bytes([0, 0, 255, 255])
+
+
+def test_to_logical_resolution_averages_block_content() -> None:
+    """Box sampling must blend the block, not take one corner sample."""
+    from computeruse.vision.capture import to_logical_resolution
+
+    # 2x2 px block: two black, two white pixels -> averaged grey (128).
+    data = bytes([0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255])
+    capture = ScreenCapture(display_id=0, width=2, height=2, scale=2.0, data=data)
+    down = to_logical_resolution(capture)
+    assert down.width == 1
+    assert down.height == 1
+    # 510 / 4 = 127 with integer (truncating) division.
+    assert down.data[0] == 127  # blue channel average
+    assert down.data[2] == 127  # red channel average
+
+
+def test_to_logical_resolution_passthrough_at_scale_one() -> None:
+    """A non-Retina frame must pass through untouched (identity)."""
+    from computeruse.vision.capture import to_logical_resolution
+
+    capture = ScreenCapture(
+        display_id=0,
+        width=3,
+        height=2,
+        scale=1.0,
+        data=bytes(3 * 2 * 4),
+    )
+    assert to_logical_resolution(capture) is capture
+
+
+def test_capture_to_png_encodes_valid_png() -> None:
+    from computeruse.vision.capture import capture_to_base64_png, capture_to_png
+
+    capture = ScreenCapture(
+        display_id=0,
+        width=4,
+        height=4,
+        scale=1.0,
+        data=bytes([255, 0, 0, 255] * 16),
+    )
+    png_bytes = capture_to_png(capture)
+    # Check PNG signature
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    # Check IEND chunk
+    assert png_bytes.endswith(b"IEND\xaeB`\x82")
+
+    b64_str = capture_to_base64_png(capture)
+    assert isinstance(b64_str, str)
+    assert len(b64_str) > 0

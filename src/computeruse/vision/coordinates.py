@@ -1,0 +1,161 @@
+"""Pure coordinate transformers for screen-space mapping (ADR-2 groundwork).
+
+macOS mixes three coordinate spaces, and mixing them up silently drops clicks
+onto the wrong pixel or wrong display:
+
+* **Logical display space (points)** — what CGEvent/Quartz coordinates use; the
+  global space has its origin at the *top-left of the primary display* and is
+  measured in points, not pixels.
+* **Physical pixel space (px)** — what a screen capture
+  (``CGDisplayCreateImage``) returns: one pixel per physical pixel, per display.
+* **Retina scaling** — a display with ``scale`` 2.0 maps each point to a 2x2
+  block of pixels; other displays (or a non-Retina mirror) can differ.
+
+This module is intentionally *pure* (Law 6): it performs no OS I/O and takes
+geometry as already-known inputs, so every transformation is unit-testable
+without a display. Fetching the real ``DisplayGeometry`` from macOS is the
+vision connector's job, not this module's.
+
+Origin convention: ``(0,0)`` is the top-left of the primary display, Y grows
+downward — matching Quartz global display coordinates.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Point:
+    """A 2D coordinate in some (caller-documented) unit space."""
+
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class Size:
+    """A rectangle's dimensions."""
+
+    width: float
+    height: float
+
+
+@dataclass(frozen=True)
+class Rect:
+    """An axis-aligned rectangle; origin is the top-left corner."""
+
+    origin: Point
+    size: Size
+
+
+@dataclass(frozen=True)
+class DisplayGeometry:
+    """Static geometry of one display, needed to map coordinates.
+
+    ``frame`` is the display's global rectangle in *logical points* (so its
+    ``origin`` carries the multi-display offset); ``scale`` is physical pixels
+    per logical point for that display (Retina == 2.0).
+    """
+
+    display_id: int
+    frame: Rect
+    scale: float
+
+    def __post_init__(self) -> None:
+        if self.scale <= 0:
+            raise ValueError(f"display scale must be positive, got {self.scale}")
+
+
+def point_in_frame(point: Point, frame: Rect) -> bool:
+    """True if the point falls inside the frame (inclusive of top/left edge)."""
+    origin = frame.origin
+    return (
+        origin.x <= point.x < origin.x + frame.size.width
+        and origin.y <= point.y < origin.y + frame.size.height
+    )
+
+
+def scale_point(point: Point, factor: float) -> Point:
+    """Multiply a point's components by a scalar (pure)."""
+    if factor <= 0:
+        raise ValueError(f"scale factor must be positive, got {factor}")
+    return Point(point.x * factor, point.y * factor)
+
+
+def point_to_pixels(point: Point, scale: float) -> Point:
+    """Convert a display-local logical point to physical pixels."""
+    return scale_point(point, scale)
+
+
+def pixels_to_point(px: Point, scale: float) -> Point:
+    """Convert display-local physical pixels back to logical points."""
+    return scale_point(px, 1.0 / scale)
+
+
+def display_origin_offset(display: DisplayGeometry) -> Point:
+    """The global point offset of a display's top-left corner (multi-display)."""
+    return display.frame.origin
+
+
+def global_point_to_display_px(
+    global_point: Point, display: DisplayGeometry
+) -> Point:
+    """Map a *global logical* point to that display's *pixel* coordinates.
+
+    The global logical point has its origin at the primary display's top-left;
+    each display sits at ``frame.origin`` within that global space. We subtract
+    the display offset (to get display-local points), then scale by the
+    display's Retina factor. Coordinates at or above the display's pixel
+    extent are *still returned* — use :func:`point_in_frame` (in points) or the
+    caller's pixel bounds to reject out-of-bounds picks before actuating.
+    """
+    local_px = (
+        global_point.x - display.frame.origin.x,
+        global_point.y - display.frame.origin.y,
+    )
+    return scale_point(Point(local_px[0], local_px[1]), display.scale)
+
+
+def display_px_to_global_point(
+    display_px: Point, display: DisplayGeometry
+) -> Point:
+    """Inverse of :func:`global_point_to_display_px` — pixels back to global."""
+    local_points = pixels_to_point(display_px, display.scale)
+    return Point(
+        local_points.x + display.frame.origin.x,
+        local_points.y + display.frame.origin.y,
+    )
+
+
+def point_to_screenshot_offset(
+    global_point: Point,
+    display: DisplayGeometry,
+    screenshot_size: Size,
+) -> Point:
+    """Convert a global point to an x/y offset in the display's screenshot.
+
+    Accepts only points that actually land on the target display; anything else
+    raises :class:`CoordinateOutOfBoundsError` so the caller never indexes into
+    another display's (or the wrong display's) pixel buffer by accident.
+    """
+    if not point_in_frame(global_point, display.frame):
+        raise CoordinateOutOfBoundsError(
+            f"point {global_point} outside display {display.display_id} frame"
+        )
+    px = global_point_to_display_px(global_point, display)
+    if px.x >= screenshot_size.width or px.y >= screenshot_size.height:
+        raise CoordinateOutOfBoundsError(
+            f"point {global_point} maps to pixels {px} outside screenshot "
+            f"{screenshot_size}"
+        )
+    return px
+
+
+class CoordinateOutOfBoundsError(ValueError):
+    """A coordinate landed outside its expected display or pixel bounds.
+
+    Law 6.3: this is a precise, catchable error (not a silent clamp) so the
+    OODA loop can surface *why* an action failed rather than quietly clicking
+    a neighbouring UI element.
+    """

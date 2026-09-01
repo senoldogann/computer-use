@@ -1,0 +1,368 @@
+"""Top-level agent composition — the product shell (Law 6: imperative).
+
+Every tier of the constitution exists as a tested component; this module is
+where they get bolted together into one runnable OODA loop:
+
+* **ADR-1** — the Rust driver is reached only through :class:`ActuationClient`
+  (separate process, Unix-socket JSON-RPC).
+* **ADR-2 / Law 2** — ``sensor`` is the driver's screen capture; the ORIENT
+  step verifies clicks visually.
+* **Law 5.1** — the autonomy guard maps a configured level onto every decision
+  before it becomes physical (``guarded``).
+* **Law 5.2** — the kill-switch is polled before every step.
+* **Law 3 + Law 4** — ``on_complete`` records an episode and distills a skill
+  from every terminal run; the recorded episode's signature feeds the
+  distiller's de-dup, so a re-run is never re-distilled.
+
+The caller brings only the *provider* (an LLM or a scripted fake); the agent
+brings everything else with sane defaults. ``run`` opens and closes the driver
+connection itself, so a caller never has to manage client lifecycles.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+LOGGER: Final = logging.getLogger(__name__)
+
+# AX grounding budget for the per-turn element summaries. Chrome's own chrome
+# UI (toolbar, omnibox, tab strip) is traversed before the web page, so a
+# small cap silently hides page-content elements (links, buttons) — the model
+# then guesses coordinates from the screenshot. 64 balances context budget
+# with covering the first actionable page elements.
+AX_MAX_ELEMENTS: Final[int] = 64
+
+from computeruse.memory.episodic import EpisodicStore, episode_from_trace
+from computeruse.memory.schemas import Episode, EpisodeOutcome
+from computeruse.memory.semantic import SemanticStore
+from computeruse.orchestrator.client import ActuationClient
+from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.schemas import Action, AgentTurn
+from computeruse.security.autonomy import (
+    AutonomyLevel,
+    PermissionDecision,
+    classify_risk,
+    decide_permission,
+)
+from computeruse.security.killswitch import KillSwitch
+from computeruse.skills.distiller import DistillResult, Trajectory, distill
+from computeruse.skills.registry import SkillRegistry
+from computeruse.skills.schemas import SkillDefinition, SkillSummary
+from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
+from computeruse.vision.ax import interactive_summaries
+from computeruse.vision.focus import FocusedWindow
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """Everything the agent needs to run one goal (caller-provided)."""
+
+    goal: str
+    provider: Callable[[WorkingState], AgentTurn]
+    socket_path: str
+    store_dir: Path
+    # Target application; None means "discover the frontmost app from the
+    # driver's focused-window probe at run start" (ADR-2 OBSERVE).
+    app: str | None = None
+    autonomy_level: AutonomyLevel = AutonomyLevel.GUARDED
+    confirm_handler: Callable[[AgentTurn], bool] | None = None
+    enable_visual_verification: bool = True
+    enable_vision: bool = True
+    # Law 5.2: when True (default), the driver's global kill-hotkey poll is
+    # composed into the effective kill-switch — Command+Shift+Escape on the
+    # host reclaims control even with no other channel configured.
+    enable_hotkey_killswitch: bool = True
+    # OBSERVE precondition: bring the *configured* app to the front before
+    # the loop. The caller sets this from --real; without it the agent acts
+    # on whatever window is frontmost (typically the launching terminal),
+    # which is almost never the app the goal means.
+    activate_app_on_start: bool = False
+    kill_switch: KillSwitch | None = None
+    max_steps: int = 100
+    connect_retries: int = 3
+    # Phase 3: when True, the goal is decomposed into sub-goals and the loop
+    # advances through them (a ``finish`` marks the current sub-goal done).
+    # Session checkpoints are written under ``store_dir/checkpoints`` so an
+    # interrupted run can be resumed with the same plan.
+    enable_planning: bool = False
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    """What one run produced: the final state, trajectory, and its learnings."""
+
+    state: WorkingState
+    # The app the run actually targeted — the configured name, or the
+    # frontmost app discovered when the config left it None.
+    app: str
+    trajectory: tuple[Action, ...]
+    distilled: DistillResult | None
+    episodes: tuple[Episode, ...]
+    skills: tuple[SkillSummary, ...]
+    # Law 4.2: the app knowledge strings the provider saw during the run.
+    knowledge: tuple[str, ...]
+    # Law 3.2: the skill mounted into the working context by RETRIEVE (if any).
+    skill: SkillDefinition | None = None
+
+
+def guarded(level: AutonomyLevel) -> Callable[[AgentTurn], PermissionDecision]:
+    """Build the VALIDATE-step guard for an autonomy level (pure).
+
+    The runner expects a decision -> permission callable; this closes the gap
+    between the pure risk/decision functions and that shape. ``turn`` is
+    contextually typed by the return annotation, keeping pyright strict happy.
+    """
+    return lambda turn: decide_permission(level, classify_risk(turn))
+
+
+class Agent:
+    """Imperative shell composing every tier into one run.
+
+    Constructed from an :class:`AgentConfig`; :meth:`run` opens the driver
+    connection, runs the OODA loop with the standard wiring, persists the
+    run's learnings, and returns an :class:`AgentResult`. One agent instance
+    is reusable across goals (each ``run`` is self-contained).
+    """
+
+    def __init__(self, config: AgentConfig) -> None:
+        if not config.goal.strip():
+            raise ValueError("goal must be a non-empty string")
+        self._config = config
+
+    def run(self) -> AgentResult:
+        episodes_store = EpisodicStore(self._config.store_dir / "episodes")
+        skills_registry = SkillRegistry(self._config.store_dir / "skills")
+        semantic_store = SemanticStore(self._config.store_dir / "semantic")
+        distilled: DistillResult | None = None
+
+        def on_complete(trajectory: Trajectory, outcome: EpisodeOutcome) -> None:
+            # Distill against known history FIRST, then remember — so the fresh
+            # run is novel, and any future identical run is a duplicate (Law
+            # 3.3 wired through Law 4 memory).
+            nonlocal distilled
+            distilled = distill(trajectory, episodes_store.known_signatures())
+            if distilled.kind == "skill" and distilled.definition is not None:
+                skills_registry.save(distilled.definition)
+            episodes_store.record(
+                episode_from_trace(
+                    app=trajectory.app,
+                    description=trajectory.description,
+                    steps=trajectory.steps,
+                    step_descriptions=trajectory.step_descriptions,
+                    outcome=outcome,
+                )
+            )
+            if outcome == "success":
+                from computeruse.memory.semantic import extract_facts_from_run
+
+                for fact in extract_facts_from_run(
+                    app=trajectory.app,
+                    steps=trajectory.steps,
+                    step_descriptions=trajectory.step_descriptions,
+                ):
+                    semantic_store.upsert(fact)
+
+        with ActuationClient(
+            self._config.socket_path,
+            connect_retries=self._config.connect_retries,
+        ) as client:
+            # OBSERVE precondition: when the caller named a specific app,
+            # bring it forward before any probe — otherwise the focused
+            # window (and every click) would target whatever was frontmost
+            # when the CLI launched. An explicit name that cannot be
+            # activated is a setup error, not a degradable probe: clicking
+            # blind on the wrong foreground app is worse than failing loudly
+            # (Law 6.3).
+            if self._config.activate_app_on_start and self._config.app is not None:
+                try:
+                    client.activate_app(self._config.app)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"cannot activate app {self._config.app!r}: {exc}"
+                    ) from exc
+            # ADR-2 OBSERVE: probe the frontmost app once at run start. It
+            # names the app (when none was configured) and yields the pid that
+            # feeds the per-turn AX grounding probe below — the agent knows
+            # what it is looking at without being told.
+            focused: FocusedWindow | None = None
+            try:
+                focused = client.focused_window()
+            except Exception as exc:  # noqa: BLE001 - discovery is best-effort
+                LOGGER.warning("focused-window probe failed: %s", exc)
+            # Fail-fast for the visual sensor: when ORIENT verification is
+            # requested but the driver cannot capture (e.g. Screen Recording
+            # consent missing), the loop would otherwise grind every click
+            # into a noisy retry against the same permanent condition. Probe
+            # once before the loop so the user gets one clean, actionable
+            # error instead of a page of repeated failures (Law 6.3).
+            if self._config.enable_visual_verification or self._config.enable_vision:
+                try:
+                    client.capture()
+                except Exception as exc:
+                    if self._config.enable_visual_verification:
+                        raise RuntimeError(
+                            "visual verification is enabled but the screen sensor is "
+                            f"unavailable: {exc}. Grant Screen Recording consent "
+                            "(System Settings > Privacy & Security > Screen & System "
+                            "Audio Recording), restart the driver, or rerun without "
+                            "--verify."
+                        ) from exc
+                    LOGGER.warning(
+                        "screen capture sensor is unavailable (%s). "
+                        "Grant Screen Recording consent (System Settings > Privacy & Security "
+                        "> Screen & System Audio Recording) for Vision.",
+                        exc,
+                    )
+            app = self._config.app
+            if app is None:
+                app = (focused.app_name if focused is not None else "") or "unknown"
+            # Law 4.2 RETRIEVE: the app's known preferences/patterns/shortcuts
+            # are staged into the working context as compact strings, so the
+            # provider makes decisions against what the system already knows
+            # about the (possibly just-discovered) app.
+            knowledge = tuple(
+                f"[{entry.app}] {entry.key}: {entry.value}"
+                for entry in semantic_store.search("", app=app)
+            )
+            # ADR-2 grounding: the AX tree of the frontmost app,
+            # summarized into the compact lines the provider sees every turn —
+            # so a decision's coordinates come from real elements, and the
+            # pixel pipeline still verifies whatever the provider picks.
+            def ax_probe() -> tuple[str, ...]:
+                current_pid: int | None = None
+                try:
+                    current_fw = client.focused_window()
+                    current_pid = current_fw.pid
+                except Exception:  # noqa: BLE001 - probe is best-effort fallback
+                    if focused is not None:
+                        current_pid = focused.pid
+                if current_pid is None or current_pid <= 0:
+                    return ()
+                summaries = interactive_summaries(
+                    client.ax_snapshot(pid=current_pid, max_depth=12),
+                    max_count=AX_MAX_ELEMENTS,
+                )
+                if len(summaries) >= AX_MAX_ELEMENTS:
+                    # The DFS budget was exhausted: page content deeper in the
+                    # tree is absent from this list. Say so explicitly so the
+                    # model grounds on the screenshot instead of assuming the
+                    # listed elements are the whole actionable surface.
+                    truncation_note = (
+                        "(AX grounding truncated at 64 elements — page content may "
+                        "be missing; rely on the screenshot for coordinates)"
+                    )
+                    summaries = summaries + (truncation_note,)
+                return summaries
+
+            def focused_text_value_probe() -> str | None:
+                """Value of the focused text field via the driver's AX tree."""
+                current_pid: int | None = None
+                try:
+                    current_fw = client.focused_window()
+                    current_pid = current_fw.pid
+                except Exception:  # noqa: BLE001 - probe is best-effort perception
+                    if focused is not None:
+                        current_pid = focused.pid
+                if current_pid is None or current_pid <= 0:
+                    return None
+                try:
+                    return _focused_text_value_from_tree(
+                        client.ax_snapshot(pid=current_pid, max_depth=12)
+                    )
+                except Exception:  # noqa: BLE001 - probe is best-effort perception
+                    return None
+
+            # Law 5.2: compose the driver's global kill-hotkey channel into
+            # whatever kill-switch the caller configured (e.g. the CLI's SIGINT
+            # catcher), OR-ing them. A dead hotkey RPC degrades to False with a
+            # warning — the other channels still protect the user.
+            kill_switch = self._config.kill_switch
+            if self._config.enable_hotkey_killswitch:
+
+                def hotkey_state() -> bool:
+                    try:
+                        return client.hotkey_state()
+                    except Exception as exc:  # noqa: BLE001 - a dead channel must not kill the run
+                        LOGGER.warning("driver kill-hotkey state unavailable: %s", exc)
+                        return False
+
+                kill_switch = (kill_switch or KillSwitch(monitor=None)).with_signal_predicate(
+                    hotkey_state
+                )
+            # Phase 3: hierarchical planning — decompose the goal into ordered
+            # sub-goals up front, and checkpoint each sub-goal transition so a
+            # killed run can resume from where it stopped (SessionCheckpoint).
+            plan = None
+            on_sub_goal_complete_cb: Callable[[GoalPlan], None] | None = None
+            if self._config.enable_planning:
+                from computeruse.orchestrator.planner import (
+                    GoalPlan,
+                    SessionCheckpoint,
+                    decompose_goal,
+                )
+
+                plan = decompose_goal(self._config.goal, app=app, knowledge=knowledge)
+                checkpoint_dir = self._config.store_dir / "checkpoints"
+
+                def _on_sub_goal_complete(current_plan: GoalPlan) -> None:
+                    # Persist the plan's progress so a later run can resume
+                    # from the in-progress sub-goal instead of restarting.
+                    steps_count = len(runner.executed_trajectory) if "runner" in locals() else 0
+                    SessionCheckpoint(
+                        session_id=current_plan.plan_id,
+                        plan=current_plan,
+                        completed_steps_count=steps_count,
+                    ).save(checkpoint_dir)
+
+                on_sub_goal_complete_cb = _on_sub_goal_complete
+
+            runner = OodaRunner(
+                provider=self._config.provider,
+                execute_physical=client.send,
+                kill_switch=kill_switch,
+                guard=guarded(self._config.autonomy_level),
+                confirm_handler=self._config.confirm_handler,
+                # One capture source, two consumers: ORIENT verification and
+                # the multimodal OBSERVE screenshot are the same frame stream.
+                sensor=(
+                    client.capture
+                    if (self._config.enable_visual_verification or self._config.enable_vision)
+                    else None
+                ),
+                verify_enabled=self._config.enable_visual_verification,
+                vision_enabled=self._config.enable_vision,
+                window_probe=client.focused_window,
+                ax_probe=ax_probe,
+                # ADR-2 semantic postcondition: the focused field's AXValue
+                # lets type_text/clipboard_paste be verified against what the
+                # user actually asked to insert (skipped when not determinable).
+                focused_text_value=focused_text_value_probe,
+                # Law 3 RETRIEVE: Stage 1 scans the (cached) summary index with
+                # the goal (scored matches — the runner's relevance gate reads
+                # ``RelevanceMatch.score``); Stage 2 loads the chosen skill's
+                # full definition.
+                skill_scan=lambda q: tuple(skills_registry.search(q)),
+                skill_loader=skills_registry.load,
+                app=app,
+                on_complete=on_complete,
+                knowledge=knowledge,
+                max_steps=self._config.max_steps,
+                plan=plan,
+                on_sub_goal_complete=on_sub_goal_complete_cb,
+            )
+            state = runner.run(self._config.goal)
+
+        return AgentResult(
+            state=state,
+            app=app,
+            trajectory=runner.executed_trajectory,
+            distilled=distilled,
+            episodes=tuple(episodes_store.episodes()),
+            skills=tuple(skills_registry.index()),
+            knowledge=knowledge,
+            skill=state.skill,
+        )

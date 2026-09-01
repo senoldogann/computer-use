@@ -1,0 +1,1836 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computer Use</title>
+<style>
+  :root {
+    --accent: #50A574;
+    --accent-hover: #449265;
+    --accent-glow: rgba(80, 165, 116, 0.40);
+    --accent-gradient: linear-gradient(135deg, #50A574 0%, #3a7d55 100%);
+    --bg-base: #141414;
+    --surface: #1A1A1A;
+    --surface-hover: #222222;
+    --surface-active: #282828;
+    --border: #262626;
+    --border-highlight: #333333;
+    --text-primary: #FFFFFF;
+    --text-secondary: #A4A4A4;
+    --text-tertiary: #6E6E6E;
+    --success: #50A574;
+    --success-glow: rgba(80, 165, 116, 0.40);
+    --warning: #ffd60a;
+    --warning-glow: rgba(255, 214, 10, 0.35);
+    --error: #ff453a;
+    --error-glow: rgba(255, 69, 58, 0.35);
+    --purple: #bf5af2;
+    --cyan: #5ac8fa;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-pill: 999px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
+  html, body { height: 100%; width: 100%; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+    color: var(--text-primary);
+    background: var(--bg-base);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    -webkit-user-select: none;
+    user-select: none;
+    position: relative;
+    border: 0.75px solid #242424;
+  }
+
+  body::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: var(--radius-lg);
+    pointer-events: none;
+    box-shadow:
+      inset 0 0 0 0.75px var(--border),
+      inset 0 1px 1px 0 rgba(255, 255, 255, 0.08);
+    z-index: 100;
+  }
+
+  input, textarea { -webkit-user-select: text; user-select: text; }
+
+  /* ----- Header Toolbar -------------------------------------------------- */
+  .toolbar {
+    position: relative;
+    flex: 0 0 auto;
+    height: 50px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    border-bottom: 0.5px solid var(--border);
+    background: #171717;
+    z-index: 10;
+  }
+
+  .brand-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .mark{
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    background: var(--accent-gradient);
+    box-shadow: 0 2px 8px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.4);
+    position: relative;
+  }
+
+  .mark svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .app-name {
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: -0.1px;
+    line-height: 1.2;
+    color: var(--text-primary);
+  }
+
+  .app-subtitle {
+    font-size: 9.5px;
+    color: var(--text-secondary);
+    line-height: 1.2;
+    margin-top: 1px;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: var(--radius-pill);
+    background: #1E1E1E;
+    border: 0.5px solid var(--border);
+  }
+
+  .status-dot {
+    width: 6.5px;
+    height: 6.5px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent-glow);
+  }
+
+  .status-dot.busy {
+    background: var(--warning);
+    box-shadow: 0 0 8px var(--warning-glow);
+    animation: statusPulse 1.2s infinite ease-in-out;
+  }
+
+  .status-dot.err {
+    background: var(--error);
+    box-shadow: 0 0 8px var(--error-glow);
+  }
+
+  @keyframes statusPulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.3); opacity: 0.6; }
+  }
+
+  .status-text {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .status-text.w { color: var(--warning); }
+  .status-text.e { color: var(--error); }
+
+  .icon-btn {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border: none;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .icon-btn:hover { background: var(--surface-hover); color: var(--text-primary); }
+
+  /* Toast Notification */
+  .toast-notification {
+    position: absolute;
+    top: 56px;
+    left: 50%;
+    transform: translateX(-50%) translateY(-10px);
+    background: #1B2920;
+    border: 0.5px solid rgba(80, 165, 116, 0.45);
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: var(--radius-pill);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6), 0 0 10px var(--accent-glow);
+    z-index: 999;
+    opacity: 0;
+    pointer-events: none;
+    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .toast-notification.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  /* Expand / Collapse Button */
+  .expand-btn {
+    background: rgba(80, 165, 116, 0.12);
+    color: var(--accent);
+    border: 0.5px solid rgba(80, 165, 116, 0.35);
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 650;
+    padding: 1.5px 5.5px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: 4px;
+    transition: all 0.15s ease;
+    vertical-align: baseline;
+  }
+  .expand-btn:hover {
+    background: rgba(80, 165, 116, 0.25);
+    border-color: var(--accent);
+  }
+
+  /* ----- Segmented Tab Bar ----------------------------------------------- */
+  .tab-bar {
+    flex: 0 0 auto;
+    display: flex;
+    background: #171717;
+    padding: 6px 14px;
+    gap: 6px;
+    border-bottom: 0.5px solid var(--border);
+  }
+
+  .tab-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .tab-btn svg { width: 13px; height: 13px; }
+  .tab-btn:hover { background: #202020; color: var(--text-primary); }
+  .tab-btn.active {
+    background: #242424;
+    color: #FFFFFF;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    border: 0.5px solid #333333;
+  }
+  .tab-btn.active svg { color: var(--accent); }
+
+  /* ----- Tab View Containers --------------------------------------------- */
+  .tab-pane {
+    display: none;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .tab-pane.active { display: flex; }
+
+  /* ----- Live Agent Feed Area -------------------------------------------- */
+  #log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 14px;
+    min-height: 0;
+    background: var(--bg-base);
+  }
+
+  #log::-webkit-scrollbar,
+  .tab-pane::-webkit-scrollbar { width: 5px; }
+  #log::-webkit-scrollbar-thumb,
+  .tab-pane::-webkit-scrollbar-thumb {
+    background: #2E2E2E;
+    border-radius: 3px;
+  }
+  #log::-webkit-scrollbar-track,
+  .tab-pane::-webkit-scrollbar-track { background: transparent; }
+
+  /* Empty State Hero */
+  .empty-state {
+    margin: auto 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 4px 0;
+    gap: 8px;
+    animation: fadeIn 0.3s ease-out;
+  }
+
+  .empty-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: #1B1B1B;
+    border: 0.5px solid var(--border);
+    display: grid;
+    place-items: center;
+    color: var(--accent);
+  }
+  .empty-icon svg { width: 17px; height: 17px; }
+
+  .empty-title {
+    font-size: 12.5px;
+    font-weight: 650;
+    color: var(--text-primary);
+  }
+
+  .empty-desc {
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    max-width: 280px;
+    line-height: 1.35;
+  }
+
+  .chips-container {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    width: 100%;
+    margin-top: 2px;
+  }
+
+  .chip {
+    padding: 6.5px 10px;
+    border-radius: 8px;
+    background: #1A1A1A;
+    border: 0.5px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 10.5px;
+    text-align: left;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .chip svg { width: 13px; height: 13px; flex-shrink: 0; color: var(--accent); }
+
+  .chip:hover {
+    background: #222222;
+    border-color: var(--border-highlight);
+    color: var(--text-primary);
+  }
+
+  /* ----- Tree / Branch Timeline Flow ------------------------------------- */
+  .tree-group {
+    position: relative;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    animation: fadeIn 0.2s ease-out;
+  }
+
+  .tree-group::before {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 8px;
+    bottom: 8px;
+    width: 1.5px;
+    background: rgba(80, 165, 116, 0.30);
+    border-radius: 1px;
+  }
+
+  .branch-node {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+  }
+
+  .branch-node::before {
+    content: "";
+    position: absolute;
+    left: -12px;
+    top: 11px;
+    width: 8px;
+    height: 8px;
+    border-left: 1.5px solid rgba(80, 165, 116, 0.30);
+    border-bottom: 1.5px solid rgba(80, 165, 116, 0.30);
+    border-bottom-left-radius: 4px;
+  }
+
+  .branch-node::after {
+    content: "";
+    position: absolute;
+    left: -13.5px;
+    top: 9.5px;
+    width: 4.5px;
+    height: 4.5px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 5px var(--accent-glow);
+  }
+
+  /* All branch dots use accent; only error gets red */
+  .branch-node.node-err::after { background: var(--error); box-shadow: 0 0 5px var(--error-glow); }
+
+  .step-card {
+    width: 100%;
+    background: #1A1A1A;
+    border: 0.5px solid var(--border);
+    border-radius: 7px;
+    padding: 5.5px 9px;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    transition: background 0.15s ease;
+  }
+  .step-card:hover {
+    background: #222222;
+    border-color: var(--border-highlight);
+  }
+
+  .card-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    width: 100%;
+  }
+
+  .obs-text {
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.4;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .card-tag {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .card-tag.thought { color: var(--accent); }
+  .card-tag.subgoal { color: var(--accent); }
+  .card-tag.action { color: var(--accent); }
+  .card-tag.verify { color: var(--accent); }
+  .card-tag.skill { color: var(--accent); }
+  .card-tag.err { color: var(--error); }
+  .card-tag svg { width: 11px; height: 11px; flex-shrink: 0; }
+
+  .badge-tool {
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 8.5px;
+    font-weight: 750;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    background: var(--accent);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .badge-tool svg { width: 9px; height: 9px; }
+  .badge-tool.click { background: var(--accent); }
+  .badge-tool.type { background: var(--accent); }
+  .badge-tool.paste { background: var(--accent); }
+  .badge-tool.hotkey { background: var(--accent); }
+  .badge-tool.app { background: var(--accent); }
+  .badge-tool.wait { background: #555555; }
+
+  .card-detail {
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+  .card-detail code {
+    font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+    font-size: 9.5px;
+    background: #111111;
+    padding: 1px 4px;
+    border-radius: 3px;
+    color: var(--accent);
+    border: 0.5px solid #282828;
+  }
+
+  /* Goal Card Header */
+  .card-goal {
+    border-radius: var(--radius-md);
+    background: #181C24;
+    border: 0.5px solid rgba(10, 132, 255, 0.35);
+    padding: 8px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .card-goal .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--cyan);
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+  .card-goal .card-header svg { width: 11px; height: 11px; }
+  .card-goal .card-body {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.35;
+  }
+
+  /* Summary Card Banner */
+  .card-summary {
+    border-radius: var(--radius-md);
+    background: #152219;
+    border: 0.5px solid rgba(80, 165, 116, 0.35);
+    padding: 8px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .summary-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .summary-title svg { width: 12px; height: 12px; }
+  .summary-text {
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    line-height: 1.35;
+  }
+
+  /* ----- Tab 2: History View --------------------------------------------- */
+  .history-container {
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .history-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 2px;
+  }
+
+  .search-input {
+    flex: 1;
+    background: #1B1B1B;
+    border: 0.5px solid #2B2B2B;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--text-primary);
+    outline: none;
+  }
+  .search-input::placeholder { color: #555555; }
+  .search-input:focus { border-color: var(--accent); }
+
+  .clear-history-btn {
+    padding: 6px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    background: #1F1F1F;
+    border: 0.5px solid var(--border);
+    color: var(--text-tertiary);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .clear-history-btn:hover { background: #282828; color: var(--error); }
+
+  .history-card {
+    background: #1A1A1A;
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: all 0.15s ease;
+  }
+  .history-card:hover {
+    background: #202020;
+    border-color: var(--border-highlight);
+  }
+
+  .history-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .history-goal {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.35;
+  }
+
+  .history-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-tertiary);
+  }
+
+  .history-tags {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tag-pill {
+    padding: 1.5px 6px;
+    border-radius: 4px;
+    font-size: 9px;
+    font-weight: 600;
+    background: #222222;
+    color: var(--text-secondary);
+    border: 0.5px solid #2D2D2D;
+  }
+  .tag-pill.success { background: rgba(80, 165, 116, 0.15); color: var(--accent); border-color: rgba(80, 165, 116, 0.3); }
+  .tag-pill.failed { background: rgba(255, 69, 58, 0.15); color: var(--error); border-color: rgba(255, 69, 58, 0.3); }
+
+  .rerun-btn {
+    padding: 3px 8px;
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 600;
+    background: rgba(80, 165, 116, 0.12);
+    border: 0.5px solid rgba(80, 165, 116, 0.35);
+    color: var(--accent);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.15s ease;
+  }
+  .rerun-btn:hover {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  /* ----- Tab 3: Analytics View ------------------------------------------- */
+  .analytics-container {
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .kpi-card {
+    background: #1A1A1A;
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .kpi-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-tertiary);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .kpi-label svg { width: 11px; height: 11px; color: var(--accent); }
+
+  .kpi-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.3px;
+    margin-top: 2px;
+  }
+
+  .section-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .section-title svg { width: 12px; height: 12px; color: var(--accent); }
+
+  .actions-list {
+    background: #1A1A1A;
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .action-metric-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    padding: 2px 0;
+  }
+  .action-metric-row:not(:last-child) { border-bottom: 0.5px solid #222222; padding-bottom: 5px; }
+
+  .action-metric-row strong { color: var(--text-primary); }
+
+  .skills-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .skill-card {
+    background: #1A1A1A;
+    border: 0.5px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 11px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .skill-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+  .skill-name { font-size: 11px; font-weight: 650; color: var(--text-primary); }
+  .skill-desc { font-size: 9.5px; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ----- Footer Compose Area -------------------------------------------- */
+  footer {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 9px 14px 11px;
+    border-top: 0.5px solid var(--border);
+    background: #171717;
+    position: relative;
+    z-index: 10;
+  }
+
+  .input-wrapper {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .input-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .input-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+
+  .app-toggle-btn {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--accent);
+    background: rgba(80, 165, 116, 0.12);
+    padding: 1.5px 6px;
+    border-radius: 4px;
+    border: 0.5px solid rgba(80, 165, 116, 0.3);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .app-toggle-btn:hover { background: rgba(80, 165, 116, 0.22); }
+
+  .app-field-container {
+    display: none;
+    animation: fadeIn 0.15s ease-out;
+  }
+
+  .text-input {
+    width: 100%;
+    background: #1B1B1B;
+    border: 0.5px solid #2B2B2B;
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 11.5px;
+    padding: 7.5px 10px;
+    outline: none;
+    transition: all 0.15s ease;
+  }
+
+  .text-input::placeholder { color: #585858; }
+  .text-input:focus {
+    background: #202020;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn {
+    border: none;
+    border-radius: var(--radius-md);
+    padding: 7.5px 11px;
+    font-size: 11.5px;
+    font-weight: 650;
+    cursor: pointer;
+    font-family: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    transition: all 0.15s ease;
+  }
+  .btn:active { transform: scale(0.98); }
+
+  .btn-primary {
+    flex: 1;
+    background: var(--accent-gradient);
+    color: #fff;
+    box-shadow: 0 2px 7px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.35);
+  }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+
+  .btn-stop {
+    background: #2A1717;
+    border: 0.5px solid #4A2323;
+    color: #ff5e55;
+    display: none;
+  }
+  .btn-stop:hover { background: #381D1D; }
+
+  .kbd-badge {
+    font-size: 9px;
+    background: rgba(255, 255, 255, 0.2);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-weight: 500;
+  }
+
+  .footer-legend {
+    font-size: 9px;
+    color: var(--text-tertiary);
+    text-align: center;
+    line-height: 1.3;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+  <!-- Header Bar -->
+  <header class="toolbar">
+    <div class="brand-group">
+      <div class="mark">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M5 4.5 20 12 5 19.5 8.6 12z" fill="#fff"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <div class="app-name">Computer Use</div>
+        <div class="app-subtitle">Autonomous OS Copilot</div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div class="status-pill">
+        <div class="status-dot ok" id="dot"></div>
+        <span class="status-text" id="stLabel">Idle</span>
+      </div>
+      <button class="icon-btn" id="copyBtn" title="Tüm logları kopyala / Copy session logs" onclick="copySessionLogs()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="clearBtn" title="Clear current session">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Toast Notification Overlay -->
+  <div id="toast" class="toast-notification">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <span id="toastMsg">Tüm loglar panoya kopyalandı!</span>
+  </div>
+
+  <!-- Segmented Navigation Tabs -->
+  <nav class="tab-bar">
+    <button class="tab-btn active" id="tabBtnLive" onclick="switchTab('live')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      <span>Live Agent</span>
+    </button>
+    <button class="tab-btn" id="tabBtnHistory" onclick="switchTab('history')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      <span>History</span>
+    </button>
+    <button class="tab-btn" id="tabBtnAnalytics" onclick="switchTab('analytics')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      <span>Analytics</span>
+    </button>
+  </nav>
+
+  <!-- TAB 1: Live Agent -->
+  <main class="tab-pane active" id="tabLive">
+    <div id="log" role="log" aria-live="polite">
+      <div class="empty-state" id="emptyHero">
+        <div class="empty-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+            <polyline points="2 17 12 22 22 17"/>
+            <polyline points="2 12 12 17 22 12"/>
+          </svg>
+        </div>
+        <div class="empty-title">Ready for Your Next Task</div>
+        <div class="empty-desc">Instruct the agent to perform multi-step physical computer use tasks on your Mac:</div>
+
+        <div class="chips-container">
+          <div class="chip" onclick="usePreset('Open Google Chrome, search for latest AI news and open the top article', 'Google Chrome')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <span>Chrome: Search & open latest AI news</span>
+          </div>
+          <div class="chip" onclick="usePreset('Open Notes and create a new project checklist', 'Notes')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            <span>Notes: Create a new project checklist</span>
+          </div>
+          <div class="chip" onclick="usePreset('Open Finder and navigate to Downloads folder', 'Finder')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span>Finder: Open Downloads directory</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- TAB 2: Task History -->
+  <section class="tab-pane" id="tabHistory">
+    <div class="history-container">
+      <div class="history-toolbar">
+        <input class="search-input" id="historySearch" placeholder="Filter recent tasks..." oninput="filterHistory()">
+        <button class="clear-history-btn" onclick="clearAllHistory()">Clear All</button>
+      </div>
+      <div id="historyList" style="display:flex;flex-direction:column;gap:6px;"></div>
+    </div>
+  </section>
+
+  <!-- TAB 3: Analytics & Skills -->
+  <section class="tab-pane" id="tabAnalytics">
+    <div class="analytics-container">
+      <div class="stats-grid">
+        <div class="kpi-card">
+          <div class="kpi-label">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            <span>Total Tasks</span>
+          </div>
+          <div class="kpi-value" id="kpiTotalTasks">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            <span>Success Rate</span>
+          </div>
+          <div class="kpi-value" id="kpiSuccessRate">100%</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 3 7 18 3-7 7-3L3 3z"/></svg>
+            <span>Total Actions</span>
+          </div>
+          <div class="kpi-value" id="kpiTotalActions">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            <span>Distilled Skills</span>
+          </div>
+          <div class="kpi-value" id="kpiSkillsCount">0</div>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span>Physical Actuations</span>
+      </div>
+      <div class="actions-list">
+        <div class="action-metric-row">
+          <span>🖱️ Mouse Clicks</span>
+          <strong id="statClicks">0</strong>
+        </div>
+        <div class="action-metric-row">
+          <span>⌨️ Text Typings</span>
+          <strong id="statTypes">0</strong>
+        </div>
+        <div class="action-metric-row">
+          <span>📋 Clipboard Pastes</span>
+          <strong id="statPastes">0</strong>
+        </div>
+        <div class="action-metric-row">
+          <span>⚡ Keyboard Hotkeys</span>
+          <strong id="statHotkeys">0</strong>
+        </div>
+        <div class="action-metric-row">
+          <span>📱 App Activations</span>
+          <strong id="statApps">0</strong>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        <span>Learned Skills Registry</span>
+      </div>
+      <div class="skills-list" id="skillsContainer"></div>
+    </div>
+  </section>
+
+  <!-- Footer Compose -->
+  <footer>
+    <div class="input-wrapper">
+      <div class="input-header">
+        <label class="input-label" for="goal">Instruction / Goal</label>
+        <button class="app-toggle-btn" id="appToggleBtn" type="button">+ Target App</button>
+      </div>
+      <input class="text-input" id="goal" autocomplete="off" spellcheck="false"
+        placeholder="e.g. open address bar, type github.com and hit Enter">
+    </div>
+
+    <div class="input-wrapper app-field-container" id="appField">
+      <div class="input-header">
+        <label class="input-label" for="app">Bring App to Front (Optional)</label>
+      </div>
+      <input class="text-input" id="app" autocomplete="off" spellcheck="false" placeholder="e.g. Google Chrome, Notes, Finder">
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="run">
+        <span>Run Agent</span>
+        <span class="kbd-badge">⌘⏎</span>
+      </button>
+      <button class="btn btn-stop" id="stop">
+        <span>Stop</span>
+      </button>
+    </div>
+
+    <div class="footer-legend">
+      Auto-grounds on frontmost app · Press <kbd>Cmd+Shift+Esc</kbd> anytime to reclaim control
+    </div>
+  </footer>
+
+<script>
+(function(){
+  var goal = document.getElementById("goal");
+  var app = document.getElementById("app");
+  var appField = document.getElementById("appField");
+  var appToggleBtn = document.getElementById("appToggleBtn");
+  var log = document.getElementById("log");
+  var emptyHero = document.getElementById("emptyHero");
+  var runBtn = document.getElementById("run");
+  var stopBtn = document.getElementById("stop");
+  var clearBtn = document.getElementById("clearBtn");
+  var dot = document.getElementById("dot");
+  var stLabel = document.getElementById("stLabel");
+
+  var currentTree = null;
+  var currentRunRecord = null;
+  var sessionEvents = [];
+
+  function recordSessionEvent(type, summary, raw) {
+    sessionEvents.push({
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      type: type,
+      summary: summary,
+      raw: raw || summary
+    });
+  }
+
+  // SVG Icon Templates
+  var ICONS = {
+    target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>',
+    brain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-2.04z"/></svg>',
+    eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+    click: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 3 7 18 3-7 7-3L3 3z"/><path d="m13 13 6 6"/></svg>',
+    move: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>',
+    type: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6.01" y2="8"/><line x1="10" y1="8" x2="10.01" y2="8"/><line x1="14" y1="8" x2="14.01" y2="8"/><line x1="18" y1="8" x2="18.01" y2="8"/><line x1="7" y1="16" x2="17" y2="16"/></svg>',
+    paste: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>',
+    hotkey: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/></svg>',
+    app: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
+    wait: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    verify: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+    skill: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+    summary: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
+    err: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    rerun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>'
+  };
+
+  /* ----- Tab Management -------------------------------------------------- */
+  window.switchTab = function(tabName){
+    document.querySelectorAll(".tab-btn").forEach(function(b){ b.classList.remove("active"); });
+    document.querySelectorAll(".tab-pane").forEach(function(p){ p.classList.remove("active"); });
+
+    if(tabName === "live"){
+      document.getElementById("tabBtnLive").classList.add("active");
+      document.getElementById("tabLive").classList.add("active");
+    } else if(tabName === "history"){
+      document.getElementById("tabBtnHistory").classList.add("active");
+      document.getElementById("tabHistory").classList.add("active");
+      renderHistoryView();
+    } else if(tabName === "analytics"){
+      document.getElementById("tabBtnAnalytics").classList.add("active");
+      document.getElementById("tabAnalytics").classList.add("active");
+      renderAnalyticsView();
+    }
+  };
+
+  /* ----- Storage & Task History ------------------------------------------ */
+  function getStoredHistory(){
+    try {
+      return JSON.parse(localStorage.getItem("cu_history") || "[]");
+    } catch(e) { return []; }
+  }
+
+  function saveHistory(list){
+    try {
+      localStorage.setItem("cu_history", JSON.stringify(list));
+    } catch(e){}
+  }
+
+  function getStoredSkills(){
+    try {
+      return JSON.parse(localStorage.getItem("cu_skills") || "[]");
+    } catch(e) { return []; }
+  }
+
+  function saveSkills(list){
+    try {
+      localStorage.setItem("cu_skills", JSON.stringify(list));
+    } catch(e){}
+  }
+
+  function getStoredTotals(){
+    try {
+      return JSON.parse(localStorage.getItem("cu_totals") || '{"clicks":0,"types":0,"pastes":0,"hotkeys":0,"apps":0}');
+    } catch(e) {
+      return { clicks: 0, types: 0, pastes: 0, hotkeys: 0, apps: 0 };
+    }
+  }
+
+  function saveStoredTotals(t){
+    try {
+      localStorage.setItem("cu_totals", JSON.stringify(t));
+    } catch(e){}
+  }
+
+  function post(m){
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bridge) {
+      window.webkit.messageHandlers.bridge.postMessage(JSON.stringify(m));
+    }
+  }
+
+  function setStatus(text, cls){
+    if (stLabel) stLabel.textContent = text;
+    if (stLabel) stLabel.className = "status-text " + (cls || "");
+  }
+
+  function toggleAppField(){
+    var isHidden = appField.style.display === "none" || !appField.style.display;
+    appField.style.display = isHidden ? "flex" : "none";
+    appToggleBtn.textContent = isHidden ? "− Target App" : "+ Target App";
+    if (isHidden) app.focus();
+  }
+
+  appToggleBtn.addEventListener("click", toggleAppField);
+
+  window.usePreset = function(promptText, appText){
+    goal.value = promptText;
+    if (appText) {
+      app.value = appText;
+      appField.style.display = "flex";
+      appToggleBtn.textContent = "− Target App";
+    }
+    window.switchTab("live");
+    goal.focus();
+  };
+
+  window.rerunTask = function(goalText, appText){
+    goal.value = goalText;
+    if(appText){
+      app.value = appText;
+      appField.style.display = "flex";
+      appToggleBtn.textContent = "− Target App";
+    }
+    window.switchTab("live");
+    submit();
+  };
+
+  function getActiveTree() {
+    if (!currentTree) {
+      currentTree = document.createElement("div");
+      currentTree.className = "tree-group";
+      log.appendChild(currentTree);
+    }
+    return currentTree;
+  }
+
+  function submit(){
+    var g = goal.value.trim();
+    if(!g) return;
+    var m = {cmd:"run", goal:g};
+    var a = app.value.trim();
+    if(a) m.app = a;
+
+    if (emptyHero) emptyHero.style.display = "none";
+    currentTree = null; // Start fresh tree spine
+    renderGoalCard(g, a);
+    setRunning(true);
+
+    currentRunRecord = {
+      id: Date.now(),
+      goal: g,
+      app: a || "Auto Focus",
+      startTime: Date.now(),
+      steps: 0,
+      status: "running",
+      actions: { clicks: 0, types: 0, pastes: 0, hotkeys: 0, apps: 0 }
+    };
+
+    post(m);
+  }
+
+  function stop(){
+    post({cmd:"stop"});
+    setRunning(false);
+    if(currentRunRecord && currentRunRecord.status === "running"){
+      finishCurrentRun("stopped");
+    }
+  }
+
+  function finishCurrentRun(statusVerdict){
+    if(!currentRunRecord) return;
+    currentRunRecord.status = statusVerdict || "success";
+    currentRunRecord.durationSec = Math.round((Date.now() - currentRunRecord.startTime) / 1000) || 1;
+    currentRunRecord.timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    currentRunRecord.dateStr = new Date().toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+    var hist = getStoredHistory();
+    hist.unshift(currentRunRecord);
+    if(hist.length > 50) hist.pop();
+    saveHistory(hist);
+    currentRunRecord = null;
+  }
+
+  goal.addEventListener("keydown", function(e){
+    if(e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      submit();
+    }
+    if(e.key === "ArrowDown" && !goal.value) {
+      e.preventDefault();
+      toggleAppField();
+    }
+  });
+
+  app.addEventListener("keydown", function(e){
+    if(e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      submit();
+    }
+  });
+
+  runBtn.addEventListener("click", submit);
+  stopBtn.addEventListener("click", stop);
+  clearBtn.addEventListener("click", function(){
+    window.Native.clear();
+  });
+
+  function showToast(msg) {
+    var toast = document.getElementById("toast");
+    var toastMsg = document.getElementById("toastMsg");
+    if (!toast) return;
+    if (toastMsg && msg) toastMsg.textContent = msg;
+    toast.classList.add("show");
+    setTimeout(function(){
+      toast.classList.remove("show");
+    }, 2200);
+  }
+
+  window.toggleExpand = function(id) {
+    var shortEl = document.getElementById(id + "_short");
+    var fullEl = document.getElementById(id + "_full");
+    var btn = document.getElementById(id + "_btn");
+    if (!shortEl || !fullEl || !btn) return;
+    var isFull = fullEl.style.display !== "none";
+    if (isFull) {
+      fullEl.style.display = "none";
+      shortEl.style.display = "inline";
+      btn.textContent = "+ Devamını göster";
+    } else {
+      shortEl.style.display = "none";
+      fullEl.style.display = "inline";
+      btn.textContent = "− Daralt";
+    }
+  };
+
+  window.copySessionLogs = function() {
+    if (sessionEvents.length === 0) {
+      showToast("Kopyalanacak log bulunamadı (Oturum boş)");
+      return;
+    }
+
+    var lines = [
+      "# 🤖 Computer Use Ajan Oturum Logları",
+      "**Tarih:** " + new Date().toLocaleString(),
+      "**Toplam Olay:** " + sessionEvents.length,
+      "",
+      "---",
+      "",
+      "### 📋 Adım Adım Çalışma Geçmişi:",
+      ""
+    ];
+
+    sessionEvents.forEach(function(ev, idx) {
+      var icon = "🔹";
+      if (ev.type === "Goal") icon = "🎯";
+      else if (ev.type === "Reasoning") icon = "🧠";
+      else if (ev.type === "Sub-goal") icon = "🎯";
+      else if (ev.type === "Observe") icon = "👁️";
+      else if (ev.type === "Action") icon = "🖱️";
+      else if (ev.type === "Verified") icon = "✅";
+      else if (ev.type === "Error") icon = "❌";
+      else if (ev.type === "Completed") icon = "🏆";
+
+      lines.push((idx + 1) + ". **[" + ev.time + "] " + icon + " " + ev.type + ":** " + ev.summary);
+      if (ev.raw && ev.raw !== ev.summary && ev.type !== "Reasoning" && ev.type !== "Observe") {
+        lines.push("   ```\n   " + ev.raw + "\n   ```");
+      }
+    });
+
+    var mdText = lines.join("\n");
+
+    // Copy to clipboard
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(mdText).then(function(){
+        showToast("📋 Tüm loglar panoya kopyalandı!");
+      }).catch(function(){
+        fallbackCopy(mdText);
+      });
+    } else {
+      fallbackCopy(mdText);
+    }
+
+    // Visual button feedback
+    var copyBtn = document.getElementById("copyBtn");
+    if (copyBtn) {
+      var origSvg = copyBtn.innerHTML;
+      copyBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+      setTimeout(function(){ copyBtn.innerHTML = origSvg; }, 2000);
+    }
+  };
+
+  function fallbackCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand("copy");
+      showToast("📋 Tüm loglar panoya kopyalandı!");
+    } catch(e) {
+      showToast("Kopyalama başarısız oldu");
+    }
+    document.body.removeChild(ta);
+  }
+
+  function escapeHtml(str) {
+    return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function renderGoalCard(goalText, appText) {
+    recordSessionEvent("Goal", (appText ? "[" + appText + "] " : "") + goalText);
+    var card = document.createElement("div");
+    card.className = "card-goal";
+    card.innerHTML = 
+      '<div class="card-header">' +
+        '<span style="display:flex;align-items:center;gap:4px">' + ICONS.target + ' Active Goal</span>' +
+        (appText ? '<span>' + escapeHtml(appText) + '</span>' : '<span>Auto Focus</span>') +
+      '</div>' +
+      '<div class="card-body">' + escapeHtml(goalText) + '</div>';
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function appendBranch(nodeType, contentHtml) {
+    var tree = getActiveTree();
+    var node = document.createElement("div");
+    node.className = "branch-node node-" + (nodeType || "action");
+    node.innerHTML = '<div class="step-card">' + contentHtml + '</div>';
+    tree.appendChild(node);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderThoughtCard(thoughtText) {
+    recordSessionEvent("Reasoning", thoughtText);
+    appendBranch("thought",
+      '<div class="card-tag thought">' + ICONS.brain + ' Reasoning</div>' +
+      '<div style="color:var(--text-secondary);font-size:11px;line-height:1.45;word-break:break-word;">' + escapeHtml(thoughtText) + '</div>'
+    );
+  }
+
+  function renderSubgoalCard(subgoalText) {
+    recordSessionEvent("Sub-goal", subgoalText);
+    appendBranch("subgoal",
+      '<div class="card-tag subgoal">' + ICONS.target + ' Sub-goal</div>' +
+      '<div style="font-weight:600;color:var(--text-primary);font-size:11.5px;word-break:break-word;">' + escapeHtml(subgoalText) + '</div>'
+    );
+  }
+
+  var obsCounter = 0;
+  function renderObserveCard(obsText) {
+    recordSessionEvent("Observe", obsText);
+    obsCounter++;
+    var obsId = "obs_" + obsCounter;
+    var htmlContent = "";
+
+    if (obsText.length > 85) {
+      var shortSnippet = escapeHtml(obsText.substring(0, 80)) + "...";
+      var fullSnippet = escapeHtml(obsText);
+      htmlContent = 
+        '<div class="card-row">' +
+          '<span class="card-tag" style="color:var(--accent);flex-shrink:0;margin-top:2px;">' + ICONS.eye + '</span>' +
+          '<div class="obs-text">' +
+            '<span id="' + obsId + '_short">' + shortSnippet + '</span>' +
+            '<span id="' + obsId + '_full" style="display:none;">' + fullSnippet + '</span>' +
+            '<button class="expand-btn" id="' + obsId + '_btn" onclick="toggleExpand(\'' + obsId + '\')">+ Devamını göster</button>' +
+          '</div>' +
+        '</div>';
+    } else {
+      htmlContent = 
+        '<div class="card-row">' +
+          '<span class="card-tag" style="color:var(--accent);flex-shrink:0;margin-top:2px;">' + ICONS.eye + '</span>' +
+          '<div class="obs-text">' + escapeHtml(obsText) + '</div>' +
+        '</div>';
+    }
+
+    appendBranch("observe", htmlContent);
+  }
+
+  function renderActionCard(stepLabel, actionPayload) {
+    var actType = "action";
+    var iconSvg = ICONS.click;
+    var detail = "";
+
+    if (currentRunRecord) currentRunRecord.steps++;
+
+    var totals = getStoredTotals();
+
+    try {
+      var parsed = typeof actionPayload === "string" ? JSON.parse(actionPayload) : actionPayload;
+      actType = parsed.type || "action";
+      
+      if (actType === "mouse_click") {
+        iconSvg = ICONS.click;
+        detail = "Click at <code>(" + parsed.x + ", " + parsed.y + ")</code> · " + (parsed.button || "left") + " (" + (parsed.click_count || 1) + "x)";
+        if(currentRunRecord) currentRunRecord.actions.clicks++;
+        totals.clicks++;
+      } else if (actType === "mouse_move") {
+        iconSvg = ICONS.move;
+        detail = "Move cursor to <code>(" + parsed.x + ", " + parsed.y + ")</code>";
+      } else if (actType === "type_text") {
+        iconSvg = ICONS.type;
+        detail = 'Type <code>"' + escapeHtml(parsed.text) + '"</code> (' + (parsed.wpm || 40) + ' WPM)';
+        if(currentRunRecord) currentRunRecord.actions.types++;
+        totals.types++;
+      } else if (actType === "clipboard_paste") {
+        iconSvg = ICONS.paste;
+        detail = 'Paste text <code>"' + escapeHtml(parsed.text) + '"</code>';
+        if(currentRunRecord) currentRunRecord.actions.pastes++;
+        totals.pastes++;
+      } else if (actType === "press_hotkey") {
+        iconSvg = ICONS.hotkey;
+        var mods = (parsed.modifiers || []).map(function(m){ return "[" + m + "]"; }).join("+");
+        detail = "Hotkey: <code>" + (mods ? mods + "+" : "") + "[" + parsed.key + "]</code>";
+        if(currentRunRecord) currentRunRecord.actions.hotkeys++;
+        totals.hotkeys++;
+      } else if (actType === "activate_app") {
+        iconSvg = ICONS.app;
+        detail = "Bring App to Front: <b>" + escapeHtml(parsed.app) + "</b>";
+        if(currentRunRecord) currentRunRecord.actions.apps++;
+        totals.apps++;
+      } else if (actType === "wait") {
+        iconSvg = ICONS.wait;
+        detail = "Wait " + parsed.duration_ms + "ms (" + escapeHtml(parsed.reason || "") + ")";
+      } else {
+        detail = JSON.stringify(parsed);
+      }
+    } catch(e) {
+      detail = escapeHtml(String(actionPayload));
+      // Fallback regex detection for action counts
+      var rawStr = String(actionPayload);
+      if (/mouse_click|click/i.test(rawStr)) { totals.clicks++; if(currentRunRecord) currentRunRecord.actions.clicks++; }
+      else if (/type_text|type/i.test(rawStr)) { totals.types++; if(currentRunRecord) currentRunRecord.actions.types++; }
+      else if (/clipboard_paste|paste/i.test(rawStr)) { totals.pastes++; if(currentRunRecord) currentRunRecord.actions.pastes++; }
+      else if (/press_hotkey|hotkey/i.test(rawStr)) { totals.hotkeys++; if(currentRunRecord) currentRunRecord.actions.hotkeys++; }
+      else if (/activate_app/i.test(rawStr)) { totals.apps++; if(currentRunRecord) currentRunRecord.actions.apps++; }
+    }
+
+    saveStoredTotals(totals);
+    recordSessionEvent("Action", stepLabel + ": " + actType + " " + detail.replace(/<[^>]+>/g, ""), String(actionPayload));
+
+    appendBranch("action",
+      '<div style="display:flex;align-items:center;justify-content:space-between">' +
+        '<span class="badge-tool ' + actType.replace("mouse_", "").replace("_text", "") + '">' + iconSvg + ' ' + actType.toUpperCase() + '</span>' +
+        '<span style="font-size:9.5px;color:var(--text-tertiary)">' + escapeHtml(stepLabel) + '</span>' +
+      '</div>' +
+      '<div class="card-detail" style="word-break:break-word;">' + detail + '</div>'
+    );
+  }
+
+  function renderVerificationCard(verifText) {
+    recordSessionEvent("Verified", verifText);
+    appendBranch("verify",
+      '<div class="card-tag verify">' + ICONS.verify + ' Verified State</div>' +
+      '<div style="color:var(--accent);font-size:10.5px;word-break:break-word;">' + escapeHtml(verifText) + '</div>'
+    );
+  }
+
+  function renderSkillCard(skillText) {
+    recordSessionEvent("Skill", skillText);
+    appendBranch("skill",
+      '<div class="card-tag skill">' + ICONS.skill + ' Skill Distilled</div>' +
+      '<div style="color:#ffe066;font-size:10.5px;word-break:break-word;">' + escapeHtml(skillText) + '</div>'
+    );
+
+    var skills = getStoredSkills();
+    if (!skills.some(function(s){ return s.name === skillText; })) {
+      skills.push({ name: skillText, time: Date.now() });
+      saveSkills(skills);
+    }
+  }
+
+  function renderSummaryCard(sumText) {
+    recordSessionEvent("Completed", sumText);
+    currentTree = null; // Close active tree group
+    var card = document.createElement("div");
+    card.className = "card-summary";
+    card.innerHTML = 
+      '<div class="summary-title">' + ICONS.summary + ' Execution Completed</div>' +
+      '<div class="summary-text" style="word-break:break-word;">' + escapeHtml(sumText) + '</div>';
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
+
+    finishCurrentRun("success");
+  }
+
+  function processIncomingLine(lineText, kind) {
+    if (emptyHero) emptyHero.style.display = "none";
+
+    var trimmed = lineText.trim();
+    if (!trimmed) return;
+
+    // Filter out raw CLI summary noise so it doesn't clutter the timeline
+    if (trimmed.startsWith("goal :") ||
+        trimmed.startsWith("app :") ||
+        trimmed.startsWith("activated :") ||
+        trimmed.startsWith("steps :") ||
+        trimmed.startsWith("episodes :") ||
+        trimmed.startsWith("skills :") ||
+        trimmed.startsWith("knowledge :") ||
+        trimmed.startsWith("starting agent:") ||
+        trimmed.startsWith("targeting app:") ||
+        trimmed.startsWith("— run finished") ||
+        trimmed.startsWith("— agent stopped")) {
+      return;
+    }
+
+    if (trimmed.startsWith("ooda thought:")) {
+      renderThoughtCard(trimmed.substring(13).trim());
+    } else if (trimmed.startsWith("ooda sub_goal:")) {
+      renderSubgoalCard(trimmed.substring(14).trim());
+    } else if (trimmed.startsWith("ooda observe:")) {
+      renderObserveCard(trimmed.substring(13).trim());
+    } else if (trimmed.startsWith("ooda step_")) {
+      var colonIdx = trimmed.indexOf(":", 5);
+      if (colonIdx > 0) {
+        var label = trimmed.substring(5, colonIdx).trim();
+        var payload = trimmed.substring(colonIdx + 1).trim();
+        renderActionCard(label, payload);
+      } else {
+        renderActionCard("step", trimmed);
+      }
+    } else if (trimmed.startsWith("ooda verified")) {
+      renderVerificationCard(trimmed.substring(5).trim());
+    } else if (trimmed.startsWith("ooda finished")) {
+      renderSummaryCard(trimmed.substring(5).trim());
+    } else if (trimmed.startsWith("distill     :")) {
+      var skillVal = trimmed.substring(13).trim();
+      if (skillVal && skillVal !== "too_short" && skillVal !== "skipped" && skillVal !== "none") {
+        renderSkillCard(skillVal);
+      }
+    } else if (kind === "err" || trimmed.includes("error:") || trimmed.includes("fatal:")) {
+      recordSessionEvent("Error", trimmed);
+      appendBranch("err",
+        '<div class="card-tag err">' + ICONS.err + ' Error</div>' +
+        '<div style="color:#ff9d97;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;word-break:break-word;overflow-wrap:anywhere;white-space:pre-wrap;">' + escapeHtml(trimmed) + '</div>'
+      );
+      if (currentRunRecord) finishCurrentRun("failed");
+    }
+  }
+
+  /* ----- History Renderer ------------------------------------------------ */
+  window.renderHistoryView = function(){
+    var container = document.getElementById("historyList");
+    var filter = (document.getElementById("historySearch").value || "").toLowerCase();
+    var hist = getStoredHistory();
+
+    container.innerHTML = "";
+
+    var filtered = hist.filter(function(h){
+      return !filter || h.goal.toLowerCase().includes(filter) || (h.app && h.app.toLowerCase().includes(filter));
+    });
+
+    if(filtered.length === 0){
+      container.innerHTML = '<div style="text-align:center;padding:30px 10px;color:var(--text-tertiary);font-size:11px;">No task history yet. Run a task to see it here!</div>';
+      return;
+    }
+
+    filtered.forEach(function(item){
+      var card = document.createElement("div");
+      card.className = "history-card";
+      var statusClass = item.status === "success" ? "success" : "failed";
+      var statusLabel = item.status === "success" ? "✓ Done" : (item.status === "stopped" ? "⏹ Stopped" : "✕ Error");
+
+      card.innerHTML = 
+        '<div class="history-header">' +
+          '<div class="history-goal">' + escapeHtml(item.goal) + '</div>' +
+          '<button class="rerun-btn" onclick="rerunTask(\'' + escapeHtml(item.goal).replace(/'/g, "\\'") + '\', \'' + (item.app !== "Auto Focus" ? escapeHtml(item.app).replace(/'/g, "\\'") : '') + '\')">' +
+            ICONS.rerun + ' Re-run' +
+          '</button>' +
+        '</div>' +
+        '<div class="history-meta">' +
+          '<div class="history-tags">' +
+            '<span class="tag-pill ' + statusClass + '">' + statusLabel + '</span>' +
+            '<span class="tag-pill">' + (item.steps || 0) + ' steps · ' + (item.durationSec || 1) + 's</span>' +
+            (item.app && item.app !== "Auto Focus" ? '<span class="tag-pill">' + escapeHtml(item.app) + '</span>' : '') +
+          '</div>' +
+          '<div>' + (item.dateStr || "") + ' ' + (item.timeStr || "") + '</div>' +
+        '</div>';
+
+      container.appendChild(card);
+    });
+  };
+
+  window.filterHistory = function(){
+    renderHistoryView();
+  };
+
+  window.clearAllHistory = function(){
+    saveHistory([]);
+    renderHistoryView();
+    if(window.renderAnalyticsView){
+      window.renderAnalyticsView();
+    }
+  };
+
+  /* ----- Analytics Renderer ---------------------------------------------- */
+  window.renderAnalyticsView = function(){
+    var hist = getStoredHistory();
+    var skills = getStoredSkills();
+
+    var totalTasks = hist.length;
+    var successCount = hist.filter(function(h){ return h.status === "success"; }).length;
+    var rate = totalTasks > 0 ? Math.round((successCount / totalTasks) * 100) : 100;
+
+    var totals = getStoredTotals();
+    var clicks = totals.clicks || 0,
+        types = totals.types || 0,
+        pastes = totals.pastes || 0,
+        hotkeys = totals.hotkeys || 0,
+        apps = totals.apps || 0;
+
+    var histClicks = 0, histTypes = 0, histPastes = 0, histHotkeys = 0, histApps = 0;
+    hist.forEach(function(h){
+      if(h.actions){
+        histClicks += (h.actions.clicks || 0);
+        histTypes += (h.actions.types || 0);
+        histPastes += (h.actions.pastes || 0);
+        histHotkeys += (h.actions.hotkeys || 0);
+        histApps += (h.actions.apps || 0);
+      }
+    });
+
+    clicks = Math.max(clicks, histClicks);
+    types = Math.max(types, histTypes);
+    pastes = Math.max(pastes, histPastes);
+    hotkeys = Math.max(hotkeys, histHotkeys);
+    apps = Math.max(apps, histApps);
+
+    var totalActions = clicks + types + pastes + hotkeys + apps;
+
+    document.getElementById("kpiTotalTasks").textContent = totalTasks;
+    document.getElementById("kpiSuccessRate").textContent = rate + "%";
+    document.getElementById("kpiTotalActions").textContent = totalActions;
+    document.getElementById("kpiSkillsCount").textContent = skills.length;
+
+    document.getElementById("statClicks").textContent = clicks;
+    document.getElementById("statTypes").textContent = types;
+    document.getElementById("statPastes").textContent = pastes;
+    document.getElementById("statHotkeys").textContent = hotkeys;
+    document.getElementById("statApps").textContent = apps;
+
+    var skillContainer = document.getElementById("skillsContainer");
+    skillContainer.innerHTML = "";
+
+    if(skills.length === 0){
+      skillContainer.innerHTML = '<div style="text-align:center;padding:15px;color:var(--text-tertiary);font-size:10.5px;">No skills synthesized yet. Complete multi-step workflows to automatically distill new skills!</div>';
+    } else {
+      skills.forEach(function(s){
+        var card = document.createElement("div");
+        card.className = "skill-card";
+        card.innerHTML = 
+          '<div class="skill-info">' +
+            '<div class="skill-name">✨ ' + escapeHtml(s.name) + '</div>' +
+            '<div class="skill-desc">Autonomous Reusable Workflow</div>' +
+          '</div>' +
+          '<button class="rerun-btn" onclick="rerunTask(\'Execute distilled skill: ' + escapeHtml(s.name).replace(/'/g, "\\'") + '\', \'\')">' +
+            '⚡ Run' +
+          '</button>';
+        skillContainer.appendChild(card);
+      });
+    }
+  };
+
+  function setRunning(r){
+    runBtn.disabled = r;
+    stopBtn.style.display = r ? "inline-flex" : "none";
+    dot.className = "status-dot " + (r ? "busy" : (window._lastErr ? "err" : "ok"));
+    setStatus(r ? "Running" : (window._lastErr ? "Error" : "Idle"), r ? "w" : (window._lastErr ? "e" : ""));
+  }
+
+  // Native -> JS API invoked by the Rust brush.
+  window.Native = {
+    log: function(t){ processIncomingLine(t, "out"); },
+    head: function(t){ renderGoalCard(t); },
+    dim: function(t){ processIncomingLine(t, "dim"); },
+    err: function(t){ processIncomingLine(t, "err"); window._lastErr=true; },
+    okk: function(t){ renderSummaryCard(t); },
+    summary: function(s){ renderSummaryCard(s); },
+    done: function(ok){ window._lastErr = !ok; setRunning(false); },
+    clear: function(){
+      log.innerHTML = "";
+      currentTree = null;
+      sessionEvents = [];
+      if (emptyHero) {
+        log.appendChild(emptyHero);
+        emptyHero.style.display = "flex";
+      }
+    }
+  };
+
+  post({cmd:"ready"});
+})();
+</script>
+</body>
+</html>
