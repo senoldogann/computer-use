@@ -29,26 +29,32 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
+all = [
     { name = "pyright" },
     { name = "pytest" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "pyright" },
+    { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pydantic", specifier = ">=2.7,<3.0" },
-    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pyright", marker = "extra == 'all'", specifier = ">=1.1.0" },
+    { name = "pytest", marker = "extra == 'all'", specifier = ">=8.0.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["all"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "ruff", specifier = ">=0.16.5" }]
+dev = [
+    { name = "pyright", specifier = ">=1.1.0" },
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "ruff", specifier = ">=0.16.5" },
+]
 
 [[package]]
 name = "iniconfig"
