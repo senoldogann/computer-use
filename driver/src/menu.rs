@@ -101,10 +101,18 @@ fn ensure_single_instance() {
         if let Ok(old_pid) = content.trim().parse::<i32>() {
             let my_pid = std::process::id() as i32;
             if old_pid != my_pid {
+                // Send SIGTERM and wait until the old process is truly gone.
+                // A simple 150ms sleep is not enough — macOS launchd or `open`
+                // can spawn a second instance before the first exits.
                 unsafe {
                     libc::kill(old_pid, libc::SIGTERM);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(150));
+                for _ in 0..50 {
+                    if unsafe { libc::kill(old_pid, 0) } != 0 {
+                        break; // Process is gone (ESRCH).
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
             }
         }
     }
