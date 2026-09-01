@@ -333,10 +333,18 @@ def fallback_screencapture_b64() -> str | None:
 
     macOS includes /usr/sbin/screencapture signed by Apple which can capture
     frames even when custom app bundles are not yet manually enabled in TCC.
+    On any other platform — or when the tool is not installed — there is no
+    fallback: returning None immediately (rather than spawning a subprocess
+    that cannot exist) keeps the OBSERVE path fast and the log clean.
     """
     import os
+    import shutil
     import subprocess
+    import sys
     import tempfile
+
+    if sys.platform != "darwin" or shutil.which("screencapture") is None:
+        return None
 
     tmp_path: str | None = None
     try:

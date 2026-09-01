@@ -24,8 +24,21 @@ from computeruse.orchestrator.loop import MaxStepsError, StuckLoopError, Working
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.security.autonomy import AutonomyLevel, PermissionDeniedError
 from computeruse.vision.ax import AXElement
+from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.focus import FocusedWindow
 from tests.smoke.conftest import DRIVER_BIN, REPO_ROOT, SOCKET_PATH
+
+# Deterministic 1x1 BGRA frame for fake sensor fakes: valid per
+# ScreenCapture's size validator, tiny, and hermetic — the OBSERVE path
+# must never fall back to the host's real screencapture (which would read
+# the actual screen on macOS and fail on Linux).
+_FAKE_FRAME = ScreenCapture(
+    display_id=0,
+    width=1,
+    height=1,
+    scale=1.0,
+    data=b"\x00\x00\x00\x00",
+)
 
 
 def _click(thought: str, sub_goal: str, x: int, y: int) -> AgentTurn:
@@ -302,8 +315,9 @@ class _RecordingClient:
             cursor_y=0.0,
         )
 
-    def capture(self) -> None:
+    def capture(self) -> ScreenCapture:
         self.calls.append("capture")
+        return _FAKE_FRAME
 
     def hotkey_state(self) -> bool:
         self.calls.append("hotkey_state")
