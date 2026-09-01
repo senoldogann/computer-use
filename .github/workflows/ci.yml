@@ -83,6 +83,12 @@ jobs:
       - name: Make driver binary executable
         run: chmod +x driver/target/debug/actuation-driver
 
+      - name: Verify driver binary
+        run: |
+          ls -la driver/target/debug/actuation-driver
+          file driver/target/debug/actuation-driver
+          driver/target/debug/actuation-driver --help 2>&1 || true
+
       - name: Ruff lint
         run: uv run ruff check .
 
@@ -90,4 +96,4 @@ jobs:
         run: uv run pyright
 
       - name: Pytest
-        run: uv run pytest -q
+        run: uv run pytest -q --tb=long -x
