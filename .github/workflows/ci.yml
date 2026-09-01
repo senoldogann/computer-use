@@ -87,7 +87,6 @@ jobs:
         run: |
           ls -la driver/target/debug/actuation-driver
           file driver/target/debug/actuation-driver
-          driver/target/debug/actuation-driver --help 2>&1 || true
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -96,4 +95,20 @@ jobs:
         run: uv run pyright
 
       - name: Pytest
-        run: uv run pytest -q --tb=long -x
+        run: |
+          set +e
+          uv run pytest -q --tb=short > /tmp/pytest.log 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::group::pytest tail"
+            tail -50 /tmp/pytest.log
+            echo "::endgroup::"
+            while IFS= read -r line; do
+              line=${line//%/\%25}
+              line=${line//$'\r'/}
+              echo "::error::PYTEST: $line"
+            done < <(tail -25 /tmp/pytest.log)
+          else
+            tail -5 /tmp/pytest.log
+          fi
+          exit $rc
