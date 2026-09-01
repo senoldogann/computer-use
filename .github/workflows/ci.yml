@@ -108,6 +108,10 @@ jobs:
               line=${line//$'\r'/}
               echo "::error::PYTEST: $line"
             done < <(tail -25 /tmp/pytest.log)
+            echo "## Pytest failure output" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -60 /tmp/pytest.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
           else
             tail -5 /tmp/pytest.log
           fi
