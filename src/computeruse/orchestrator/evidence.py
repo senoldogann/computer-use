@@ -253,6 +253,53 @@ def ui_state_evidence(before: tuple[str, ...], after: tuple[str, ...]) -> Eviden
     return Evidence.CONFIRMED if before != after else Evidence.CONTRADICTED
 
 
+def ax_surface_evidence(
+    before_elements: tuple[str, ...],
+    after_elements: tuple[str, ...],
+    before_content: tuple[str, ...],
+    after_content: tuple[str, ...],
+) -> Evidence:
+    """Did the accessibility surface change at all — structure or text (pure)?
+
+    Deliberately **one** witness over two signals, not two witnesses. Both are
+    read from the same AX snapshot, so treating them as independent would let a
+    single silent source cast two votes — and a failure needs only two
+    corroborating circumstantial witnesses to agree. That would make every
+    action the AX probe cannot see look decisively failed.
+
+    Either signal moving confirms: an element list changing catches focus
+    moves and appearing controls, and the content digest catches text that
+    changes without any structural change at all — a calculator display, a
+    status line, a result count. Only both being silent, with something to
+    compare, contradicts.
+    """
+    element_verdict = ui_state_evidence(before_elements, after_elements)
+    content_verdict = content_evidence(before_content, after_content)
+    if Evidence.CONFIRMED in (element_verdict, content_verdict):
+        return Evidence.CONFIRMED
+    if Evidence.CONTRADICTED in (element_verdict, content_verdict):
+        return Evidence.CONTRADICTED
+    return Evidence.INCONCLUSIVE
+
+
+def content_evidence(before: tuple[str, ...], after: tuple[str, ...]) -> Evidence:
+    """Did the app's visible text change between two observations (pure)?
+
+    The witness for the most common effect an action has and the one every
+    other witness misses. A calculator display updating, a status line, a
+    result count, a page title, a field's contents — none of it moves the
+    interactive element list, and a few glyphs redrawing is far below the
+    fraction-of-pixels threshold a pixel diff needs to call a region changed.
+
+    Circumstantial: text can change without the agent touching anything (a
+    clock, a progress counter), so on its own an unchanged digest is weak
+    evidence of a miss — but a *changed* one is a strong sign the action landed.
+    """
+    if not before and not after:
+        return Evidence.INCONCLUSIVE
+    return Evidence.CONFIRMED if before != after else Evidence.CONTRADICTED
+
+
 def target_focus_evidence(target: Point | None, summaries: tuple[str, ...]) -> Evidence:
     """Does the element you aimed at now hold keyboard focus (pure)?
 
@@ -333,18 +380,37 @@ def verification_diagnostic(
     action_type: str,
     expectation: ActionExpectation,
     reports: tuple[tuple[str, Evidence], ...],
+    element_at_target: str | None = None,
 ) -> str:
     """The LLM-facing message when every witness contradicted an action (pure).
 
     Names each witness and what it saw, so the model can tell "the pixels did
     not move" from "the app never came to the front" — different problems with
     different fixes.
+
+    ``element_at_target`` is the accessibility summary of whatever sits under
+    the click, and it changes the diagnosis completely. "Nothing changed" has
+    two causes that need opposite responses: the click missed, or the click
+    landed on a control that was already in the state being asked for. Telling
+    a model that hit the right button to "re-derive the target" sends it
+    hunting coordinates that were correct — observed on Calculator, where
+    pressing Clear on an already-clear display and pressing Equals on an
+    already-computed result were both reported as misses, and the agent spent
+    four steps chasing a coordinate problem it did not have.
     """
     where = ""
     if expectation.region_point is not None:
         point = expectation.region_point
         where = f" at ({point.x:.0f},{point.y:.0f})"
     detail = ", ".join(f"{name}={verdict.value}" for name, verdict in reports)
+    if element_at_target is not None:
+        return (
+            f"action verification failed: {action_type}{where} landed on "
+            f"{element_at_target} but produced no observable change ({detail}); "
+            "the coordinate was right, so do NOT re-aim. Either that control "
+            "is already in the state you want — check whether the goal is "
+            "satisfied and move on — or it needs a different interaction"
+        )
     return (
         f"action verification failed: {action_type}{where} produced no "
         f"observable change ({detail}); the action did not land where you "

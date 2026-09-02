@@ -340,6 +340,45 @@ def summaries_to_image_space(
     return tuple(pattern.sub(rescale, line) for line in summaries)
 
 
+#: Cap on the content digest. Bounds the comparison on a text-heavy page
+#: without losing the signal: any real change moves one of the first entries.
+CONTENT_DIGEST_MAX: Final[int] = 200
+
+
+def content_digest(root: AXElement) -> tuple[str, ...]:
+    """The app's visible text content, for change detection only (pure).
+
+    Never shown to the model — this exists because the two witnesses that were
+    supposed to notice an action's effect are both blind to the most common
+    effect there is: text changing.
+
+    Measured on Calculator, three real button presses in a row: the interactive
+    element list was identical every time (a display is a ``StaticText``, not
+    an interactive role, so it is not in that list at all), and the pixel diff
+    was unchanged every time — even across the whole window, because a few
+    digits redrawing is far below the 15%-of-pixels threshold that keeps a
+    cursor blink from reading as a change. The agent pressed the right buttons,
+    watched the display update, and was told it had missed. Comparing the text
+    itself sees all three presses.
+
+    Roles are included so a value moving between elements still registers, and
+    the list is ordered by traversal so the comparison is deterministic.
+    """
+    digest: list[str] = []
+
+    def walk(node: AXElement) -> None:
+        if len(digest) >= CONTENT_DIGEST_MAX:
+            return
+        text = node.value or node.title
+        if text:
+            digest.append(f"{node.role}={text}")
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return tuple(digest)
+
+
 def open_tabs_from_tree(root: AXElement) -> tuple[str, ...]:
     """Extract open browser tab titles from the AX tree (pure).
 

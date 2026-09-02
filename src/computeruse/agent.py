@@ -60,8 +60,12 @@ from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
 from computeruse.skills.registry import SkillRegistry
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
+from computeruse.vision.ax import (
+    content_digest,
+    interactive_summaries,
+    open_tabs_from_tree,
+)
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
-from computeruse.vision.ax import interactive_summaries, open_tabs_from_tree
 from computeruse.vision.focus import FocusedWindow
 
 
@@ -325,6 +329,7 @@ class Agent:
                 return AxProbeResult(
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),
+                    content=content_digest(tree),
                 )
 
             def focused_text_value_probe() -> str | None:

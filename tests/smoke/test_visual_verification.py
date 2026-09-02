@@ -25,11 +25,13 @@ import pytest
 from computeruse.orchestrator.evidence import (
     Evidence,
     app_evidence,
+    ax_surface_evidence,
     combine,
     expectation_for,
     target_focus_evidence,
     text_evidence,
     ui_state_evidence,
+    verification_diagnostic,
 )
 from computeruse.orchestrator.failures import (
     FailureKind,
@@ -865,3 +867,104 @@ def test_summary_lookup_prefers_the_most_specific_element() -> None:
     assert covering is not None and "Reload" in covering
     assert summary_covering(summaries, 120, 65) is not None
     assert summary_covering(summaries, 5000, 5000) is None
+
+
+# --- the AX surface witness --------------------------------------------------
+
+
+def test_text_change_alone_confirms_an_action() -> None:
+    """The most common effect an action has, and the one nothing else saw.
+
+    Measured on Calculator, three real button presses in a row: the interactive
+    element list was identical every time (a display is a StaticText, not an
+    interactive role), and the pixel diff was unchanged every time — even over
+    the whole window, because a few digits redrawing is far below the
+    fraction-of-pixels threshold. The agent pressed the right buttons, watched
+    the display update, and was told it had missed.
+    """
+    elements = ('Button "7" at (345,664) 48x48',)
+    assert (
+        ax_surface_evidence(
+            elements, elements, ("StaticText=47",), ("StaticText=478",)
+        )
+        is Evidence.CONFIRMED
+    )
+
+
+def test_structure_change_alone_still_confirms() -> None:
+    """A focus move with no text change must keep working as before."""
+    before = ('Button "Reload" at (254,80) 44x24',)
+    after = ('Button "Reload" at (254,80) 44x24 (focused)',)
+    content = ("StaticText=unchanged",)
+    assert ax_surface_evidence(before, after, content, content) is Evidence.CONFIRMED
+
+
+def test_both_signals_silent_contradicts() -> None:
+    same_elements = ('Button "7" at (345,664) 48x48',)
+    same_content = ("StaticText=47",)
+    assert (
+        ax_surface_evidence(same_elements, same_elements, same_content, same_content)
+        is Evidence.CONTRADICTED
+    )
+
+
+def test_an_unavailable_probe_never_fails_an_action() -> None:
+    """No data is silence, not a denial — the loop's central rule."""
+    assert ax_surface_evidence((), (), (), ()) is Evidence.INCONCLUSIVE
+
+
+def test_the_two_ax_signals_never_vote_twice() -> None:
+    """They read one snapshot; counting them separately would fail blind runs.
+
+    A failure needs two corroborating circumstantial witnesses. If the element
+    list and the content digest each cast a vote, a single silent AX probe
+    would supply both, and every action it cannot observe would look decisively
+    failed rather than unverified.
+    """
+    elements = ('Button "OK" at (20,10) 20x12',)
+    content = ("StaticText=idle",)
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(MouseClick(type="mouse_click", x=30, y=16))
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _action: None,
+        # No pixel witness at all, so AX is the ONLY circumstantial voice: if
+        # its two signals counted separately they would convict on their own.
+        sensor=None,
+        verify_enabled=True,
+        ax_probe=lambda: AxProbeResult(summaries=elements, content=content),
+        max_steps=5,
+    )
+    final = runner.run(goal="press OK")
+    assert final.last_error is None
+    assert "step_0:mouse_click" in final.completed_steps
+
+
+def test_diagnosis_distinguishes_a_miss_from_an_idempotent_hit() -> None:
+    """Same witnesses, opposite advice — because the causes are opposite.
+
+    "Nothing changed" happens both when a click misses and when it lands on a
+    control already in the state being asked for. Observed on Calculator:
+    pressing Clear on an already-clear display and Equals on an already-computed
+    result were both reported as misses, and the agent spent four steps chasing
+    a coordinate problem it did not have.
+    """
+    expectation = expectation_for(MouseClick(type="mouse_click", x=397, y=611))
+    reports = (("ax_state", Evidence.CONTRADICTED), ("pixels", Evidence.CONTRADICTED))
+
+    missed = verification_diagnostic("mouse_click", expectation, reports, None)
+    assert "did not land where you aimed" in missed
+    assert "re-derive" in missed
+
+    hit = verification_diagnostic(
+        "mouse_click", expectation, reports, 'Button "Tümünü Sil" at (399,610) 48x48'
+    )
+    assert "Tümünü Sil" in hit
+    assert "do NOT re-aim" in hit
+    assert "already in the state you want" in hit
+    # The advice must not contradict itself.
+    assert "re-derive" not in hit
