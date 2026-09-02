@@ -215,7 +215,7 @@ class AutonomyPolicy:
     routine_markers: frozenset[str] = _ROUTINE_MARKERS
     typed_commands: frozenset[str] = _TYPED_COMMANDS
 
-    def classify(self, turn: AgentTurn) -> Risk:
+    def classify(self, turn: AgentTurn, target_label: str | None = None) -> Risk:
         """Classify a single model decision into a risk level (pure).
 
         Orchestrator-internal actions are always :attr:`Risk.NONE`. ``finish``,
@@ -228,10 +228,21 @@ class AutonomyPolicy:
         waiting for a human to approve the word "confirm" (observed in a live
         run). The markers describe UI controls the agent might press, not the
         English the model narrates in.
+
+        ``target_label`` is the accessibility title of the control actually
+        under the pointer, and it is what makes the guard a safety mechanism
+        rather than an honesty check on the model's narration. The markers name
+        UI controls, so reading them off the model's ``sub_goal`` asked the
+        model to declare its own risk: a click on a button titled "Delete
+        account" described as "continue with the flow" classified as
+        :attr:`Risk.NONE` and ran unattended. The screen does not get a vote on
+        how it is described.
         """
         if isinstance(turn.action, (Finish, Wait, LoadSkill)):
             return Risk.NONE
         subject = turn.sub_goal.lower()
+        if target_label:
+            subject = f"{subject} {target_label}".lower()
         if isinstance(turn.action, PressHotkey):
             subject = f"{subject} {turn.action.key}".lower()
         elif isinstance(turn.action, (TypeText, ClipboardPaste)):
@@ -253,11 +264,22 @@ class AutonomyPolicy:
         return Risk.NONE
 
 
-def classify_risk(turn: AgentTurn, policy: AutonomyPolicy | None = None) -> Risk:
-    """Pure: return the risk of a decision under the given (or default) policy."""
+def classify_risk(
+    turn: AgentTurn,
+    *,
+    target_label: str | None = None,
+    policy: AutonomyPolicy | None = None,
+) -> Risk:
+    """Pure: return the risk of a decision under the given (or default) policy.
+
+    ``target_label`` is the accessibility title of the control the action
+    targets, when the caller could determine one — see
+    :meth:`AutonomyPolicy.classify` for why the model's prose alone is not a
+    safe input to this decision.
+    """
     if policy is None:
         policy = AutonomyPolicy()
-    return policy.classify(turn)
+    return policy.classify(turn, target_label)
 
 
 def decide_permission(level: AutonomyLevel, risk: Risk) -> PermissionDecision:

@@ -84,7 +84,11 @@ from computeruse.security.permissions import (
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
-from computeruse.vision.ax import summaries_to_image_space, summary_covering
+from computeruse.vision.ax import (
+    summaries_to_image_space,
+    summary_covering,
+    summary_label,
+)
 from computeruse.vision.capture import (
     SCREENSHOT_MAP_MAX_SIDE,
     ScreenCapture,
@@ -424,6 +428,33 @@ def target_point_of(action: Action) -> Point | None:
     return None
 
 
+def target_element_label(action: Action, observation: Observation) -> str | None:
+    """The title of the accessibility element a positional action targets (pure).
+
+    This is what turns the autonomy guard from a check on the model's narration
+    into a check on the machine: a click lands on a control with a name, and
+    that name is the honest description of what the click will do.
+
+    Reads ``raw_ui_elements`` deliberately — the summaries in *logical screen
+    points*. The guard runs after the coordinate gate, so the action's
+    coordinates are screen points too; looking them up in the image-space list
+    (``ui_elements``, roughly 3x smaller numbers) would return whichever
+    unrelated element happened to sit at the scaled-down position, which is a
+    safety check answering about the wrong button.
+
+    ``None`` for non-positional actions and whenever no summarised element
+    covers the point — the element list is budget-capped, so absence is "no
+    information", never "nothing is there".
+    """
+    target = target_point_of(action)
+    if target is None:
+        return None
+    line = summary_covering(observation.raw_ui_elements, target.x, target.y)
+    if line is None:
+        return None
+    return summary_label(line)
+
+
 def verification_region(target: Point, *, size: float = 48.0) -> Rect:
     """A square region (logical points) centred on an action's target.
 
@@ -624,7 +655,10 @@ class OodaRunner:
     ) = None
     skill_loader: Callable[[str], SkillDefinition] | None = None
     kill_switch: KillSwitch | None = None
-    guard: Callable[[AgentTurn], PermissionDecision] | None = None
+    # VALIDATE (Law 5.1). Takes the observation as well as the decision:
+    # a safety verdict about a click has to be able to look at what is
+    # under the pointer, not only at how the model described the click.
+    guard: Callable[[AgentTurn, Observation], PermissionDecision] | None = None
     confirm_handler: Callable[[AgentTurn], bool] | None = None
     sensor: Callable[[], ScreenCapture] | None = None
     # Whether ``sensor`` is used for VERIFY (pre/post action pixel comparison).
@@ -1294,10 +1328,16 @@ class OodaRunner:
         A ``BLOCK`` means the policy forbids it outright (e.g. destructive at
         Level 0), and a ``CONFIRM`` means a guarded/supervised human must sign
         off first. Both raise before the physical layer is ever reached.
+
+        The current observation goes to the guard with the decision so the
+        policy can classify the control the action actually targets. By this
+        point the coordinate gate has already converted the model's image-space
+        coordinates into screen points, which is the space
+        :func:`target_element_label` reads its summaries in.
         """
         if self.guard is None:
             return
-        verdict = self.guard(decision)
+        verdict = self.guard(decision, self._observation)
         if verdict is PermissionDecision.BLOCK:
             raise PermissionDeniedError(
                 f"action {decision.action.type!r} for goal {decision.sub_goal!r} "

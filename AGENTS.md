@@ -161,7 +161,9 @@ not?).
 [4. DECIDE]    ──► LLM generates structured Thought + Sub-goal + Action (or a small ordered batch).
        │
 [5. VALIDATE]  ──► Four gates, all before any physical effect: the Permission Guard (Autonomy
-                   Level + destructive-action check), the coordinate gate (image space → screen
+                   Level + destructive-action check, classified from the accessibility title of
+                   the control under the pointer — not from how the model described the click),
+                   the coordinate gate (image space → screen
                    points via the snapshot's ScreenMap), the fail-closed display-bounds check, and
                    the positional gate — one live window read that catches both focus drift (the
                    target app no longer owns the screen) and decision staleness (the host moved on

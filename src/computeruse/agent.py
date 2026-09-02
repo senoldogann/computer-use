@@ -45,8 +45,10 @@ from computeruse.orchestrator.loop import (
     SETTLE_INTERVAL_S,
     SETTLE_MAX_POLLS,
     AxProbeResult,
+    Observation,
     OodaRunner,
     WorkingState,
+    target_element_label,
 )
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
@@ -137,14 +139,28 @@ class AgentResult:
     skill: SkillDefinition | None = None
 
 
-def guarded(level: AutonomyLevel) -> Callable[[AgentTurn], PermissionDecision]:
+def guarded(
+    level: AutonomyLevel,
+) -> Callable[[AgentTurn, Observation], PermissionDecision]:
     """Build the VALIDATE-step guard for an autonomy level (pure).
 
-    The runner expects a decision -> permission callable; this closes the gap
-    between the pure risk/decision functions and that shape. ``turn`` is
-    contextually typed by the return annotation, keeping pyright strict happy.
+    The guard is handed the decision *and* the observation it was made against,
+    because the two sources disagree about what an action does and only one of
+    them is trustworthy. The model's ``sub_goal`` is its own account ("continue
+    with the flow"); the accessibility title under the pointer is the machine's
+    ("Delete account"). Classifying the control the click will actually hit is
+    what makes Law 5.1 a guard rather than a request for the model's opinion.
     """
-    return lambda turn: decide_permission(level, classify_risk(turn))
+
+    def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
+        return decide_permission(
+            level,
+            classify_risk(
+                turn, target_label=target_element_label(turn.action, observation)
+            ),
+        )
+
+    return guard
 
 
 class Agent:

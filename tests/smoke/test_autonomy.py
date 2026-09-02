@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from dataclasses import replace
+
+import pytest
+
+from computeruse.agent import guarded
+from computeruse.orchestrator.loop import (
+    EMPTY_OBSERVATION,
+    AxProbeResult,
+    Observation,
+    OodaRunner,
+    WorkingState,
+    target_element_label,
+)
 from computeruse.orchestrator.schemas import (
     AgentTurn,
     ClipboardPaste,
     Finish,
     LoadSkill,
     MouseClick,
+    PressHotkey,
     Wait,
 )
 from computeruse.security.autonomy import (
@@ -105,7 +118,7 @@ def test_ooda_runner_blocks_destructive_via_guard() -> None:
         decide_permission,
     )
 
-    def guard(turn: AgentTurn) -> PermissionDecision:
+    def guard(turn: AgentTurn, _observation: Observation) -> PermissionDecision:
         return decide_permission(AutonomyLevel.GUARDED, classify_risk(turn))
 
     runner = OodaRunner(
@@ -183,3 +196,102 @@ def test_physical_actions_keep_their_marker_classification() -> None:
         decide_permission(AutonomyLevel.FULL, classify_risk(destructive))
         is PermissionDecision.CONFIRM
     )
+
+
+# ── The guard reads the screen, not the model's narration ──────────────────
+
+
+def _observation(
+    *, raw: tuple[str, ...] = (), image: tuple[str, ...] = ()
+) -> Observation:
+    """An observation carrying only the two element lists the guard reads."""
+    return replace(EMPTY_OBSERVATION, raw_ui_elements=raw, ui_elements=image)
+
+
+def _click_turn(x: int, y: int, sub_goal: str) -> AgentTurn:
+    return AgentTurn(
+        thought="proceeding",
+        sub_goal=sub_goal,
+        action=MouseClick(type="mouse_click", x=x, y=y),
+    )
+
+
+def test_click_risk_comes_from_the_button_not_the_narration() -> None:
+    """A blandly-described click on a destructive control is still destructive."""
+    turn = _click_turn(100, 200, sub_goal="continue with the flow")
+    assert classify_risk(turn) is Risk.NONE, "narration alone says nothing"
+    observation = _observation(raw=('Button "Hesabı Sil" at (100,200) 80x24',))
+    label = target_element_label(turn.action, observation)
+    assert label == "Hesabı Sil"
+    assert classify_risk(turn, target_label=label) is Risk.DESTRUCTIVE
+    assert (
+        guarded(AutonomyLevel.FULL)(turn, observation) is PermissionDecision.CONFIRM
+    ), "even unattended autonomy asks before a destructive control"
+
+
+def test_guard_looks_up_the_element_in_screen_points() -> None:
+    """The lookup uses the logical-point list, never the image-space one.
+
+    The coordinate gate has already converted the model's coordinates by the
+    time the guard runs, so reading the ~3x smaller image-space list would
+    answer about whichever element sits at the scaled-down position — a safety
+    verdict about the wrong button.
+    """
+    turn = _click_turn(300, 300, sub_goal="pick the option")
+    misleading = _observation(
+        raw=('Button "Cancel" at (300,300) 80x24',),
+        image=('Button "Delete everything" at (300,300) 80x24',),
+    )
+    assert target_element_label(turn.action, misleading) == "Cancel"
+    assert classify_risk(turn, target_label="Cancel") is Risk.NONE
+
+
+def test_unknown_target_leaves_the_verdict_to_the_narration() -> None:
+    """A budget-capped element list means "no information", not "safe"."""
+    turn = _click_turn(100, 200, sub_goal="delete the file")
+    empty = _observation()
+    assert target_element_label(turn.action, empty) is None
+    assert classify_risk(turn, target_label=None) is Risk.DESTRUCTIVE
+
+
+def test_element_value_never_drives_the_verdict() -> None:
+    """A search box containing the word "delete" is not a destructive control."""
+    turn = _click_turn(50, 50, sub_goal="focus the search box")
+    observation = _observation(
+        raw=('SearchField "Search" at (50,50) 200x24 value="delete my account"',)
+    )
+    assert target_element_label(turn.action, observation) == "Search"
+    assert guarded(AutonomyLevel.FULL)(turn, observation) is PermissionDecision.ALLOW
+
+
+def test_non_positional_actions_have_no_target_element() -> None:
+    """Only a click or a drag has something under it to classify."""
+    hotkey = AgentTurn(
+        thought="t",
+        sub_goal="submit",
+        action=PressHotkey(type="press_hotkey", modifiers=[], key="return"),
+    )
+    observation = _observation(raw=('Button "Delete" at (0,0) 500x500',))
+    assert target_element_label(hotkey.action, observation) is None
+
+
+def test_runner_refuses_a_destructive_button_the_model_described_as_routine() -> None:
+    """End to end: the AX probe feeds the guard, and the driver is never called."""
+    executed: list[object] = []
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        return _click_turn(100, 200, sub_goal="proceed to the next screen")
+
+    def ax_probe() -> AxProbeResult:
+        return AxProbeResult(summaries=('Button "Delete account" at (100,200) 80x24',))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        guard=guarded(AutonomyLevel.GUARDED),
+        ax_probe=ax_probe,
+        max_steps=3,
+    )
+    with pytest.raises(PermissionConfirmationRequired):
+        runner.run(goal="finish the signup flow")
+    assert executed == [], "a destructive control must never reach the driver"

@@ -300,6 +300,29 @@ def summary_covering(summaries: tuple[str, ...], x: float, y: float) -> str | No
     return best
 
 
+_SUMMARY_LABEL: Final = re.compile(r'^\S+ "(.*)" at \(')
+
+
+def summary_label(summary: str) -> str | None:
+    """The element's own title from one summary line (pure).
+
+    The line reads ``Button "Empty Trash" at (100,200) 80x24``; this returns
+    ``Empty Trash``. The safety guard classifies the *control* the agent is
+    about to press, and the control's title is the only part of the line that
+    says anything about what pressing it does — the role, the rect and the
+    focus marker are noise for that question, and an element's ``value`` would
+    make a search box containing the word "delete" look destructive.
+
+    ``None`` when the line carries no title (the truncation note, or an
+    untitled element), which callers must read as "no information".
+    """
+    match = _SUMMARY_LABEL.match(summary)
+    if match is None:
+        return None
+    label = match.group(1).strip()
+    return label if label and label != "(untitled)" else None
+
+
 def summaries_to_image_space(
     summaries: tuple[str, ...], points_per_pixel: float
 ) -> tuple[str, ...]:
