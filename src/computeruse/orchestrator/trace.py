@@ -84,6 +84,30 @@ def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+#: Marks a line on stdout as a structured event rather than human log text.
+#: Chosen to be something no prose or traceback produces, so a reader can split
+#: the two streams with a prefix test and never misparse a log line.
+EVENT_PREFIX: Final[str] = "@@CU "
+
+
+def event_line(record: StepTrace) -> str:
+    """One step rendered as a tagged, machine-readable stdout line (pure).
+
+    The UI panel reads the agent's stdout, and until now it could only show
+    what the log happened to say in prose — so the plan, the model's reasoning,
+    the verification verdict and the recovery rung were all present in the
+    process and invisible in the window watching it. The tracer already builds
+    exactly that record for its file; emitting the same object on stdout gives
+    the panel the structured stream without a second transport, an IPC channel,
+    or a requirement that tracing to disk be switched on at all.
+
+    The screenshot is deliberately absent: this line is read by a UI that
+    already has the frame on screen, and a base64 image per step would make the
+    stream unreadable for the humans and tools that also tail it.
+    """
+    return EVENT_PREFIX + step_trace_json(record, screenshot=None)
+
+
 def new_run_id() -> str:
     """A sortable, unique identity for one run.
 

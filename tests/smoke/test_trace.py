@@ -16,8 +16,10 @@ from computeruse.agent import Agent, AgentConfig
 from computeruse.orchestrator.loop import MaxStepsError, OodaRunner, WorkingState
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.orchestrator.trace import (
+    EVENT_PREFIX,
     RunTracer,
     StepTrace,
+    event_line,
     new_run_id,
     step_trace_json,
 )
@@ -174,3 +176,49 @@ def test_agent_writes_a_trace_directory_named_by_the_run(tmp_path: Path) -> None
     }
     assert all(r["run_id"] == result.run_id for r in records)
     assert records[1]["error"] is None
+
+
+def test_every_step_is_announced_on_stdout(capsys, tmp_path) -> None:
+    """The UI reads stdout, so structure has to reach it there.
+
+    The panel used to recover the model's reasoning by matching log prose with
+    string offsets ("ooda thought:" then substring(13)), which breaks silently
+    the moment a message is reworded. The same facts are already assembled for
+    the trace file; announcing them costs one line per step and needs no second
+    transport.
+    """
+    record = StepTrace(
+        run_id="20260101T000000Z-abcdef12",
+        step=3,
+        app="Google Chrome",
+        window="Chrome — Hacker News",
+        thought="the comments link is at (401,221)",
+        sub_goal="open the comments page",
+        action={"type": "mouse_click", "x": 401, "y": 221},
+        route="physical",
+        verdict="confirmed",
+        error=None,
+    )
+    line = event_line(record)
+    assert line.startswith(EVENT_PREFIX)
+    payload = json.loads(line[len(EVENT_PREFIX) :])
+    assert payload["step"] == 3
+    assert payload["thought"] == "the comments link is at (401,221)"
+    assert payload["action"]["type"] == "mouse_click"
+    assert payload["verdict"] == "confirmed"
+    # The frame is never inlined: a base64 image per step would make the stream
+    # unreadable for the humans and tools that also tail it.
+    assert payload["screenshot"] is None
+
+
+def test_the_event_prefix_cannot_be_confused_with_log_prose() -> None:
+    """A reader splits the two streams with a prefix test, so it must not
+    collide with anything the log or a traceback emits."""
+    for prose in (
+        "ooda thought: something",
+        "st : tok_total=1 elapsed=1s",
+        'Traceback (most recent call last):',
+        "  File \"x.py\", line 1, in <module>",
+        "goal        : do a thing",
+    ):
+        assert not prose.startswith(EVENT_PREFIX)

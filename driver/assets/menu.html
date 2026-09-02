@@ -1860,6 +1860,45 @@
     log.scrollTop = log.scrollHeight;
   }
 
+  /* Once the agent sends structured step records, they are the source of
+     truth for the timeline and the prose duplicates are dropped. Older drivers
+     send no events at all, so the prose path stays exactly as it was and this
+     flag simply never flips. */
+  var eventsSeen = false;
+
+  /* Render one structured step record. The prose renderers below parse log
+     wording with string offsets, which breaks silently the moment a message is
+     reworded; the same facts arrive here already typed. */
+  function renderStepEvent(ev) {
+    if (emptyHero) emptyHero.style.display = "none";
+    eventsSeen = true;
+
+    if (ev.thought) renderThoughtCard(ev.thought);
+    if (ev.sub_goal) renderSubgoalCard(ev.sub_goal);
+
+    if (ev.error) {
+      closeGroup();
+      recordSessionEvent("Error", ev.error);
+      appendBranch("err",
+        '<div class="feed-line"><span class="feed-icon" style="color:#FF5A4E;">' + ICONS.err + '</span>' +
+        '<span class="feed-text" style="color:#FF9D97;white-space:pre-wrap;">' + escapeHtml(ev.error) + '</span></div>'
+      );
+      if (currentRunRecord) finishCurrentRun("failed");
+      return;
+    }
+
+    if (ev.action && ev.action.type) {
+      var label = "step_" + ev.step + ":" + ev.action.type;
+      renderActionCard(label, JSON.stringify(ev.action));
+    }
+    /* A verdict of "inconclusive" is not a result worth a card: it means the
+       witnesses had nothing to say, which is the common case for actions that
+       declare no postcondition. */
+    if (ev.verdict && ev.verdict !== "inconclusive") {
+      renderVerificationCard(ev.action.type + ": " + ev.verdict);
+    }
+  }
+
   function processIncomingLine(lineText, kind) {
     if (emptyHero) emptyHero.style.display = "none";
 
@@ -1878,6 +1917,16 @@
         trimmed.startsWith("targeting app:") ||
         trimmed.startsWith("— run finished") ||
         trimmed.startsWith("— agent stopped")) {
+      return;
+    }
+
+    /* Facts the structured stream carries are rendered from it instead, so a
+       run that emits events does not draw every card twice. */
+    if (eventsSeen && (trimmed.startsWith("ooda thought:") ||
+        trimmed.startsWith("ooda sub_goal:") ||
+        trimmed.startsWith("ooda step_") ||
+        trimmed.startsWith("ooda verified") ||
+        trimmed.startsWith("ooda step "))) {
       return;
     }
 
@@ -2072,6 +2121,10 @@
   // Native -> JS API invoked by the Rust brush.
   window.Native = {
     log: function(t){ processIncomingLine(t, "out"); },
+    event: function(t){
+      try { renderStepEvent(JSON.parse(t)); }
+      catch (e) { processIncomingLine(t, "dim"); }
+    },
     head: function(t){ renderGoalCard(t); },
     dim: function(t){ processIncomingLine(t, "dim"); },
     err: function(t){ processIncomingLine(t, "err"); window._lastErr=true; },
