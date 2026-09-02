@@ -713,7 +713,22 @@ class OodaRunner:
             # The provider decides against exactly this snapshot; remember the
             # window it describes so ACT can detect the host moving underneath.
             self._decision_window = self._decision_window_of(self._observation)
-            decision = self.provider(state)
+            try:
+                decision = self.provider(state)
+            except KillSwitchTripped:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a bad turn is recoverable
+                # A model that returns nothing usable is a failure like any
+                # other, not the end of the run. The scaffolding already
+                # retries with corrective hints; when even those are exhausted
+                # the ladder gets its turn — RETRY, then ALTERNATE, then
+                # REPLAN, then ABORT. Observed before this: one malformed reply
+                # on step 20 of a 30-step run killed the process with a
+                # traceback, discarding twenty steps of correct work.
+                hint = self._register_failure(exc, None, goal)
+                state = replace(state, last_error=hint)
+                LOGGER.warning("ooda provider turn failed: %s", hint)
+                continue
             if decision.thought:
                 LOGGER.info("ooda thought: %s", decision.thought)
             if decision.sub_goal:
@@ -1060,7 +1075,20 @@ class OodaRunner:
             # a change, but not one this region diff can quantify.
             return Evidence.CONFIRMED
         verification = verify_capture_region(before, after, verification_region(target))
-        return Evidence.CONFIRMED if verification.changed else Evidence.CONTRADICTED
+        if verification.changed:
+            return Evidence.CONFIRMED
+        # A silent region is not a denial. The box is 48 points around the
+        # cursor, but an action's visible effect very often lands somewhere
+        # else entirely: pressing a calculator key updates the display at the
+        # top of the window, following a link repaints the page below the
+        # toolbar. Measured on Calculator, this region reported "unchanged" for
+        # every one of three correct button presses — and as a CONTRADICTED
+        # vote it was one half of the pair needed to call an action failed.
+        # Before claiming nothing happened, look at the whole frame; only when
+        # the screen is still everywhere is silence real evidence of a miss.
+        if coarse_fingerprint(before) != coarse_fingerprint(after):
+            return Evidence.INCONCLUSIVE
+        return Evidence.CONTRADICTED
 
     def _probe_app_identity(self) -> tuple[str | None, str]:
         """The frontmost app's localized name and its bundle id (best effort).
@@ -1274,8 +1302,13 @@ class OodaRunner:
     # RECOVER
     # ------------------------------------------------------------------
 
-    def _register_failure(self, exc: Exception, action: Action, goal: str) -> str:
+    def _register_failure(self, exc: Exception, action: Action | None, goal: str) -> str:
         """Classify a failure, advance its ladder rung, and build the hint.
+
+        ``action`` is ``None`` when the failure happened before there was one —
+        a model turn that produced nothing usable. The failure is otherwise
+        handled identically, so a bad turn climbs the same finite ladder as a
+        bad click instead of escaping the loop.
 
         Raises :class:`UnrecoverableFailureError` when the ladder is exhausted
         — the guarantee that one obstacle can never consume a whole run.

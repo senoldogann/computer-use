@@ -49,6 +49,7 @@ from computeruse.orchestrator.loop import (
     verification_region,
 )
 from computeruse.orchestrator.schemas import (
+    Action,
     ActivateApp,
     AgentTurn,
     ClipboardPaste,
@@ -968,3 +969,38 @@ def test_diagnosis_distinguishes_a_miss_from_an_idempotent_hit() -> None:
     assert "already in the state you want" in hit
     # The advice must not contradict itself.
     assert "re-derive" not in hit
+
+
+def test_a_silent_region_is_not_a_denial_when_the_screen_moved() -> None:
+    """The effect of an action is very often outside the box around the cursor.
+
+    Pressing a calculator key updates the display at the top of the window;
+    following a link repaints the page below the toolbar. Measured on
+    Calculator, the 48-point region reported "unchanged" for every one of three
+    correct button presses — and as a CONTRADICTED vote it was half of the pair
+    needed to call an action failed. Only a screen that is still *everywhere*
+    is evidence of a miss.
+    """
+    screen = FakeScreen()
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(MouseClick(type="mouse_click", x=5, y=5))
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    def execute(_action: Action) -> None:
+        # The action's effect lands in the far corner, outside the 48-point box
+        # around the click — exactly like a calculator display or a page body.
+        screen.paint(Rect(Point(50, 32), Size(10, 4)))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=execute,
+        sensor=screen.sensor,
+        verify_enabled=True,
+        ax_probe=None,  # pixels are the only witness, so its verdict decides
+        max_steps=5,
+    )
+    final = runner.run(goal="press a key")
+    assert final.last_error is None
+    assert "step_0:mouse_click" in final.completed_steps
