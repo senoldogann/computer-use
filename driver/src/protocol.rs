@@ -128,8 +128,14 @@ pub enum Response {
     FocusedWindow {
         /// Process id of the frontmost application (feeds ``ax_snapshot``).
         pid: i32,
-        /// Application name of the frontmost app.
+        /// Application name of the frontmost app. **Localized** — macOS
+        /// translates it, so "Calculator" reports as "Hesap Makinesi" on a
+        /// Turkish desktop. Pair it with ``bundle_id`` before deciding the
+        /// frontmost app is a different one.
         app_name: String,
+        /// The app's `CFBundleIdentifier`, "" when it has no bundle. The
+        /// locale-independent identity.
+        bundle_id: String,
         /// Title of the focused window ("" when the app has none).
         window_title: String,
         /// Cursor position in global logical points (OBSERVE step).

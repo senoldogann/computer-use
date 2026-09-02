@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from computeruse.orchestrator.loop import OodaRunner, WorkingState
-from computeruse.orchestrator.schemas import AgentTurn, ClipboardPaste
+from computeruse.orchestrator.schemas import (
+    AgentTurn,
+    ClipboardPaste,
+    Finish,
+    LoadSkill,
+    MouseClick,
+    Wait,
+)
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionConfirmationRequired,
@@ -131,3 +138,48 @@ def test_ooda_runner_guard_off_when_not_provided() -> None:
     final = runner.run(goal="ok")
     assert final.step_index >= 1
     assert executed, "physical action should have run when guard is absent"
+
+def test_internal_actions_never_need_permission() -> None:
+    """finish/wait/load_skill touch nothing, so the gate has nothing to guard.
+
+    Observed in a live run: a completed task ended with the sub-goal "Confirm
+    the URL has been placed in the address bar", the word "confirm" matched a
+    dialog-button marker, and the run stopped dead waiting for a human to
+    approve the model's own English. The markers describe controls the agent
+    might press — not the prose it narrates in.
+    """
+    for action in (
+        Finish(type="finish", status="success", summary="done"),
+        Wait(type="wait", duration_ms=10, reason="settle"),
+        LoadSkill(type="load_skill", skill_id="safari.reload"),
+    ):
+        turn = AgentTurn(
+            thought="",
+            # Deliberately loaded with routine AND destructive markers.
+            sub_goal="Confirm and save, then delete the temporary files",
+            action=action,
+        )
+        assert classify_risk(turn) is Risk.NONE
+        # Guarded (the default) and Full let these through untouched.
+        for level in (AutonomyLevel.GUARDED, AutonomyLevel.FULL):
+            assert decide_permission(level, classify_risk(turn)) is PermissionDecision.ALLOW
+        # Observer and Supervised still gate them — but that is each level's own
+        # rule ("never act" / "approve every step"), not a misread of prose.
+        assert (
+            decide_permission(AutonomyLevel.SUPERVISED, classify_risk(turn))
+            is PermissionDecision.CONFIRM
+        )
+
+
+def test_physical_actions_keep_their_marker_classification() -> None:
+    """Exempting internal actions must not weaken the real guard."""
+    destructive = AgentTurn(
+        thought="",
+        sub_goal="delete the selected files",
+        action=MouseClick(type="mouse_click", x=10, y=10),
+    )
+    assert classify_risk(destructive) is Risk.DESTRUCTIVE
+    assert (
+        decide_permission(AutonomyLevel.FULL, classify_risk(destructive))
+        is PermissionDecision.CONFIRM
+    )

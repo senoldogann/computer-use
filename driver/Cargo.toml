@@ -41,6 +41,8 @@ objc2-app-kit = { version = "0.3", features = [
     "NSEvent",
     "NSMenu",
     "NSMenuItem",
+    "NSRunningApplication",
+    "NSWorkspace",
     "block2",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSTimer", "NSString", "NSURL"] }

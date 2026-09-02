@@ -14,6 +14,7 @@ from collections.abc import Callable
 from computeruse.agent import Agent, AgentConfig
 from computeruse.memory.semantic import SemanticEntry, SemanticStore
 from computeruse.orchestrator.client import ActuationClient, DriverRpcError
+from computeruse.orchestrator.evidence import Evidence, app_evidence
 from computeruse.orchestrator.loop import OodaRunner, WorkingState
 from computeruse.orchestrator.prompts import decision_prompt
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
@@ -261,3 +262,44 @@ def test_discovery_feeds_knowledge_and_window_context(tmp_path) -> None:
         "[Safari] shortcut.fullscreen: Ctrl+Cmd+F" in fact for fact in seen[0].knowledge
     )
     assert seen[0].active_window == FIXTURE_SUMMARY
+
+
+# --- localized application names ---------------------------------------------
+
+
+def test_bundle_id_identifies_an_app_across_languages() -> None:
+    """A translated app name must not read as "a different app is in front".
+
+    Observed on a Turkish desktop: Calculator reports "Hesap Makinesi", which
+    shares no substring with "Calculator". The agent concluded the wrong app
+    was frontmost and refused to act — while activating the name it *could*
+    see failed too, because no bundle on disk carries the translated name. The
+    bundle id is the same string in every locale and settles it.
+    """
+    assert (
+        app_evidence("Calculator", "Hesap Makinesi", "com.apple.calculator")
+        is Evidence.CONFIRMED
+    )
+    # The caller may name the app either way round.
+    assert (
+        app_evidence("com.apple.calculator", "Hesap Makinesi", "com.apple.calculator")
+        is Evidence.CONFIRMED
+    )
+    # Without the bundle id there is genuinely nothing to match on.
+    assert app_evidence("Calculator", "Hesap Makinesi", "") is Evidence.CONTRADICTED
+
+
+def test_bundle_id_does_not_confirm_an_unrelated_app() -> None:
+    """The identity check must stay capable of saying no."""
+    assert (
+        app_evidence("Calculator", "Google Chrome", "com.google.Chrome")
+        is Evidence.CONTRADICTED
+    )
+    assert app_evidence("Safari", "Notes", "com.apple.Notes") is Evidence.CONTRADICTED
+
+
+def test_name_matching_still_works_without_a_bundle_id() -> None:
+    """LaunchServices and AX disagree about the same app; that must still pass."""
+    assert app_evidence("Google Chrome", "Chrome", "") is Evidence.CONFIRMED
+    assert app_evidence("Chrome", "Google Chrome", None) is Evidence.CONFIRMED
+    assert app_evidence("Safari", None, "") is Evidence.INCONCLUSIVE

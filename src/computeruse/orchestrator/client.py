@@ -45,6 +45,11 @@ LOGGER: Final = logging.getLogger(__name__)
 # web-first (page content before chrome) and drops the overflow, so a heavy
 # page cannot balloon the per-turn perception cost (Law 4.3 context budget).
 AX_MAX_NODES: Final[int] = 4096
+#: Traversal depth cap. Chrome nests its ``AXWebArea`` ten levels below the
+#: app root and page links another four to eight below that, so a shallow cap
+#: silently hides every website's content; ``AX_MAX_NODES`` is the real bound
+#: on response size.
+AX_MAX_DEPTH: Final[int] = 20
 
 
 class DriverRpcError(RuntimeError):
@@ -380,7 +385,7 @@ class ActuationClient:
     def ax_snapshot(
         self,
         pid: int,
-        max_depth: int = 8,
+        max_depth: int = AX_MAX_DEPTH,
         max_nodes: int = AX_MAX_NODES,
     ) -> AXElement:
         """Read an app's accessibility tree root (ADR-2 primary source).

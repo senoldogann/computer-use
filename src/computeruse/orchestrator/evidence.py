@@ -48,6 +48,7 @@ from computeruse.orchestrator.schemas import (
     PressHotkey,
     TypeText,
 )
+from computeruse.vision.ax import summary_covering
 from computeruse.vision.coordinates import Point
 
 #: Hotkeys whose effect is a page-wide transition rather than a local change.
@@ -84,6 +85,12 @@ class ActionExpectation:
     region_point: Point | None
     #: Whether the host's UI state (AX focus/values/titles) should differ.
     expects_ui_change: bool
+    #: Screen point whose element should hold keyboard focus afterwards. This
+    #: is the witness that makes an *idempotent* action verifiable: clicking an
+    #: already-selected tab, an already-checked box, or a button that is
+    #: already focused changes nothing, and change-detection alone cannot tell
+    #: that apart from a miss.
+    focus_target: Point | None
     #: Text that must appear in the focused field afterwards, if any.
     expected_text: str | None
     #: Application that must own the frontmost window afterwards, if any.
@@ -97,6 +104,7 @@ class ActionExpectation:
         return (
             self.pixel != "none"
             or self.expects_ui_change
+            or self.focus_target is not None
             or self.expected_text is not None
             or self.expected_app is not None
         )
@@ -116,6 +124,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="region",
             region_point=Point(action.x, action.y),
             expects_ui_change=True,
+            focus_target=Point(action.x, action.y),
             expected_text=None,
             expected_app=None,
             needs_settle=True,
@@ -125,6 +134,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="region",
             region_point=Point(action.end_x, action.end_y),
             expects_ui_change=True,
+            focus_target=None,
             expected_text=None,
             expected_app=None,
             needs_settle=True,
@@ -137,6 +147,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="frame",
             region_point=None,
             expects_ui_change=True,
+            focus_target=None,
             expected_text=None,
             expected_app=None,
             needs_settle=True,
@@ -147,6 +158,7 @@ def expectation_for(action: Action) -> ActionExpectation:
                 pixel="frame",
                 region_point=None,
                 expects_ui_change=True,
+                focus_target=None,
                 expected_text=None,
                 expected_app=None,
                 needs_settle=True,
@@ -160,6 +172,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="none",
             region_point=None,
             expects_ui_change=False,
+            focus_target=None,
             expected_text=action.text or None,
             expected_app=None,
             needs_settle=True,
@@ -169,6 +182,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="none",
             region_point=None,
             expects_ui_change=False,
+            focus_target=None,
             expected_text=None,
             expected_app=action.app,
             needs_settle=True,
@@ -180,6 +194,7 @@ _NO_EXPECTATION = ActionExpectation(
     pixel="none",
     region_point=None,
     expects_ui_change=False,
+    focus_target=None,
     expected_text=None,
     expected_app=None,
     needs_settle=False,
@@ -238,6 +253,77 @@ def ui_state_evidence(before: tuple[str, ...], after: tuple[str, ...]) -> Eviden
     return Evidence.CONFIRMED if before != after else Evidence.CONTRADICTED
 
 
+def ax_surface_evidence(
+    before_elements: tuple[str, ...],
+    after_elements: tuple[str, ...],
+    before_content: tuple[str, ...],
+    after_content: tuple[str, ...],
+) -> Evidence:
+    """Did the accessibility surface change at all — structure or text (pure)?
+
+    Deliberately **one** witness over two signals, not two witnesses. Both are
+    read from the same AX snapshot, so treating them as independent would let a
+    single silent source cast two votes — and a failure needs only two
+    corroborating circumstantial witnesses to agree. That would make every
+    action the AX probe cannot see look decisively failed.
+
+    Either signal moving confirms: an element list changing catches focus
+    moves and appearing controls, and the content digest catches text that
+    changes without any structural change at all — a calculator display, a
+    status line, a result count. Only both being silent, with something to
+    compare, contradicts.
+    """
+    element_verdict = ui_state_evidence(before_elements, after_elements)
+    content_verdict = content_evidence(before_content, after_content)
+    if Evidence.CONFIRMED in (element_verdict, content_verdict):
+        return Evidence.CONFIRMED
+    if Evidence.CONTRADICTED in (element_verdict, content_verdict):
+        return Evidence.CONTRADICTED
+    return Evidence.INCONCLUSIVE
+
+
+def content_evidence(before: tuple[str, ...], after: tuple[str, ...]) -> Evidence:
+    """Did the app's visible text change between two observations (pure)?
+
+    The witness for the most common effect an action has and the one every
+    other witness misses. A calculator display updating, a status line, a
+    result count, a page title, a field's contents — none of it moves the
+    interactive element list, and a few glyphs redrawing is far below the
+    fraction-of-pixels threshold a pixel diff needs to call a region changed.
+
+    Circumstantial: text can change without the agent touching anything (a
+    clock, a progress counter), so on its own an unchanged digest is weak
+    evidence of a miss — but a *changed* one is a strong sign the action landed.
+    """
+    if not before and not after:
+        return Evidence.INCONCLUSIVE
+    return Evidence.CONFIRMED if before != after else Evidence.CONTRADICTED
+
+
+def target_focus_evidence(target: Point | None, summaries: tuple[str, ...]) -> Evidence:
+    """Does the element you aimed at now hold keyboard focus (pure)?
+
+    The witness that makes *idempotent* actions verifiable. Clicking a control
+    that is already in its target state — an already-focused button, a selected
+    tab, a checked box — changes nothing observable, and every change-detecting
+    witness therefore reports a miss. Observed in a real run: the model clicked
+    the right button, the click landed, and it was told twice that it had
+    failed; it then abandoned a correct approach for a worse one.
+
+    Positive-only by construction. Focus landing on the element under the
+    click is proof the click reached it; focus *not* landing there proves
+    nothing, because plenty of controls (links, many buttons) never take focus
+    at all. So this returns CONFIRMED or INCONCLUSIVE, never CONTRADICTED —
+    it can rescue an action from a false failure but can never cause one.
+    """
+    if target is None or not summaries:
+        return Evidence.INCONCLUSIVE
+    line = summary_covering(summaries, target.x, target.y)
+    if line is None:
+        return Evidence.INCONCLUSIVE
+    return Evidence.CONFIRMED if line.endswith("(focused)") else Evidence.INCONCLUSIVE
+
+
 def text_evidence(expected: str, observed: str | None) -> Evidence:
     """Does the focused field's value corroborate an insertion (pure)?
 
@@ -254,7 +340,9 @@ def text_evidence(expected: str, observed: str | None) -> Evidence:
     return Evidence.CONFIRMED if expected in observed else Evidence.CONTRADICTED
 
 
-def app_evidence(expected: str, observed: str | None) -> Evidence:
+def app_evidence(
+    expected: str, observed: str | None, bundle_id: str | None = None
+) -> Evidence:
     """Does the frontmost application match the one an activation requested?
 
     Direct: naming the wrong frontmost application denies the activation
@@ -263,7 +351,22 @@ def app_evidence(expected: str, observed: str | None) -> Evidence:
     Matching is case-insensitive and accepts either name containing the other,
     because LaunchServices names ("Google Chrome") and AX titles ("Chrome")
     routinely disagree about the same application.
+
+    ``bundle_id`` is checked as an independent identity, and it is the one that
+    survives translation. macOS shows apps under localized names: on a Turkish
+    desktop Calculator is "Hesap Makinesi", which shares no substring with
+    "Calculator". Comparing names alone, an agent asked to work in Calculator
+    concluded a different app was in front of it and refused to act — while
+    activating the name it *could* see failed too, because no bundle on disk
+    carries the translated name. Accepting a bundle-id match ends that
+    deadlock: "com.apple.calculator" is the same string in every language, and
+    the caller may pass either identity as ``expected``.
     """
+    if bundle_id:
+        wanted = expected.casefold()
+        bundle = bundle_id.casefold()
+        if bundle == wanted or bundle.rsplit(".", 1)[-1] == wanted.replace(" ", ""):
+            return Evidence.CONFIRMED
     if observed is None or not observed:
         return Evidence.INCONCLUSIVE
     left = expected.casefold()
@@ -277,18 +380,37 @@ def verification_diagnostic(
     action_type: str,
     expectation: ActionExpectation,
     reports: tuple[tuple[str, Evidence], ...],
+    element_at_target: str | None = None,
 ) -> str:
     """The LLM-facing message when every witness contradicted an action (pure).
 
     Names each witness and what it saw, so the model can tell "the pixels did
     not move" from "the app never came to the front" — different problems with
     different fixes.
+
+    ``element_at_target`` is the accessibility summary of whatever sits under
+    the click, and it changes the diagnosis completely. "Nothing changed" has
+    two causes that need opposite responses: the click missed, or the click
+    landed on a control that was already in the state being asked for. Telling
+    a model that hit the right button to "re-derive the target" sends it
+    hunting coordinates that were correct — observed on Calculator, where
+    pressing Clear on an already-clear display and pressing Equals on an
+    already-computed result were both reported as misses, and the agent spent
+    four steps chasing a coordinate problem it did not have.
     """
     where = ""
     if expectation.region_point is not None:
         point = expectation.region_point
         where = f" at ({point.x:.0f},{point.y:.0f})"
     detail = ", ".join(f"{name}={verdict.value}" for name, verdict in reports)
+    if element_at_target is not None:
+        return (
+            f"action verification failed: {action_type}{where} landed on "
+            f"{element_at_target} but produced no observable change ({detail}); "
+            "the coordinate was right, so do NOT re-aim. Either that control "
+            "is already in the state you want — check whether the goal is "
+            "satisfied and move on — or it needs a different interaction"
+        )
     return (
         f"action verification failed: {action_type}{where} produced no "
         f"observable change ({detail}); the action did not land where you "

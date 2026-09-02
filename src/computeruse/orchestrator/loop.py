@@ -47,10 +47,11 @@ from computeruse.orchestrator.evidence import (
     CompletionVerdict,
     Evidence,
     app_evidence,
+    ax_surface_evidence,
     combine,
     expectation_for,
+    target_focus_evidence,
     text_evidence,
-    ui_state_evidence,
     verification_diagnostic,
 )
 from computeruse.orchestrator.failures import (
@@ -83,7 +84,7 @@ from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
-from computeruse.vision.ax import summaries_to_image_space
+from computeruse.vision.ax import summaries_to_image_space, summary_covering
 from computeruse.vision.capture import (
     SCREENSHOT_MAP_MAX_SIDE,
     ScreenCapture,
@@ -181,6 +182,10 @@ class AxProbeResult:
 
     summaries: tuple[str, ...] = ()
     open_tabs: tuple[str, ...] = ()
+    #: The app's visible text, for verification only — never shown to the
+    #: model. Kept separate from ``summaries`` so noticing that a label changed
+    #: does not cost the model any of its element budget.
+    content: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -484,6 +489,10 @@ class Observation:
     #: one made every action look like it changed the UI, which silently
     #: turned the AX witness into an unconditional "confirmed".
     raw_ui_elements: tuple[str, ...]
+    #: The app's visible text at OBSERVE time. Verification compares it against
+    #: a fresh probe to notice content changes — a display, a status line, a
+    #: result count — that move neither the element list nor enough pixels.
+    content: tuple[str, ...]
     open_tabs: tuple[str, ...]
     #: Change-tolerant layout signature used for progress and staleness.
     signature: str
@@ -500,6 +509,7 @@ EMPTY_OBSERVATION: Final = Observation(
     window=None,
     ui_elements=(),
     raw_ui_elements=(),
+    content=(),
     open_tabs=(),
     signature="",
 )
@@ -898,6 +908,7 @@ class OodaRunner:
             # display is rejected BEFORE any physical effect (never clamped).
             self._validate_bounds(action, before)
         before_ui = self._observation.raw_ui_elements
+        before_content = self._observation.content
         before_window = self._observation.window
 
         self._execute_physical(action)
@@ -906,7 +917,9 @@ class OodaRunner:
         self._last_capture_hash = None
         self._last_screenshot_b64 = None
 
-        self._verify(action, expectation, before, before_ui, before_window)
+        self._verify(
+            action, expectation, before, before_ui, before_content, before_window
+        )
 
     def _pre_action_frame(self, expectation: ActionExpectation) -> ScreenCapture | None:
         """The frame the bounds check and (optionally) the pixel witness read.
@@ -932,6 +945,7 @@ class OodaRunner:
         expectation: ActionExpectation,
         before: ScreenCapture | None,
         before_ui: tuple[str, ...],
+        before_content: tuple[str, ...],
         before_window: FocusedWindow | None,
     ) -> None:
         """Collect independent witnesses and judge whether the action landed.
@@ -950,21 +964,49 @@ class OodaRunner:
             self._wait_for_settle(before_window)
 
         reports: list[tuple[str, Evidence]] = []
+        element_at_target: str | None = None
         direct: list[Evidence] = []
         circumstantial: list[Evidence] = []
 
         if expectation.expected_app is not None:
-            verdict = app_evidence(expectation.expected_app, self._probe_app_name())
+            observed_app, observed_bundle = self._probe_app_identity()
+            verdict = app_evidence(expectation.expected_app, observed_app, observed_bundle)
             reports.append(("frontmost_app", verdict))
             direct.append(verdict)
         if expectation.expected_text is not None:
             verdict = text_evidence(expectation.expected_text, self._probe_text_value())
             reports.append(("focused_field", verdict))
             direct.append(verdict)
-        if expectation.expects_ui_change and self.ax_probe is not None:
-            verdict = ui_state_evidence(before_ui, self._probe_ui_elements())
-            reports.append(("ax_state", verdict))
-            circumstantial.append(verdict)
+        if (expectation.expects_ui_change or expectation.focus_target is not None) and (
+            self.ax_probe is not None
+        ):
+            # One AX probe serves both witnesses: whether the surface moved at
+            # all (circumstantial) and whether the element under the click now
+            # holds focus (direct, and the only witness that can vouch for an
+            # action which correctly changed nothing).
+            after = self._probe_ax()
+            after_ui = after.summaries
+            # What sits under the click, if anything — the difference between
+            # "you missed" and "you hit a control that was already in the state
+            # you asked for". Only these two produce identical witness reports.
+            if expectation.focus_target is not None:
+                element_at_target = summary_covering(
+                    after_ui, expectation.focus_target.x, expectation.focus_target.y
+                )
+            if expectation.focus_target is not None:
+                verdict = target_focus_evidence(expectation.focus_target, after_ui)
+                reports.append(("target_focus", verdict))
+                direct.append(verdict)
+            if expectation.expects_ui_change:
+                # One witness, two signals: the element list catches structure
+                # and focus, the content digest catches text that changes with
+                # no structural change at all. Both come from this one probe,
+                # so they must not vote twice — see ax_surface_evidence.
+                verdict = ax_surface_evidence(
+                    before_ui, after_ui, before_content, after.content
+                )
+                reports.append(("ax_state", verdict))
+                circumstantial.append(verdict)
         if expectation.pixel != "none" and self.verify_enabled and before is not None:
             verdict = self._pixel_evidence(before, expectation)
             reports.append(("pixels", verdict))
@@ -973,7 +1015,9 @@ class OodaRunner:
         outcome = combine(direct=tuple(direct), circumstantial=tuple(circumstantial))
         if outcome is Evidence.CONTRADICTED:
             raise VerificationFailedError(
-                verification_diagnostic(action.type, expectation, tuple(reports))
+                verification_diagnostic(
+                    action.type, expectation, tuple(reports), element_at_target
+                )
             )
         detail = ", ".join(f"{name}={value.value}" for name, value in reports)
         if outcome is Evidence.CONFIRMED:
@@ -1018,14 +1062,21 @@ class OodaRunner:
         verification = verify_capture_region(before, after, verification_region(target))
         return Evidence.CONFIRMED if verification.changed else Evidence.CONTRADICTED
 
-    def _probe_app_name(self) -> str | None:
+    def _probe_app_identity(self) -> tuple[str | None, str]:
+        """The frontmost app's localized name and its bundle id (best effort).
+
+        Both identities are returned together because either one alone can be
+        wrong about whether the right app is in front: the name is translated
+        per locale, and the bundle id is empty for hosts without a bundle.
+        """
         if self.window_probe is None:
-            return None
+            return None, ""
         try:
-            return self.window_probe().app_name
+            focused = self.window_probe()
         except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
             LOGGER.debug("window probe failed during verification: %s", exc)
-            return None
+            return None, ""
+        return focused.app_name, focused.bundle_id
 
     def _probe_text_value(self) -> str | None:
         if self.focused_text_value is None:
@@ -1036,14 +1087,21 @@ class OodaRunner:
             LOGGER.debug("text-value probe failed during verification: %s", exc)
             return None
 
-    def _probe_ui_elements(self) -> tuple[str, ...]:
+    def _probe_ax(self) -> AxProbeResult:
+        """One AX probe serving every accessibility-based witness.
+
+        Called once per verification so the element list, the focus check and
+        the content digest all describe the *same* moment — three separate
+        probes would let the app move between them and make the witnesses
+        disagree about a screen that never existed.
+        """
         if self.ax_probe is None:
-            return ()
+            return AxProbeResult()
         try:
-            return self.ax_probe().summaries
+            return self.ax_probe()
         except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
-            LOGGER.debug("ui-element probe failed during verification: %s", exc)
-            return ()
+            LOGGER.debug("ax probe failed during verification: %s", exc)
+            return AxProbeResult()
 
     # ------------------------------------------------------------------
     # Gates
@@ -1087,7 +1145,10 @@ class OodaRunner:
         """
         if not self.app_is_pinned or not current.app_name:
             return
-        if app_evidence(self.app, current.app_name) is not Evidence.CONTRADICTED:
+        if (
+            app_evidence(self.app, current.app_name, current.bundle_id)
+            is not Evidence.CONTRADICTED
+        ):
             return
         LOGGER.warning(
             "focus drifted to %r; re-activating %r before %s",
@@ -1101,7 +1162,11 @@ class OodaRunner:
         except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
             LOGGER.debug("window probe failed after re-activation: %s", exc)
             return
-        if after is not None and app_evidence(self.app, after.app_name) is Evidence.CONTRADICTED:
+        if (
+            after is not None
+            and app_evidence(self.app, after.app_name, after.bundle_id)
+            is Evidence.CONTRADICTED
+        ):
             raise FocusLostError(
                 f"the target application {self.app!r} is not frontmost "
                 f"({after.app_name!r} is), and re-activating it did not help; "
@@ -1306,11 +1371,13 @@ class OodaRunner:
                     self._window_probe_warned = True
                     LOGGER.warning("focused-window probe failed: %s", exc)
         raw_ui_elements = previous.raw_ui_elements
+        content = previous.content
         open_tabs = previous.open_tabs
         if self.ax_probe is not None:
             try:
                 ax_result = self.ax_probe()
                 raw_ui_elements = ax_result.summaries
+                content = ax_result.content
                 open_tabs = ax_result.open_tabs
             except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
                 if self._ax_probe_warned:
@@ -1346,6 +1413,7 @@ class OodaRunner:
             window=window,
             ui_elements=ui_elements,
             raw_ui_elements=raw_ui_elements,
+            content=content,
             open_tabs=open_tabs,
             signature=signature,
         )

@@ -207,6 +207,7 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                 Ok(focused) => Response::FocusedWindow {
                     pid: focused.pid,
                     app_name: focused.app_name,
+                    bundle_id: focused.bundle_id,
                     window_title: focused.window_title,
                     cursor_x: focused.cursor_x,
                     cursor_y: focused.cursor_y,

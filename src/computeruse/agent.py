@@ -39,7 +39,7 @@ AX_MAX_ELEMENTS: Final[int] = 64
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.memory.semantic import SemanticStore
-from computeruse.orchestrator.client import AX_MAX_NODES, ActuationClient
+from computeruse.orchestrator.client import AX_MAX_DEPTH, AX_MAX_NODES, ActuationClient
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import (
     SETTLE_INTERVAL_S,
@@ -60,8 +60,12 @@ from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
 from computeruse.skills.registry import SkillRegistry
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
+from computeruse.vision.ax import (
+    content_digest,
+    interactive_summaries,
+    open_tabs_from_tree,
+)
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
-from computeruse.vision.ax import interactive_summaries, open_tabs_from_tree
 from computeruse.vision.focus import FocusedWindow
 
 
@@ -303,7 +307,7 @@ class Agent:
                     return AxProbeResult()
                 tree = client.ax_snapshot(
                     pid=current_pid,
-                    max_depth=12,
+                    max_depth=AX_MAX_DEPTH,
                     max_nodes=AX_MAX_NODES,
                 )
                 summaries = interactive_summaries(
@@ -325,6 +329,7 @@ class Agent:
                 return AxProbeResult(
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),
+                    content=content_digest(tree),
                 )
 
             def focused_text_value_probe() -> str | None:
@@ -336,7 +341,7 @@ class Agent:
                     return _focused_text_value_from_tree(
                         client.ax_snapshot(
                             pid=current_pid,
-                            max_depth=12,
+                            max_depth=AX_MAX_DEPTH,
                             max_nodes=AX_MAX_NODES,
                         )
                     )

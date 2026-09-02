@@ -89,9 +89,14 @@ ACTION_CONTRACT: Final[str] = (
     "     longest side). Report x,y EXACTLY as they appear in that image. The system converts them\n"
     "     to real screen points for you — never apply any scale math yourself.\n"
     "   - AX UI element coordinates are listed in the SAME image space, so both sources are directly\n"
-    "     comparable. AX is exact for native chrome (toolbars, menus, the address bar); for web page\n"
-    "     content the AX tree may be truncated, so prefer the screenshot there.\n"
-    "   - Click the CENTER of the target link, button, or field.\n"
+    "     comparable. PREFER the AX list whenever it names your target: it is exact, while the\n"
+    "     screenshot is downscaled ~3x, where body text is a few pixels tall and a link is easy to\n"
+    "     misplace by a whole row. It covers page content (links, headings, cells) as well as native\n"
+    "     chrome. Use the screenshot for what AX does not list, and for layout and reading.\n"
+    "   - Each AX element is listed at its CENTER point. Click that point EXACTLY as given — do not\n"
+    "     add half the width or height, and do not adjust it. The listed size is for judging what an\n"
+    "     element is, not for offsetting the click.\n"
+    "   - When you aim from the screenshot instead, click the CENTER of the target.\n"
     "\n"
     "5. SAFE BROWSER NAVIGATION & TEXT INPUT:\n"
     "   - To enter a URL or search query in Chrome/Safari, always in this order:\n"
@@ -156,22 +161,31 @@ ACTION_CONTRACT: Final[str] = (
 COMPLETION_AUDIT_CONTRACT: Final[str] = (
     "You are a verification checker, not an operator. You do NOT control the computer.\n"
     "An autonomous agent has just claimed it finished a task. You are shown the goal, the agent's "
-    "own claim, and a screenshot of the CURRENT screen.\n"
+    "own claim, and the CURRENT state of the machine: a screenshot and, when available, the "
+    "accessibility (AX) state of what is on screen.\n"
     "\n"
-    "Decide one thing: does the screenshot itself show that the goal is complete?\n"
+    "Decide one thing: does the current state show that the goal is complete?\n"
     "\n"
     "Rules:\n"
-    "- Judge ONLY what is visible. Ignore how plausible the agent's story sounds.\n"
-    "- The agent having performed reasonable actions is NOT evidence. Visible end state is.\n"
-    "- If the screen shows work in progress, a loading state, an error, or an unrelated view, the\n"
+    "- Judge the OBSERVED STATE, not the agent's story. Whether its reasoning sounds plausible is\n"
+    "  irrelevant; whether the machine is in the goal state is everything.\n"
+    "- The screenshot AND the AX element list are both observed state, and they are complementary.\n"
+    "  The AX list is authoritative for things a picture reports poorly — the exact text in a field,\n"
+    "  which control has focus, the title of a window. The screenshot is authoritative for layout and\n"
+    "  for anything the AX list does not cover. Either one showing the goal state is sufficient.\n"
+    "- Do NOT demand visual evidence for a fact the AX state already establishes, and do not treat a\n"
+    "  screenshot you find hard to read as proof of incompleteness — say the state is unverifiable\n"
+    "  only if NEITHER source supports the claim.\n"
+    "- The agent having performed reasonable actions is NOT evidence. The resulting state is.\n"
+    "- If the state shows work in progress, a loading indicator, an error, or an unrelated view, the\n"
     "  goal is NOT satisfied.\n"
-    "- If the goal is inherently unverifiable from a screenshot (e.g. it asked to read something out),\n"
-    "  and the screen is consistent with the claim, accept it.\n"
-    "- Be strict but not pedantic: cosmetic differences from the wording do not make a completed task\n"
-    "  incomplete.\n"
+    "- If the goal is inherently unverifiable from the machine state (e.g. it asked you to read\n"
+    "  something out) and nothing contradicts the claim, accept it.\n"
+    "- Be strict but not pedantic: cosmetic differences from the goal's wording do not make a\n"
+    "  completed task incomplete.\n"
     "\n"
     "Reply with exactly one JSON object and nothing else:\n"
-    '{"satisfied": true|false, "evidence": "<what you can actually SEE that supports your verdict>"}'
+    '{"satisfied": true|false, "evidence": "<the specific observed detail behind your verdict>"}'
 )
 
 
@@ -204,12 +218,15 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         lines.append(f"Active window: {state.active_window}")
     if state.ui_elements:
         # ADR-2 AX grounding: real element coordinates from the host's
-        # accessibility tree. These are EXACT and reliable for native UI
-        # (toolbar buttons, menu items, address bars). For web content
-        # (links, search results, article text), the AX tree is often empty
-        # or truncated — in that case, ignore these and ground on the
-        # screenshot directly.
-        lines.append("AX UI elements (exact coordinates from accessibility tree):")
+        # accessibility tree, each at its centre point. Exact for native UI
+        # (toolbars, menus, address bars) AND for web page content — browsers
+        # expose links, headings and cells the same way, and reading a link's
+        # position here beats inferring it from a screenshot where its text is
+        # three pixels tall.
+        lines.append(
+            "AX UI elements (exact CENTER coordinates from the accessibility tree "
+            "— click these points as given, do not offset them):"
+        )
         lines.extend(f"- {el}" for el in state.ui_elements)
     if state.open_tabs:
         # Browser tab awareness: the agent must know which tabs are open

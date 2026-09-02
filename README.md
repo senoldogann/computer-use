@@ -187,13 +187,35 @@ Working & tested:
   and the global-point → display-px → pixel-luma mapping is tested end to end.
 - Law 2 evidence-based verification: every action declares an expected
   postcondition (`orchestrator/evidence.py`) and independent witnesses report
-  on it — the AX surface, the focused field's AXValue, the frontmost app, and
-  (with `--verify`) a pixel diff. One confirming witness outweighs silent
-  ones; a witness that cannot speak is INCONCLUSIVE and never fails an action;
-  a *direct* denial is conclusive alone while two *circumstantial* ones must
-  agree. Only then is `VerificationFailedError` folded into `last_error`,
-  without polluting `completed_steps`. A single fragile signal can no longer
-  invent a failure, and an ACKed click that landed on nothing is still caught.
+  on it — the AX surface (its element list *and* a digest of its visible text,
+  folded into one verdict because both come from a single snapshot), the
+  element under the click holding focus, the focused field's AXValue, the
+  frontmost app, and (with `--verify`) a pixel diff. One confirming witness
+  outweighs silent ones; a witness that cannot speak is INCONCLUSIVE and never
+  fails an action; a *direct* denial is conclusive alone while two
+  *circumstantial* ones must agree. Only then is `VerificationFailedError`
+  folded into `last_error`, without polluting `completed_steps`. A single
+  fragile signal can no longer invent a failure, and an ACKed click that landed
+  on nothing is still caught.
+
+  Two witnesses exist because change detection alone cannot judge an action
+  that correctly changed nothing. The focus witness confirms an idempotent
+  click — an already-selected tab, an already-focused button — and the text
+  digest catches effects that move neither the element list nor enough pixels
+  to clear a diff threshold (a calculator display, a status line, a result
+  count). When every witness is silent but an accessibility element covers the
+  click point, the diagnosis says so: the coordinate was right, so the model is
+  told to check whether the goal is already satisfied rather than to re-aim.
+- Grounding that survives a downscaled screenshot: AX elements are reported at
+  their **centre**, not their origin. One image pixel is ~3.3 logical points on
+  a Retina display and summaries are rounded to whole pixels, so aiming at a
+  corner put clicks one point outside 12-point-tall links. The traversal is
+  deep enough to reach page content (browsers nest their `AXWebArea` ten levels
+  down), unnamed links take their name from descendant text, and elements with
+  no clickable area never reach the model.
+- Applications are identified by bundle id, not by name: macOS translates
+  display names, so "Calculator" and "Hesap Makinesi" are the same app and
+  neither `open -a` nor a name comparison can bridge that alone.
 - One coordinate space: `ScreenMap` (`vision/coordinates.py`) owns both
   directions between the model's screenshot map and logical screen points, so
   AX rects and model coordinates are always comparable and a conversion can
