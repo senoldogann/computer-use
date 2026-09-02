@@ -12,9 +12,18 @@ from pathlib import Path
 import pytest
 
 from computeruse.orchestrator.schemas import MouseClick, PressHotkey, TypeText, Wait
-from computeruse.skills.distiller import Trajectory, distill, signature_of
-from computeruse.skills.registry import SkillRegistry, search
-from computeruse.skills.schemas import SkillDefinition, summary_of
+from computeruse.skills.distiller import (
+    TAG_LIMIT,
+    Trajectory,
+    derive_tags,
+    distill,
+    signature_of,
+)
+from computeruse.skills.registry import (
+    SkillRegistry,
+    search,
+)
+from computeruse.skills.schemas import SkillDefinition, SkillSummary, summary_of
 
 
 def _definition(**overrides: object) -> SkillDefinition:
@@ -147,3 +156,80 @@ def test_search_ranks_app_and_tags() -> None:
 def test_search_no_hit_returns_empty() -> None:
     summaries = [summary_of(_definition(skill_id="a.x", app="Numbers"))]
     assert search(summaries, "spreadsheet") == []
+
+
+# --- retrieval: a skill nobody can find is a skill nobody learns from --------
+
+
+def _summary(skill_id: str, description: str, app: str, tags: tuple[str, ...] = ()) -> SkillSummary:
+    return SkillSummary(skill_id=skill_id, description=description, app=app, tags=tags)
+
+
+def test_search_matches_the_description() -> None:
+    """The description is the only field guaranteed to have content.
+
+    Measured on a real store: 12 skills indexed, every realistic query returned
+    nothing, because distillation left tags empty and a run's query is its goal
+    text — which rarely repeats the application's name verbatim.
+    """
+    summaries = [
+        _summary("chrome.a", "Open Hacker News and read the top story comments", "Google Chrome"),
+        _summary("finder.b", "Open Finder and navigate to Downloads", "Finder"),
+    ]
+    hits = search(summaries, "open hacker news comments")
+    assert [h.summary.skill_id for h in hits] == ["chrome.a"]
+
+
+def test_app_match_outranks_a_coincidental_word_match() -> None:
+    """Weights rank, they do not gate: the same-app skill sorts first."""
+    summaries = [
+        _summary("finder.b", "Open the downloads folder", "Finder"),
+        _summary("chrome.a", "Open the downloads page", "Chrome"),
+    ]
+    hits = search(summaries, "chrome open downloads")
+    assert hits[0].summary.skill_id == "chrome.a"
+    assert len(hits) == 2  # the other still matches, it just ranks lower
+
+
+def test_derived_tags_describe_the_run_and_drop_generic_words() -> None:
+    """Tags come from the sub-goals — what the agent actually had to do."""
+    trajectory = Trajectory(
+        app="Google Chrome",
+        description="open the comments",
+        steps=(MouseClick(type="mouse_click", x=1, y=1),),
+        step_descriptions=(
+            "Navigate Chrome to news.ycombinator.com.",
+            "Click the comments link for the top story.",
+        ),
+    )
+    tags = derive_tags(trajectory)
+    assert "ycombinator" in tags and "comments" in tags
+    # Words common to every workflow distinguish nothing and are excluded.
+    assert "click" not in tags and "navigate" not in tags and "the" not in tags
+    # Deterministic and bounded, so two runs of one flow still de-duplicate.
+    assert tags == derive_tags(trajectory)
+    assert len(tags) <= TAG_LIMIT
+
+
+def test_a_distilled_skill_carries_no_coordinates() -> None:
+    """A stored coordinate is wrong by the time anyone replays it.
+
+    The window at (404, 227) yesterday is a different link today. Measured:
+    replaying a skill that named one took 18 steps where the cold run took 10.
+    """
+    trajectory = Trajectory(
+        app="Google Chrome",
+        description="open the top story comments",
+        steps=(
+            MouseClick(type="mouse_click", x=404, y=227),
+            TypeText(type="type_text", text="hello", wpm=40),
+        ),
+        step_descriptions=("Click the comments link.", "Type a reply."),
+    )
+    result = distill(trajectory, known_signatures=())
+    assert result.definition is not None
+    rendered = " ".join(result.definition.steps)
+    assert "404" not in rendered and "x=" not in rendered and "y=" not in rendered
+    # What transfers is still there: the intent and the non-positional params.
+    assert "Click the comments link." in rendered
+    assert "hello" in rendered

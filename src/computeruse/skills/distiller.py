@@ -8,13 +8,15 @@ Persistence is the registry's job, not the distiller's.
 
 from __future__ import annotations
 
+import re
+
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from computeruse.orchestrator.schemas import Action
-from computeruse.skills.schemas import SkillDefinition
+from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition
 
 
 @dataclass(frozen=True)
@@ -97,11 +99,40 @@ def distill(trajectory: Trajectory, known_signatures: set[str]) -> DistillResult
         skill_id=f"{_slug(trajectory.app)}.{signature}",
         description=trajectory.description,
         app=trajectory.app,
-        tags=trajectory.tags,
+        tags=trajectory.tags or derive_tags(trajectory),
         steps=steps_readable,
         signature=signature,
     )
     return DistillResult(kind="skill", definition=definition, signature=signature)
+
+
+#: How many derived tags to keep. Enough to describe what a workflow did,
+#: few enough that one verbose run cannot dominate the search index.
+TAG_LIMIT: Final[int] = 12
+
+def derive_tags(trajectory: Trajectory) -> tuple[str, ...]:
+    """Search keywords for a skill, taken from what the run actually did (pure).
+
+    Distillation used to leave this empty, and the registry scored *only* app
+    and tags — so a real store held twelve skills that no realistic query could
+    reach. Scoring the description fixed the worst of that, but the description
+    is only the goal as *asked*; the sub-goals record what the agent actually
+    had to do to satisfy it, which is what a later run is really searching for.
+
+    Deterministic and cheap: content words from the sub-goals, minus words
+    common to every workflow, in first-seen order so two runs of the same flow
+    produce the same tags and de-duplication still works.
+    """
+    tags: list[str] = []
+    for description in trajectory.step_descriptions:
+        cleaned = re.sub(r"[^\w]+", " ", description.lower(), flags=re.UNICODE)
+        for token in cleaned.split():
+            if len(token) < 3 or token in UNINFORMATIVE_WORDS or token in tags:
+                continue
+            tags.append(token)
+            if len(tags) >= TAG_LIMIT:
+                return tuple(tags)
+    return tuple(tags)
 
 
 _COORDINATE_KEYS: frozenset[str] = frozenset({"x", "y", "start_x", "start_y", "end_x", "end_y"})
@@ -139,9 +170,24 @@ def _semantic_params(action: Action) -> str:
 
 
 def _compact_params(action: Action) -> str:
-    """Summarize an action's params to a short stable string for the record."""
+    """Summarize an action's params to a short stable string for the record.
+
+    Screen coordinates are deliberately omitted. They are only meaningful on
+    the screen that produced them: the window that was at (404, 227) yesterday
+    is a different link today, and a stored skill that names one invites the
+    model to click it again. Measured: replaying a distilled skill took 18
+    steps where the cold run took 10, and the skill's own text told the agent
+    to click a coordinate belonging to a story that had since moved. The
+    sub-goal preceding each step already says *what* was being clicked, which
+    is the part that transfers.
+
+    They were already excluded from the de-duplication signature for a related
+    reason — UI drift must not fork one workflow into many skills.
+    """
     data = action.model_dump(exclude_none=True)
     data.pop("type", None)
+    for key in _COORDINATE_KEYS:
+        data.pop(key, None)
     return ",".join(f"{k}={data[k]}" for k in sorted(data))
 
 

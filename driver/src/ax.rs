@@ -58,6 +58,13 @@ extern "C" {
         attribute: CFTypeRef,
         value: CFTypeRef,
     ) -> i32;
+    fn AXUIElementCopyElementAtPosition(
+        application: CFTypeRef,
+        x: f32,
+        y: f32,
+        element: *mut CFTypeRef,
+    ) -> i32;
+    fn AXUIElementPerformAction(element: CFTypeRef, action: CFTypeRef) -> i32;
     fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
     fn AXValueGetValue(value: CFTypeRef, the_type: u32, value_ptr: *mut c_void) -> bool;
     fn AXIsProcessTrusted() -> bool;
@@ -531,6 +538,62 @@ fn descendant_text(children: &[HostElement], max_chars: usize) -> String {
         Some((cut, _)) => trimmed[..cut].to_string(),
         None => trimmed.to_string(),
     }
+}
+
+/// Ask the element under a global point to activate itself.
+///
+/// The *quiet* actuation path. A synthetic click goes into the system event
+/// stream, so it lands on whatever is frontmost and drags the user's real
+/// cursor with it; this addresses one element directly, which neither moves
+/// the cursor nor requires the target to be in front. That is the difference
+/// between an agent that owns the machine while it works and one that can work
+/// beside its user.
+///
+/// Returns whether an element accepted the press. `false` is an ordinary
+/// answer, not an error: plenty of elements expose no press action at all, and
+/// the caller falls back to a synthetic click. A `true` is *not* proof the
+/// press did anything — a Chromium web view is documented to answer
+/// `kAXErrorSuccess` and leave the page untouched — which is exactly why the
+/// orchestrator verifies every action against the screen afterwards rather
+/// than trusting an ACK.
+pub fn press_element_at(pid: u32, x: f64, y: f64) -> Result<bool, BackendError> {
+    if !trusted() {
+        return Err(BackendError(
+            "Accessibility consent required to press an element. Grant it in \
+             System Settings > Privacy & Security > Accessibility, then restart \
+             the driver."
+                .to_string(),
+        ));
+    }
+    // Hit-test inside the *target application*, never system-wide. The
+    // system-wide element resolves by z-order, so it returns whatever window
+    // happens to be on top — which defeats the entire point. Measured: with
+    // Chrome covering Calculator, three system-wide presses on Calculator's
+    // keypad all answered success, Chrome's own elements absorbed them, and
+    // the calculator display never moved. Asking the application resolves
+    // within that app whether or not it is in front.
+    let app = unsafe { AXUIElementCreateApplication(pid as i32) };
+    if app.is_null() {
+        return Err(BackendError(format!(
+            "AXUIElementCreateApplication failed for pid {pid}"
+        )));
+    }
+    // Create Rule: both the application element and the hit-test result are
+    // ours; wrapping them releases each when this returns.
+    let app = unsafe { CFType::wrap_under_create_rule(app) };
+    let mut element: CFTypeRef = std::ptr::null();
+    let hit = unsafe {
+        AXUIElementCopyElementAtPosition(app.as_CFTypeRef(), x as f32, y as f32, &mut element)
+    };
+    if hit != AX_ERROR_SUCCESS || element.is_null() {
+        return Ok(false);
+    }
+    let element = unsafe { CFType::wrap_under_create_rule(element) };
+    let action = CFString::from_static_string("AXPress");
+    let performed = unsafe {
+        AXUIElementPerformAction(element.as_CFTypeRef(), action.as_concrete_TypeRef() as CFTypeRef)
+    };
+    Ok(performed == AX_ERROR_SUCCESS)
 }
 
 /// The `CFBundleIdentifier` of a running process, or "" when it has none.

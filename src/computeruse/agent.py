@@ -69,6 +69,7 @@ from computeruse.vision.ax import (
     open_tabs_from_tree,
 )
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
+from computeruse.vision.coordinates import Point, Rect, Size
 from computeruse.vision.focus import FocusedWindow
 
 
@@ -129,6 +130,12 @@ class AgentConfig:
     # display's global origin, so coordinates read off its screenshot convert
     # back into the global space the driver actuates in.
     display_id: int = 0
+    # Act on elements directly instead of moving the cursor and clicking, when
+    # the target exposes an accessibility press. Off by default: it changes how
+    # every click reaches the host, and the ordinary path is the verified one.
+    # On, the agent can work in an application the user has in the background
+    # without stealing focus or the pointer.
+    background_actuation: bool = False
     # Whether the OBSERVE screenshot is annotated with the AX element boxes
     # (Set-of-Marks). ``click_mark`` itself does not depend on this — it reads
     # the element list, which exists with vision off entirely.
@@ -186,6 +193,25 @@ def guarded(
         )
 
     return guard
+
+
+def _display_viewport(client: ActuationClient, display_id: int) -> Rect | None:
+    """The observed display's rect in global logical points (best effort).
+
+    Returns ``None`` when the screen cannot be captured — Screen Recording
+    consent may be absent, and a missing viewport must widen perception back to
+    "everything" rather than narrow it to nothing.
+    """
+    try:
+        capture = client.capture(display_id)
+    except Exception as exc:  # noqa: BLE001 - perception degrades, never blocks
+        LOGGER.debug("viewport probe failed; AX filtering stays off: %s", exc)
+        return None
+    scale = capture.scale or 1.0
+    return Rect(
+        Point(capture.origin_x, capture.origin_y),
+        Size(capture.width / scale, capture.height / scale),
+    )
 
 
 class Agent:
@@ -272,7 +298,15 @@ class Agent:
             # activated is a setup error, not a degradable probe: clicking
             # blind on the wrong foreground app is worse than failing loudly
             # (Law 6.3).
-            if self._config.activate_app_on_start and self._config.app is not None:
+            # Background actuation does not need the app in front, and
+            # fronting it once at startup gives away the entire point: a live
+            # run finished correctly but with the target pulled to the
+            # foreground, exactly what the user asked to avoid.
+            activate_on_start = (
+                self._config.activate_app_on_start
+                and not self._config.background_actuation
+            )
+            if activate_on_start and self._config.app is not None:
                 try:
                     client.activate_app(self._config.app)
                 except Exception as exc:
@@ -368,6 +402,27 @@ class Agent:
                     return None
                 return cached_pid
 
+            # The observed display's rect in global logical points, resolved
+            # once: display geometry does not change mid-run, and re-capturing
+            # a Retina frame per probe is the most expensive thing the loop can
+            # do. Everything outside it is unreachable — not a target and not
+            # evidence — so perception spends its budget inside it.
+            viewport = _display_viewport(client, self._config.display_id)
+
+            def quiet_press(point: Point) -> bool:
+                """Press the element under a point inside the target app.
+
+                Resolved against the app's own pid rather than system-wide: a
+                system-wide hit test answers by z-order, so it returns whatever
+                window is on top. Measured with Chrome covering Calculator,
+                three system-wide presses all reported success, Chrome absorbed
+                them, and the calculator never moved.
+                """
+                current_pid = _current_pid()
+                if current_pid is None:
+                    return False
+                return client.ax_press(current_pid, point.x, point.y)
+
             def ax_probe() -> AxProbeResult:
                 current_pid = _current_pid()
                 if current_pid is None:
@@ -380,6 +435,7 @@ class Agent:
                 summaries = interactive_summaries(
                     tree,
                     max_count=AX_MAX_ELEMENTS,
+                    viewport=viewport,
                 )
                 if len(summaries) >= AX_MAX_ELEMENTS:
                     # The DFS budget was exhausted: page content deeper in the
@@ -396,7 +452,7 @@ class Agent:
                 return AxProbeResult(
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),
-                    content=content_digest(tree),
+                    content=content_digest(tree, viewport),
                 )
 
             def focused_text_value_probe() -> str | None:
@@ -497,6 +553,7 @@ class Agent:
                 # frontmost, "drift away from it" is not a failure state.
                 app_is_pinned=self._config.app is not None,
                 on_complete=on_complete,
+                quiet_press=quiet_press if self._config.background_actuation else None,
                 completion_check=self._config.completion_check,
                 knowledge=knowledge,
                 settle_max_polls=self._config.settle_max_polls,

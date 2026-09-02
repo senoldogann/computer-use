@@ -20,6 +20,8 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.prompts import InvalidDecisionError
 from computeruse.orchestrator.schemas import (
+    Action,
+    ActivateApp,
     AgentTurn,
     Finish,
     MouseClick,
@@ -28,6 +30,7 @@ from computeruse.orchestrator.schemas import (
     TypeText,
 )
 from computeruse.skills.distiller import Trajectory, signature_of
+from computeruse.vision.coordinates import Point
 from tests.smoke.conftest import SOCKET_PATH, rpc_call
 
 
@@ -262,3 +265,129 @@ def test_repeated_malformed_turns_still_terminate() -> None:
     )
     with pytest.raises((UnrecoverableFailureError, MaxStepsError)):
         runner.run(goal="never gets a decision")
+
+
+def test_background_mode_bypasses_the_focus_gate() -> None:
+    """The quiet path is tried before the gate that fronts the app.
+
+    That gate exists because a synthetic click goes to whatever is frontmost,
+    so it brings the target forward first — precisely what background mode is
+    for avoiding. Guarding first fronted the app on every action and gave the
+    whole benefit back; a live run finished correctly with the window pulled
+    to the foreground.
+    """
+    pressed: list[tuple[float, float]] = []
+    clicked: list[Action] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="press it",
+                action=MouseClick(type="mouse_click", x=30, y=16),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    def quiet_press(point: Point) -> bool:
+        pressed.append((point.x, point.y))
+        return True
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=clicked.append,
+        quiet_press=quiet_press,
+        max_steps=5,
+    )
+    runner.run(goal="press quietly")
+    assert pressed == [(30, 16)]
+    # The synthetic click never ran: no cursor moved, nothing was fronted.
+    assert clicked == []
+
+
+def test_a_declined_quiet_press_falls_back_to_a_real_click() -> None:
+    """It can only ever add reach: what AX refuses still gets clicked."""
+    clicked: list[Action] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="press it",
+                action=MouseClick(type="mouse_click", x=30, y=16),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=clicked.append,
+        quiet_press=lambda _point: False,
+        max_steps=5,
+    )
+    runner.run(goal="press loudly")
+    assert [a.type for a in clicked] == ["mouse_click"]
+
+
+def test_only_a_plain_left_click_takes_the_quiet_path() -> None:
+    """Drags, scrolls and multi-clicks have no accessibility equivalent."""
+    runner = OodaRunner(
+        provider=lambda _s: AgentTurn(
+            thought="", sub_goal="", action=Finish(type="finish", status="success", summary="")
+        ),
+        execute_physical=lambda _a: None,
+        quiet_press=lambda _p: True,
+    )
+    assert runner._pressed_quietly(MouseClick(type="mouse_click", x=1, y=1)) is True
+    assert (
+        runner._pressed_quietly(MouseClick(type="mouse_click", x=1, y=1, click_count=2)) is False
+    )
+    assert (
+        runner._pressed_quietly(MouseClick(type="mouse_click", x=1, y=1, button="right")) is False
+    )
+    assert runner._pressed_quietly(TypeText(type="type_text", text="x", wpm=40)) is False
+
+
+def test_background_mode_refuses_to_front_the_app() -> None:
+    """The mode's one promise cannot depend on the model reading prose.
+
+    A run told in its prompt not to bring the target forward emitted
+    activate_app anyway. Actuation reaches the app wherever it is, so fronting
+    it buys nothing and costs the exact thing the mode protects.
+    """
+    executed: list[Action] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="bring it forward",
+                action=ActivateApp(type="activate_app", app="Calculator"),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        quiet_press=lambda _p: True,
+        max_steps=5,
+    )
+    runner.run(goal="stay in the background")
+    assert executed == []
+
+    # Without the mode it is an ordinary action and still runs.
+    executed.clear()
+    OodaRunner(
+        provider=provider, execute_physical=executed.append, max_steps=5
+    ).run(goal="ordinary run")
+    assert [a.type for a in executed] == ["activate_app"]

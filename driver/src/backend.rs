@@ -211,6 +211,16 @@ pub trait Backend: Send + Sync {
     /// either the walk time or the response.
     fn ax_snapshot(&self, pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElement, BackendError>;
 
+    /// Ask the accessibility element under a point to activate itself.
+    ///
+    /// Returns whether an element accepted the press. This is the *quiet*
+    /// actuation path: it addresses one element directly instead of posting a
+    /// click into the global event stream, so it neither moves the user's
+    /// cursor nor depends on the target being frontmost. Not every element
+    /// supports it — a `false` here is an ordinary answer, and the caller
+    /// falls back to a synthetic click.
+    fn ax_press(&self, pid: u32, point: Point) -> Result<bool, BackendError>;
+
     /// Returns the frontmost app, its focused window, and the cursor — the
     /// OBSERVE step's window/cursor half (and the pid that feeds
     /// ``ax_snapshot`` when the caller did not name an app).
@@ -566,6 +576,18 @@ impl Backend for SimulatedBackend {
             state.address_value = text.to_string();
         }
         Ok(())
+    }
+
+    fn ax_press(&self, _pid: u32, point: Point) -> Result<bool, BackendError> {
+        // The fixture models the same consequence a real press has — focus
+        // moves to whatever sits under the point — so the closed loop can be
+        // exercised offline. An inert stub would make every pressed element
+        // look like a miss to the verification layer.
+        let hit = Self::element_at(point).is_some();
+        if hit {
+            self.click(point, Button::Left, 1)?;
+        }
+        Ok(hit)
     }
 
     fn ax_snapshot(&self, _pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElement, BackendError> {

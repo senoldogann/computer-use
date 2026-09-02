@@ -451,6 +451,10 @@ impl Backend for QuartzBackend {
         self.hotkey(&[Modifier::Command], "v")
     }
 
+    fn ax_press(&self, pid: u32, point: Point) -> Result<bool, BackendError> {
+        crate::ax::press_element_at(pid, point.x as f64, point.y as f64)
+    }
+
     fn ax_snapshot(&self, pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElement, BackendError> {
         crate::ax::ax_snapshot(pid, max_depth, max_nodes)
     }

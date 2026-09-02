@@ -9,12 +9,14 @@ on-disk store.
 
 from __future__ import annotations
 
+import re
+
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from computeruse.skills.schemas import SkillDefinition, SkillSummary, summary_of
+from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition, SkillSummary, summary_of
 
 
 @dataclass(frozen=True)
@@ -25,9 +27,14 @@ class RelevanceMatch:
     score: int
 
 
-_SEARCH_STOP_WORDS: frozenset[str] = frozenset(
-    {"the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "or", "is", "it", "with", "as", "by", "from", "into"}
-)
+def _content_tokens(text: str) -> frozenset[str]:
+    """Lowercased content words of a phrase, punctuation stripped (pure)."""
+    cleaned = re.sub(r"[^\w]+", " ", text.lower(), flags=re.UNICODE)
+    return frozenset(
+        token
+        for token in cleaned.split()
+        if len(token) > 1 and token not in UNINFORMATIVE_WORDS
+    )
 
 
 def search(
@@ -38,22 +45,38 @@ def search(
 ) -> list[RelevanceMatch]:
     """Rank summaries against a query (pure).
 
-    A deliberately cheap scorer: every matched tag or app token bumps the score.
-    Queries are lowercased and filtered against common stop-words. Matches below
-    ``min_score`` are rejected to prevent low-quality drift.
+    A deliberately cheap scorer: every matched app, tag or description token
+    bumps the score. Queries are lowercased and filtered against common
+    stop-words. Matches below ``min_score`` are rejected to prevent low-quality
+    drift.
+
+    The description is scored because it is the only field guaranteed to have
+    content — it *is* the goal the skill was distilled from. Scoring app and
+    tags alone made the store write-only: measured on a real store, 12 skills
+    were indexed and every realistic query returned nothing, because the
+    distiller left tags empty and a run's query is its goal text, which rarely
+    repeats the application's name verbatim. A skill nobody can retrieve is a
+    skill nobody learns from.
+
+    Weights rank rather than gate: an app match (2) outranks a word match (1),
+    so a same-app skill sorts above a coincidental phrase match from another
+    application, and ``min_score`` still filters noise.
     """
     tokens = {
         token
         for token in query.lower().split()
-        if token and token not in _SEARCH_STOP_WORDS
+        if token and token not in UNINFORMATIVE_WORDS
     }
     matches: list[RelevanceMatch] = []
     for summary in summaries:
         score = 0
+        description_tokens = _content_tokens(summary.description)
         for token in tokens:
             if token in (summary.app.lower(),):
                 score += 2
             if any(token in tag.lower() for tag in summary.tags):
+                score += 1
+            if token in description_tokens:
                 score += 1
         if score >= min_score:
             matches.append(RelevanceMatch(summary=summary, score=score))

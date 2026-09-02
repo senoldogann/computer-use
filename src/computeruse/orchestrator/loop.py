@@ -754,6 +754,10 @@ class OodaRunner:
     # Goal-completion auditor (VERIFY, terminal): given the final state and the
     # model's own summary, decide whether the goal is *observably* satisfied.
     completion_check: Callable[[WorkingState, str], CompletionVerdict] | None = None
+    #: Optional quiet actuation path: activate the element under a point
+    #: directly, returning whether it accepted. When it declines, the ordinary
+    #: synthetic click runs instead, so this can only ever add reach.
+    quiet_press: Callable[[Point], bool] | None = None
     knowledge: tuple[str, ...] = ()
     # Post-action settle budget, in polls of ``settle_interval_s``. The
     # runner is a mechanism and defaults to no wait; pacing is a product
@@ -1178,7 +1182,26 @@ class OodaRunner:
         a contradiction has already raised by then.
         """
         expectation = expectation_for(action)
-        self._guard_positional(action)
+        # The quiet path is tried BEFORE the focus gate, not after. That gate
+        # exists because a synthetic click goes to whatever is frontmost, so it
+        # brings the target app forward first — which is precisely what the
+        # quiet path is for avoiding. Guarding first would front the app on
+        # every action and give back the whole benefit; observed in a live run,
+        # which finished correctly but with the app pulled to the front.
+        if self.quiet_press is not None and isinstance(action, ActivateApp):
+            # Background mode's one promise is that the user's foreground is
+            # not disturbed, and honouring it cannot rest on the model reading
+            # prose: a run told not to front the app did it anyway. Actuation
+            # here reaches the app wherever it is, so bringing it forward buys
+            # nothing and costs exactly the thing the mode exists to protect.
+            LOGGER.info("ooda background mode: not fronting %r", action.app)
+            # Nothing was actuated, so no witness has anything to say — which
+            # is silence, not a miss, and the recovery ladder must not treat it
+            # as one.
+            return Evidence.INCONCLUSIVE
+        quiet = self._pressed_quietly(action)
+        if not quiet:
+            self._guard_positional(action)
         before = self._pre_action_frame(expectation)
         if before is not None:
             # Fail-closed coordinate gate: a point outside the observed
@@ -1188,7 +1211,12 @@ class OodaRunner:
         before_content = self._observation.content
         before_window = self._observation.window
 
-        self._execute_physical(action)
+        if not quiet:
+            self._execute_physical(action)
+        else:
+            # The quiet press already touched the host; the cached OBSERVE
+            # frame is stale for exactly the same reason.
+            self._physical_since_capture = True
         # Any physical action may have changed the screen: invalidate the
         # encode cache so the next OBSERVE captures and encodes a fresh frame.
         self._last_capture_hash = None
@@ -1954,6 +1982,36 @@ class OodaRunner:
     # ------------------------------------------------------------------
     # Primitives
     # ------------------------------------------------------------------
+
+    def _pressed_quietly(self, action: Action) -> bool:
+        """Try to activate a click's target directly, without the cursor.
+
+        A synthetic click goes into the system event stream: it lands on
+        whatever is frontmost and drags the user's real pointer with it, so the
+        machine belongs to the agent for the duration of a run. Asking the
+        accessibility element under the point to press *itself* has neither
+        cost — verified on a real desktop, three keypad presses landed in a
+        background Calculator while Chrome stayed frontmost and the cursor
+        never moved.
+
+        Opt-in, and a strict fast path: anything other than a plain left click
+        goes the ordinary way, and so does a press the element declines. It
+        returning ``True`` is not proof the press did anything — a Chromium web
+        view answers success and leaves the page untouched — so the action is
+        still verified against the screen exactly as before, and a quiet press
+        that changed nothing fails and recovers like any other miss.
+        """
+        if self.quiet_press is None:
+            return False
+        if not isinstance(action, MouseClick) or action.click_count != 1:
+            return False
+        if action.button != "left":
+            return False
+        try:
+            return self.quiet_press(Point(action.x, action.y))
+        except Exception as exc:  # noqa: BLE001 - the loud path is the fallback
+            LOGGER.debug("quiet press unavailable, using a synthetic click: %s", exc)
+            return False
 
     def _execute_physical(self, action: Action) -> None:
         """Execute a physical action while honoring the emergency stop."""

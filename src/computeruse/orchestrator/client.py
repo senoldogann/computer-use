@@ -382,6 +382,26 @@ class ActuationClient:
             apps.append(name)
         return tuple(apps)
 
+    def ax_press(self, pid: int, x: float, y: float) -> bool:
+        """Ask the element at a point inside an app to activate itself.
+
+        The quiet actuation path: it addresses one accessibility element
+        directly instead of posting a click into the system event stream, so it
+        neither moves the user's cursor nor needs the target in front. Verified
+        on a real desktop — three keypad presses landed in a background
+        Calculator while Chrome stayed frontmost and the cursor never moved.
+
+        Returns whether an element *accepted* the press, which is not the same
+        as it having worked: a Chromium web view answers success and leaves the
+        page untouched. Treat ``True`` as "the quiet path was available" and let
+        the verification witnesses decide whether anything happened.
+        """
+        response = self.request("ax_press", {"pid": pid, "x": int(x), "y": int(y)})
+        if response.get("ok") != "ax_press":
+            message = str(response.get("message", "unknown driver error"))
+            raise DriverRpcError(method="ax_press", driver_message=message)
+        return bool(response.get("pressed", False))
+
     def ax_snapshot(
         self,
         pid: int,

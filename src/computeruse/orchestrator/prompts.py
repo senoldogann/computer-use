@@ -314,7 +314,13 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # can follow a known workflow instead of re-deriving it from scratch.
         lines.append(f"Mounted skill: {state.skill.skill_id} — {state.skill.description}")
         if state.skill.steps:
-            lines.append("Skill steps:")
+            lines.append(
+                "A route that reached this goal before — a HINT, not a script. It carries no "
+                "coordinates, because those only meant anything on the screen that recorded them. "
+                "Follow it where the current screen agrees, skip steps already satisfied, and "
+                "abandon it the moment what you see disagrees with it. Always re-derive every "
+                "target from the CURRENT screen."
+            )
             lines.extend(f"{index}. {step}" for index, step in enumerate(state.skill.steps, 1))
     if state.completed_steps:
         total = len(state.completed_steps)
@@ -347,8 +353,30 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
     return "\n".join(lines)
 
 
+#: Told to the model when actuation goes through the accessibility API rather
+#: than the cursor. Without it the model reasons as if it still had to bring
+#: the app forward — a live run opened Spotlight and launched the target,
+#: fronting the very window the user had deliberately left in the background.
+BACKGROUND_ACTUATION_NOTE: Final[str] = (
+    "BACKGROUND MODE: your clicks activate elements directly through the accessibility API, "
+    "so the target application does NOT need to be frontmost and your clicks do not move the "
+    "user's pointer. The user is working in another window right now — leave it alone.\n"
+    "- Do NOT activate, launch, or switch to the target app, and do NOT use Spotlight, the Dock "
+    "or Cmd-Tab to bring it forward. It is already reachable where it is.\n"
+    "- The AX element list describes the TARGET app's window even while another app is on top. "
+    "Trust it over the screenshot, which shows whatever is visually in front.\n"
+    "- If an element genuinely cannot be reached this way the system falls back on its own; you "
+    "do not need to arrange focus yourself."
+)
+
+
 def decision_prompt(
-    state: WorkingState, *, app: str, correction: str | None = None, max_steps: int = 100
+    state: WorkingState,
+    *,
+    app: str,
+    correction: str | None = None,
+    max_steps: int = 100,
+    background: bool = False,
 ) -> str:
     """The full prompt for one decision (pure).
 
@@ -359,6 +387,7 @@ def decision_prompt(
         f"Application: {app}",
         ACTION_CONTRACT,
         "",
+        *( (BACKGROUND_ACTUATION_NOTE, "") if background else () ),
         state_context(state, max_steps=max_steps),
         "",
         'Reply now with exactly one JSON decision object. JSON object ONLY — no markdown, no prose, no extra braces outside the object.',
@@ -652,6 +681,7 @@ def scaffolded_provider(
     app: str,
     max_retries: int = 2,
     max_steps: int = 100,
+    background: bool = False,
 ) -> Callable[[WorkingState], AgentTurn]:
     """Wrap a model transport so the OODA loop sees a well-behaved provider.
 
@@ -664,7 +694,7 @@ def scaffolded_provider(
     """
 
     def provider(state: WorkingState) -> AgentTurn:
-        prompt = decision_prompt(state, app=app, max_steps=max_steps)
+        prompt = decision_prompt(state, app=app, max_steps=max_steps, background=background)
         last_error: InvalidDecisionError | None = None
         # One initial ask plus at most ``max_retries`` corrective re-asks.
         for _ in range(max_retries + 1):
@@ -673,7 +703,9 @@ def scaffolded_provider(
                 return parse_decision(reply)
             except InvalidDecisionError as exc:
                 last_error = exc
-                prompt = decision_prompt(state, app=app, correction=exc.hint, max_steps=max_steps)
+                prompt = decision_prompt(
+                    state, app=app, correction=exc.hint, max_steps=max_steps, background=background
+                )
         # Exhausted retries: surface the last failure so the runner folds it
         # into ``last_error`` and the loop survives a hallucinating model.
         assert last_error is not None

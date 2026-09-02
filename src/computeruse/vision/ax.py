@@ -176,7 +176,7 @@ def focused_text_value(root: AXElement) -> str | None:
     return walk(root)
 
 
-def is_actionable(node: AXElement) -> bool:
+def is_actionable(node: AXElement, viewport: Rect | None = None) -> bool:
     """Can the agent actually aim at this element (pure)?
 
     Filters out what has no clickable area. A collapsed menu still reports
@@ -186,8 +186,28 @@ def is_actionable(node: AXElement) -> bool:
     0x0 menu items at y=1112 on an 1112-point display, so the model's entire
     view of the machine was elements it could never click, while the page's
     real links never made the list.
+
+    ``viewport`` extends the same reasoning from size to position: an element
+    outside the observed display cannot be clicked and cannot be read off the
+    screenshot either, so it is not a target — it is budget spent on nothing.
+    Measured on a GitHub issues page: 1525 accessibility nodes, **429 of them
+    on screen**. The other 1096 — collapsed menus, rows below the fold, other
+    windows — were competing for the same capped list as the answer the task
+    depended on, and whether that answer made the cut was luck.
+
+    Intersection, not containment: an element half-scrolled off the top is
+    still clickable on the part that shows.
     """
-    return node.width > 0 and node.height > 0
+    if node.width <= 0 or node.height <= 0:
+        return False
+    if viewport is None:
+        return True
+    return (
+        node.x < viewport.origin.x + viewport.size.width
+        and node.x + node.width > viewport.origin.x
+        and node.y < viewport.origin.y + viewport.size.height
+        and node.y + node.height > viewport.origin.y
+    )
 
 
 def interactive_summaries(
@@ -195,6 +215,7 @@ def interactive_summaries(
     *,
     max_depth: int = 20,
     max_count: int = 24,
+    viewport: Rect | None = None,
 ) -> tuple[str, ...]:
     """Compact renderings of actionable elements, web-content first (pure).
 
@@ -225,7 +246,7 @@ def interactive_summaries(
             return
         if (
             node.role in INTERACTIVE_ROLES
-            and is_actionable(node)
+            and is_actionable(node, viewport)
             and not (node.role == "MenuBarItem" and node.title.lower() in ("apple", ""))
         ):
             summaries.append(element_summary(node))
@@ -239,7 +260,7 @@ def interactive_summaries(
             return
         if (
             node.role in INTERACTIVE_ROLES
-            and is_actionable(node)
+            and is_actionable(node, viewport)
             and not (node.role == "MenuBarItem" and node.title.lower() in ("apple", ""))
         ):
             summaries.append(element_summary(node))
@@ -397,7 +418,7 @@ def summaries_to_image_space(
 CONTENT_DIGEST_MAX: Final[int] = 200
 
 
-def content_digest(root: AXElement) -> tuple[str, ...]:
+def content_digest(root: AXElement, viewport: Rect | None = None) -> tuple[str, ...]:
     """The app's visible text content, for change detection only (pure).
 
     Never shown to the model — this exists because the two witnesses that were
@@ -422,7 +443,10 @@ def content_digest(root: AXElement) -> tuple[str, ...]:
         if len(digest) >= CONTENT_DIGEST_MAX:
             return
         text = node.value or node.title
-        if text:
+        # Off-screen text is not evidence about what the agent just did, and
+        # including it crowded the cap: on one page 72% of nodes were not
+        # visible, so whether a visible fact survived truncation was chance.
+        if text and (viewport is None or is_actionable(node, viewport)):
             digest.append(f"{node.role}={text}")
         for child in node.children:
             walk(child)

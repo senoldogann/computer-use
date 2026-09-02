@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from computeruse.orchestrator.client import ActuationClient
 from computeruse.vision import AXElement, element_rect, find_elements
-from computeruse.vision.ax import interactive_summaries, is_actionable
+from computeruse.vision.ax import content_digest, interactive_summaries, is_actionable
 from computeruse.vision.coordinates import (
     DisplayGeometry,
     Point,
@@ -212,3 +212,37 @@ def test_deep_web_content_is_reachable() -> None:
     ])
     summaries = interactive_summaries(root)
     assert any("Deep story link" in line for line in summaries)
+
+
+def test_offscreen_elements_are_not_targets_and_not_evidence() -> None:
+    """What you cannot see, you cannot click — and it is not proof of anything.
+
+    Measured on a GitHub issues page: 1525 accessibility nodes, 429 of them on
+    screen. The other 1096 — collapsed menus, rows below the fold — competed
+    for the same capped list as the fact the task depended on, and on one
+    snapshot 181 of the 200 content entries were off-screen menu items.
+    """
+    viewport = Rect(Point(0, 0), Size(1710, 1112))
+    root = _el("Window", "w", 0, 0, 1710, 1112, children=[
+        _el("MenuItem", "About This Mac", 0, 1112, 220, 20),   # below the display
+        _el("Link", "Issues ( 46 )", 99, 220, 90, 18),         # visible
+        _el("Link", "Far right", 2000, 220, 90, 18),           # another display
+    ])
+    summaries = interactive_summaries(root, viewport=viewport)
+    assert len(summaries) == 1 and "Issues ( 46 )" in summaries[0]
+
+    digest = content_digest(root, viewport)
+    assert any("46" in entry for entry in digest)
+    assert not any("About This Mac" in entry for entry in digest)
+    # Without a viewport nothing is filtered: a missing screen must widen
+    # perception back to everything, never narrow it to nothing.
+    assert len(content_digest(root, None)) > len(digest)
+
+
+def test_partially_visible_elements_still_count() -> None:
+    """Intersection, not containment: a half-scrolled row is still clickable."""
+    viewport = Rect(Point(0, 0), Size(1710, 1112))
+    straddling = _el("Link", "Half off the top", 100, -10, 200, 30)
+    assert is_actionable(straddling, viewport) is True
+    fully_above = _el("Link", "Scrolled away", 100, -40, 200, 30)
+    assert is_actionable(fully_above, viewport) is False

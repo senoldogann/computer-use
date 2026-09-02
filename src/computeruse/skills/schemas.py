@@ -9,9 +9,38 @@ full body (loaded per skill id when the orchestrator decides a skill applies).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, Field
+
+
+#: Grammatical filler, carrying no topic at all. Split from the workflow noise
+#: below because they are different kinds of uselessness: these are noise in
+#: any text, those are noise only in this domain.
+STOP_WORDS: Final[frozenset[str]] = frozenset(
+    {
+        "the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "or",
+        "is", "it", "with", "as", "by", "from", "into", "its", "be", "was",
+    }
+)
+
+#: Words that describe *any* agent workflow and so distinguish none of them.
+#: Shared by tagging and search because they must agree: tagging every skill
+#: with "click" or "open" and then scoring queries on those words makes the
+#: whole store match every query equally, which is the same as matching none.
+#: Distinct from grammatical stop-words ("the", "and") — these are domain noise.
+WORKFLOW_NOISE_WORDS: Final[frozenset[str]] = frozenset(
+    {
+        "click", "clicks", "clicked", "open", "opens", "opened", "press",
+        "type", "typed", "enter", "select", "go", "goes", "navigate", "use",
+        "then", "next", "step", "this", "that", "app", "application",
+        "window", "button", "page", "screen", "current", "visible", "make",
+        "sure", "confirm", "read", "find", "get", "set", "show",
+    }
+)
+
+#: Everything a keyword must not be, for tagging and for search alike.
+UNINFORMATIVE_WORDS: Final[frozenset[str]] = STOP_WORDS | WORKFLOW_NOISE_WORDS
 
 
 class SkillSummary(BaseModel):
