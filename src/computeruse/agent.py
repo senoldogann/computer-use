@@ -130,6 +130,12 @@ class AgentConfig:
     # display's global origin, so coordinates read off its screenshot convert
     # back into the global space the driver actuates in.
     display_id: int = 0
+    # Act on elements directly instead of moving the cursor and clicking, when
+    # the target exposes an accessibility press. Off by default: it changes how
+    # every click reaches the host, and the ordinary path is the verified one.
+    # On, the agent can work in an application the user has in the background
+    # without stealing focus or the pointer.
+    background_actuation: bool = False
     # Whether the OBSERVE screenshot is annotated with the AX element boxes
     # (Set-of-Marks). ``click_mark`` itself does not depend on this — it reads
     # the element list, which exists with vision off entirely.
@@ -292,7 +298,15 @@ class Agent:
             # activated is a setup error, not a degradable probe: clicking
             # blind on the wrong foreground app is worse than failing loudly
             # (Law 6.3).
-            if self._config.activate_app_on_start and self._config.app is not None:
+            # Background actuation does not need the app in front, and
+            # fronting it once at startup gives away the entire point: a live
+            # run finished correctly but with the target pulled to the
+            # foreground, exactly what the user asked to avoid.
+            activate_on_start = (
+                self._config.activate_app_on_start
+                and not self._config.background_actuation
+            )
+            if activate_on_start and self._config.app is not None:
                 try:
                     client.activate_app(self._config.app)
                 except Exception as exc:
@@ -394,6 +408,20 @@ class Agent:
             # do. Everything outside it is unreachable — not a target and not
             # evidence — so perception spends its budget inside it.
             viewport = _display_viewport(client, self._config.display_id)
+
+            def quiet_press(point: Point) -> bool:
+                """Press the element under a point inside the target app.
+
+                Resolved against the app's own pid rather than system-wide: a
+                system-wide hit test answers by z-order, so it returns whatever
+                window is on top. Measured with Chrome covering Calculator,
+                three system-wide presses all reported success, Chrome absorbed
+                them, and the calculator never moved.
+                """
+                current_pid = _current_pid()
+                if current_pid is None:
+                    return False
+                return client.ax_press(current_pid, point.x, point.y)
 
             def ax_probe() -> AxProbeResult:
                 current_pid = _current_pid()
@@ -525,6 +553,7 @@ class Agent:
                 # frontmost, "drift away from it" is not a failure state.
                 app_is_pinned=self._config.app is not None,
                 on_complete=on_complete,
+                quiet_press=quiet_press if self._config.background_actuation else None,
                 completion_check=self._config.completion_check,
                 knowledge=knowledge,
                 settle_max_polls=self._config.settle_max_polls,

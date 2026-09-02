@@ -274,6 +274,12 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
             };
             backend.click(point(params.x, params.y), button, params.click_count)
         }
+        Request::AxPress(params) => {
+            return match backend.ax_press(params.pid, point(params.x, params.y)) {
+                Ok(pressed) => Response::AxPress { pressed },
+                Err(error) => Response::Error { message: error.0 },
+            };
+        }
         Request::MouseDrag(params) => {
             backend.drag(
             point(params.start_x, params.start_y),

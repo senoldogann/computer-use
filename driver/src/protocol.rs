@@ -25,8 +25,20 @@ pub enum Request {
     TypeText(TypeTextParams),
     Screenshot(ScreenshotParams),
     AxSnapshot(AxSnapshotParams),
+    AxPress(AxPressParams),
     ActivateApp(ActivateAppParams),
     ClipboardPaste(ClipboardPasteParams),
+}
+
+/// Ask the element *under a point* to activate itself, rather than sending a
+/// click to whatever is frontmost.
+#[derive(Debug, Deserialize)]
+pub struct AxPressParams {
+    /// The application to resolve the point inside. Hit-testing system-wide
+    /// would return whatever window is on top instead.
+    pub pid: u32,
+    pub x: i64,
+    pub y: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +136,15 @@ pub enum Response {
     HotkeyState {
         /// Whether the user pressed the global kill combo (Law 5.2).
         tripped: bool,
+    },
+    AxPress {
+        /// Whether an accessibility element accepted the press. `false` means
+        /// nothing under the point exposes a press action, so the caller
+        /// should fall back to a synthetic click. `true` means it was
+        /// *accepted*, not that it had an effect — a Chromium web view answers
+        /// success and leaves the page untouched — so the orchestrator still
+        /// verifies against the screen.
+        pressed: bool,
     },
     FocusedWindow {
         /// Process id of the frontmost application (feeds ``ax_snapshot``).

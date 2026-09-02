@@ -108,6 +108,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=AutonomyLevel.GUARDED.value,
         help="Autonomy level 0-3 (default: 2 = guarded).",
     )
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Act on elements through the accessibility API instead of moving "
+        "the cursor, so the agent can work in an app you keep in the background "
+        "without stealing focus or the pointer. Falls back to an ordinary click "
+        "wherever an element declines.",
+    )
     parser.add_argument("--socket", default=DEFAULT_SOCKET, help="Driver Unix socket path.")
     parser.add_argument(
         "--driver",
@@ -278,6 +286,7 @@ def load_model_binding(
     *,
     app: str,
     max_steps: int = 100,
+    background: bool = False,
     stats_sink: Callable[[object], None] | None = None,
 ) -> ModelBinding:
     """Resolve a raw text model and wrap it with the weak-model scaffolding.
@@ -303,7 +312,9 @@ def load_model_binding(
     else:
         model = cast(Callable[[str], str], _load_callable(spec, "model"))
     return ModelBinding(
-        provider=scaffolded_provider(model, app=app, max_steps=max_steps),
+        provider=scaffolded_provider(
+            model, app=app, max_steps=max_steps, background=background
+        ),
         completion_check=completion_auditor(model, app=app),
     )
 
@@ -487,6 +498,7 @@ def build_config(
             args.model,
             app=args.app or "unknown",
             max_steps=args.max_steps,
+            background=getattr(args, "background", False),
             stats_sink=stats_sink,
         )
         provider = binding.provider
@@ -513,6 +525,7 @@ def build_config(
         enable_vision=getattr(args, "vision", True),
         enable_set_of_marks=getattr(args, "marks", True),
         display_id=getattr(args, "display", 0),
+        background_actuation=getattr(args, "background", False),
         # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
         # on a *real* backend is activated (the simulated backend never touches
         # the host — Law 1). An auto-discovered app is never activated:
