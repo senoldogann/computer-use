@@ -117,19 +117,31 @@ def element_rect(element: AXElement) -> Rect:
 def element_summary(element: AXElement) -> str:
     """One compact, parseable line describing an actionable element (pure).
 
-    e.g. ``Button "Reload" at (232,68) 44x24`` or ``TextField "..." at
-    (320,68) 400x24 value="https://example.com" (focused)`` — coordinates and
-    size in the global logical space, plus the focus state when set, so a
-    provider can read the location off the line *and* confirm a click landed
-    on the next turn (ADR-2). A non-empty AXValue is included so the model
-    can confirm text it typed/pasted is visibly present in the field.
+    e.g. ``Button "Reload" at (254,80) 44x24`` or ``TextField "..." at
+    (520,80) 400x24 value="https://example.com" (focused)`` — plus the focus
+    state when set, so a provider can read the location off the line *and*
+    confirm a click landed on the next turn (ADR-2). A non-empty AXValue is
+    included so the model can confirm text it typed/pasted is visibly present.
+
+    The reported point is the element's **centre**, not its top-left origin.
+    The model clicks the coordinate it is given, and a click at an element's
+    exact corner sits on its boundary, where any rounding at all lands outside.
+    That is not hypothetical: one image pixel is ~3.3 logical points on a
+    Retina display, summaries are rounded to whole image pixels before the
+    model sees them, and a 12-point-tall link is under 4 pixels. Aiming at
+    corners, the model repeatedly reported the right link and clicked one point
+    above it, into the row behind — six consecutive misses on a real page.
+    Aiming at centres gives every element half its own size as slack, which is
+    an order of magnitude more than the rounding can consume.
     """
     label = element.title if element.title else "(untitled)"
     value = f' value="{element.value}"' if element.value else ""
     state = " (focused)" if element.focused else ""
+    centre_x = element.x + element.width / 2
+    centre_y = element.y + element.height / 2
     return (
         f'{element.role} "{label}" at '
-        f"({element.x:.0f},{element.y:.0f}) {element.width:.0f}x{element.height:.0f}"
+        f"({centre_x:.0f},{centre_y:.0f}) {element.width:.0f}x{element.height:.0f}"
         f"{value}{state}"
     )
 
@@ -164,10 +176,24 @@ def focused_text_value(root: AXElement) -> str | None:
     return walk(root)
 
 
+def is_actionable(node: AXElement) -> bool:
+    """Can the agent actually aim at this element (pure)?
+
+    Filters out what has no clickable area. A collapsed menu still reports
+    every one of its items through AX, sized 0x0 and parked off the bottom of
+    the display; a browser page carries hidden and zero-height nodes for the
+    same reason. Observed before this filter: all 24 summary slots went to
+    0x0 menu items at y=1112 on an 1112-point display, so the model's entire
+    view of the machine was elements it could never click, while the page's
+    real links never made the list.
+    """
+    return node.width > 0 and node.height > 0
+
+
 def interactive_summaries(
     root: AXElement,
     *,
-    max_depth: int = 12,
+    max_depth: int = 20,
     max_count: int = 24,
 ) -> tuple[str, ...]:
     """Compact renderings of actionable elements, web-content first (pure).
@@ -176,8 +202,9 @@ def interactive_summaries(
     real elements with real coordinates instead of hallucinating them, and
     the pixel pipeline still verifies whatever coordinate it picks. Depth
     must be generous enough for real apps — Chrome's omnibox lives five
-    levels below the app root, so a shallow cap silently de-grounds the
-    model and it hallucinates coordinates — while ``max_count`` bounds the
+    levels below the app root and its page links fourteen to eighteen, so a
+    shallow cap silently de-grounds the model and it hallucinates
+    coordinates — while ``max_count`` bounds the
     working context regardless of tree depth (Law 4.3); order is
     deterministic.
 
@@ -196,8 +223,10 @@ def interactive_summaries(
         """Append an interactive element (and its subtree) when budget remains."""
         if len(summaries) >= max_count:
             return
-        if node.role in INTERACTIVE_ROLES and not (
-            node.role == "MenuBarItem" and node.title.lower() in ("apple", "")
+        if (
+            node.role in INTERACTIVE_ROLES
+            and is_actionable(node)
+            and not (node.role == "MenuBarItem" and node.title.lower() in ("apple", ""))
         ):
             summaries.append(element_summary(node))
         if depth < max_depth and len(summaries) < max_count:
@@ -208,8 +237,10 @@ def interactive_summaries(
         """DFS over the whole tree, never entering WebArea subtrees."""
         if node.role == "WebArea" or len(summaries) >= max_count:
             return
-        if node.role in INTERACTIVE_ROLES and not (
-            node.role == "MenuBarItem" and node.title.lower() in ("apple", "")
+        if (
+            node.role in INTERACTIVE_ROLES
+            and is_actionable(node)
+            and not (node.role == "MenuBarItem" and node.title.lower() in ("apple", ""))
         ):
             summaries.append(element_summary(node))
         # Nodes at exactly max_depth are still collected; only their children
@@ -248,6 +279,9 @@ def summary_covering(summaries: tuple[str, ...], x: float, y: float) -> str | No
     what a click at that point hit. Returns ``None`` when no summary covers the
     point — which callers must read as "no information", never as "nothing is
     there": the summary list is budget-capped and may simply not include it.
+
+    The summary's point is the element's centre (see :func:`element_summary`),
+    so the rect it stands for spans half the width and height either side.
     """
     best: str | None = None
     best_area = float("inf")
@@ -255,7 +289,9 @@ def summary_covering(summaries: tuple[str, ...], x: float, y: float) -> str | No
         match = _SUMMARY_RECT.search(line)
         if match is None:
             continue
-        left, top, width, height = (int(group) for group in match.groups())
+        centre_x, centre_y, width, height = (int(group) for group in match.groups())
+        left = centre_x - width / 2
+        top = centre_y - height / 2
         if not (left <= x < left + width and top <= y < top + height):
             continue
         area = float(width * height)

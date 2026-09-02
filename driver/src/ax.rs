@@ -51,6 +51,11 @@ extern "C" {
         attribute: CFTypeRef,
         value: *mut CFTypeRef,
     ) -> i32;
+    fn AXUIElementSetAttributeValue(
+        element: CFTypeRef,
+        attribute: CFTypeRef,
+        value: CFTypeRef,
+    ) -> i32;
     fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
     fn AXValueGetValue(value: CFTypeRef, the_type: u32, value_ptr: *mut c_void) -> bool;
     fn AXIsProcessTrusted() -> bool;
@@ -191,7 +196,17 @@ fn build_tree(
                 let role = string_attribute(child.as_CFTypeRef(), "AXRole").unwrap_or_default();
                 tagged.push((role, child.as_CFTypeRef()));
             }
-            tagged.sort_by_key(|(role, _)| role != "AXWebArea");
+            // Three tiers, not two. Web content first (the page is what the
+            // agent acts on), then ordinary chrome, and the menu bar dead
+            // last: an app's menu bar is a few hundred AXMenuItem nodes that
+            // are reachable by keyboard anyway, and letting it go first meant
+            // it swallowed the entire node budget before the window subtree
+            // was ever visited.
+            tagged.sort_by_key(|(role, _)| match role.as_str() {
+                "AXWebArea" => 0u8,
+                "AXMenuBar" => 2,
+                _ => 1,
+            });
             for (child_role, child) in tagged {
                 let child_is_web = node_is_web || child_role == "AXWebArea";
                 // Budget gate BEFORE recursing: an exhausted pool drops the
@@ -203,6 +218,21 @@ fn build_tree(
             }
         }
     }
+
+    // A web link's own AXTitle is empty: browsers put the label in a
+    // descendant StaticText's AXValue. Without composing it, every one of a
+    // page's links summarises as "(untitled)" and the model has no way to
+    // name what it wants to click — measured on a news front page: 438 Link
+    // nodes, 0 with a title. It then guesses coordinates off a screenshot
+    // where body text is ~3px tall, and misses. Composing the name here (once,
+    // bottom-up over children already built) is what turns the accessibility
+    // tree from a list of anonymous rectangles into something a model can aim
+    // with.
+    let title = if title.is_empty() && value.is_empty() && names_from_descendants(&role) {
+        descendant_text(&children, DERIVED_NAME_MAX_CHARS)
+    } else {
+        title
+    };
 
     HostElement {
         role,
@@ -438,6 +468,7 @@ pub fn ax_snapshot(pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElemen
     // the traversal finishes — a raw ref here would leak one app element per
     // snapshot on a polling loop.
     let app = unsafe { CFType::wrap_under_create_rule(app_ref) };
+    enable_web_accessibility(app.as_CFTypeRef());
     // The app root itself is always emitted (it does not spend the budget);
     // every descendant spends from the web-first two-pool budget, so the
     // walk and the response stay bounded on heavy pages (YouTube-size trees
@@ -445,6 +476,80 @@ pub fn ax_snapshot(pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElemen
     let mut budget = NodeBudget::new(max_nodes);
     let root = build_tree(app.as_CFTypeRef(), 0, max_depth, false, &mut budget);
     Ok(root)
+}
+
+/// Cap on a derived accessible name, in characters. Long enough to identify a
+/// headline or a paragraph link, short enough that a page of them still fits
+/// the model's context.
+const DERIVED_NAME_MAX_CHARS: usize = 120;
+
+/// Roles whose label is worth reconstructing from descendant text.
+///
+/// Restricted to elements an agent actually aims at. Deriving names for every
+/// unnamed container instead would attach the whole page's text to each of the
+/// dozen nested `Group`s wrapping it — pure noise that crowds out the real
+/// targets.
+fn names_from_descendants(role: &str) -> bool {
+    matches!(
+        role,
+        "Link" | "Button" | "Cell" | "Heading" | "CheckBox" | "RadioButton" | "Tab" | "MenuItem"
+    )
+}
+
+/// Concatenate the visible text under an element, breadth-first, up to a cap.
+///
+/// Breadth-first so a link's own text wins over text nested deeper inside it,
+/// and bounded so one pathological subtree cannot blow up the response.
+fn descendant_text(children: &[HostElement], max_chars: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut queue: std::collections::VecDeque<&HostElement> = children.iter().collect();
+    while let Some(node) = queue.pop_front() {
+        if total >= max_chars {
+            break;
+        }
+        let text = if !node.value.is_empty() {
+            node.value.trim()
+        } else {
+            node.title.trim()
+        };
+        if !text.is_empty() {
+            total += text.len();
+            parts.push(text.to_string());
+        }
+        for child in &node.children {
+            queue.push_back(child);
+        }
+    }
+    let joined = parts.join(" ");
+    let trimmed = joined.trim();
+    match trimmed.char_indices().nth(max_chars) {
+        Some((cut, _)) => trimmed[..cut].to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// Ask an Electron-shaped app to build its web-content accessibility tree.
+///
+/// Electron apps (VS Code, Slack, Discord) keep the document tree switched off
+/// until a client sets one of these flags; without it their AX walk returns an
+/// empty shell. Chromium proper does *not* need this — it exposes `AXWebArea`
+/// unconditionally, and answers both attributes with
+/// `kAXErrorAttributeUnsupported` / `kAXErrorNotImplemented`. Native apps do
+/// the same. Those refusals are the normal case and are deliberately ignored:
+/// this is a best-effort hint, never a precondition for the snapshot.
+fn enable_web_accessibility(app: CFTypeRef) {
+    for attribute in ["AXEnhancedUserInterface", "AXManualAccessibility"] {
+        let key = CFString::new(attribute);
+        let enabled = CFBoolean::true_value();
+        unsafe {
+            AXUIElementSetAttributeValue(
+                app,
+                key.as_concrete_TypeRef() as CFTypeRef,
+                enabled.as_CFTypeRef(),
+            );
+        }
+    }
 }
 
 /// May this process read the accessibility tree (consent check)?

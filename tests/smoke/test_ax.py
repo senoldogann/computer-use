@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from computeruse.orchestrator.client import ActuationClient
 from computeruse.vision import AXElement, element_rect, find_elements
+from computeruse.vision.ax import interactive_summaries, is_actionable
 from computeruse.vision.coordinates import (
     DisplayGeometry,
     Point,
@@ -158,3 +159,56 @@ def test_ax_coordinates_map_to_screenshot_pixels() -> None:
     )
     px = point_to_screenshot_offset(center, geometry, Size(800, 600))
     assert (px.x, px.y) == (154.0, 20.0)
+
+
+# --- what the model can actually aim at -------------------------------------
+
+
+def _el(role: str, title: str, x: float, y: float, w: float, h: float, children=()) -> AXElement:
+    return AXElement(
+        role=role, title=title, value="", focused=False,
+        x=x, y=y, width=w, height=h, children=list(children),
+    )
+
+
+def test_zero_sized_elements_never_reach_the_model() -> None:
+    """A collapsed menu reports every item at 0x0 — none of them is clickable.
+
+    Observed on a live desktop: all 24 summary slots went to 0x0 menu items
+    parked at y=1112 on an 1112-point display, so the model's entire view of
+    the machine was elements it could never click, while the focused page's
+    real links never made the list.
+    """
+    root = _el("Window", "w", 0, 0, 1710, 1112, children=[
+        _el("MenuItem", "About This Mac", 0, 1112, 0, 0),
+        _el("MenuItem", "System Settings", 0, 1112, 0, 0),
+        _el("Link", "Real link", 171, 203, 271, 17),
+    ])
+    summaries = interactive_summaries(root)
+    assert len(summaries) == 1
+    assert "Real link" in summaries[0]
+
+
+def test_actionable_filter_is_about_area_not_role() -> None:
+    assert is_actionable(_el("Link", "x", 0, 0, 10, 10)) is True
+    assert is_actionable(_el("Link", "x", 0, 0, 0, 10)) is False
+    assert is_actionable(_el("Link", "x", 0, 0, 10, 0)) is False
+
+
+def test_deep_web_content_is_reachable() -> None:
+    """Chrome nests its WebArea ten levels down and links four to eight below.
+
+    The old depth cap of 12 stopped inside the page wrapper, so the web-first
+    ordering had nothing to order: every website looked like a bare toolbar.
+    """
+    leaf = _el("Link", "Deep story link", 171, 203, 271, 17)
+    node = leaf
+    for _ in range(9):
+        node = _el("Group", "", 0, 0, 1710, 900, children=[node])
+    root = _el("Application", "Chrome", 0, 0, 1710, 1112, children=[
+        _el("Window", "win", 0, 0, 1710, 1112, children=[
+            _el("WebArea", "page", 0, 160, 1710, 867, children=[node]),
+        ]),
+    ])
+    summaries = interactive_summaries(root)
+    assert any("Deep story link" in line for line in summaries)

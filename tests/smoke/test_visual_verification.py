@@ -246,7 +246,7 @@ def test_missed_click_folds_failure_into_state() -> None:
         verify_enabled=True,
         # A static AX surface is the corroborating second witness; without it
         # the pixel diff alone would (correctly) be inconclusive.
-        ax_probe=lambda: AxProbeResult(summaries=('Button "Go" at (10,10) 20x10',)),
+        ax_probe=lambda: AxProbeResult(summaries=('Button "Go" at (20,15) 20x10',)),
         max_steps=5,
     )
     final = runner.run(goal="click the button")
@@ -296,8 +296,8 @@ def test_ax_confirmation_overrides_a_silent_pixel_diff() -> None:
     """
     screen = FakeScreen()
     ax_states = [
-        AxProbeResult(summaries=('TextField "url" at (10,10) 40x10',)),
-        AxProbeResult(summaries=('TextField "url" at (10,10) 40x10 (focused)',)),
+        AxProbeResult(summaries=('TextField "url" at (30,15) 40x10',)),
+        AxProbeResult(summaries=('TextField "url" at (30,15) 40x10 (focused)',)),
     ]
     index = {"value": 0}
 
@@ -821,7 +821,7 @@ def test_idempotent_click_is_confirmed_by_target_focus() -> None:
     holding focus is direct proof the click reached it.
     """
     screen = FakeScreen()
-    summaries = ('Button "Reload" at (20,10) 20x12 (focused)',)
+    summaries = ('Button "Reload" at (30,16) 20x12 (focused)',)
 
     def provider(state: WorkingState) -> AgentTurn:
         if state.step_index == 0:
@@ -843,13 +843,13 @@ def test_idempotent_click_is_confirmed_by_target_focus() -> None:
 
 def test_target_focus_witness_can_never_cause_a_failure() -> None:
     """Focus not landing proves nothing — many controls never take focus."""
-    unfocused = ('Button "Reload" at (232,68) 44x24',)
+    unfocused = ('Button "Reload" at (254,80) 44x24',)
     assert target_focus_evidence(Point(254, 80), unfocused) is Evidence.INCONCLUSIVE
     # A point no summary covers is silence, not a denial: the summary list is
     # budget-capped and may simply not include the element.
     assert target_focus_evidence(Point(9, 9), unfocused) is Evidence.INCONCLUSIVE
     assert target_focus_evidence(None, unfocused) is Evidence.INCONCLUSIVE
-    focused = ('Button "Reload" at (232,68) 44x24 (focused)',)
+    focused = ('Button "Reload" at (254,80) 44x24 (focused)',)
     assert target_focus_evidence(Point(254, 80), focused) is Evidence.CONFIRMED
 
 
@@ -858,8 +858,8 @@ def test_summary_lookup_prefers_the_most_specific_element() -> None:
     from computeruse.vision.ax import summary_covering
 
     summaries = (
-        'Toolbar "" at (100,60) 800x40',
-        'Button "Reload" at (232,68) 44x24 (focused)',
+        'Toolbar "" at (500,80) 800x40',
+        'Button "Reload" at (254,80) 44x24 (focused)',
     )
     covering = summary_covering(summaries, 254, 80)
     assert covering is not None and "Reload" in covering

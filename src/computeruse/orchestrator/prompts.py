@@ -89,9 +89,14 @@ ACTION_CONTRACT: Final[str] = (
     "     longest side). Report x,y EXACTLY as they appear in that image. The system converts them\n"
     "     to real screen points for you — never apply any scale math yourself.\n"
     "   - AX UI element coordinates are listed in the SAME image space, so both sources are directly\n"
-    "     comparable. AX is exact for native chrome (toolbars, menus, the address bar); for web page\n"
-    "     content the AX tree may be truncated, so prefer the screenshot there.\n"
-    "   - Click the CENTER of the target link, button, or field.\n"
+    "     comparable. PREFER the AX list whenever it names your target: it is exact, while the\n"
+    "     screenshot is downscaled ~3x, where body text is a few pixels tall and a link is easy to\n"
+    "     misplace by a whole row. It covers page content (links, headings, cells) as well as native\n"
+    "     chrome. Use the screenshot for what AX does not list, and for layout and reading.\n"
+    "   - Each AX element is listed at its CENTER point. Click that point EXACTLY as given — do not\n"
+    "     add half the width or height, and do not adjust it. The listed size is for judging what an\n"
+    "     element is, not for offsetting the click.\n"
+    "   - When you aim from the screenshot instead, click the CENTER of the target.\n"
     "\n"
     "5. SAFE BROWSER NAVIGATION & TEXT INPUT:\n"
     "   - To enter a URL or search query in Chrome/Safari, always in this order:\n"
@@ -213,12 +218,15 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         lines.append(f"Active window: {state.active_window}")
     if state.ui_elements:
         # ADR-2 AX grounding: real element coordinates from the host's
-        # accessibility tree. These are EXACT and reliable for native UI
-        # (toolbar buttons, menu items, address bars). For web content
-        # (links, search results, article text), the AX tree is often empty
-        # or truncated — in that case, ignore these and ground on the
-        # screenshot directly.
-        lines.append("AX UI elements (exact coordinates from accessibility tree):")
+        # accessibility tree, each at its centre point. Exact for native UI
+        # (toolbars, menus, address bars) AND for web page content — browsers
+        # expose links, headings and cells the same way, and reading a link's
+        # position here beats inferring it from a screenshot where its text is
+        # three pixels tall.
+        lines.append(
+            "AX UI elements (exact CENTER coordinates from the accessibility tree "
+            "— click these points as given, do not offset them):"
+        )
         lines.extend(f"- {el}" for el in state.ui_elements)
     if state.open_tabs:
         # Browser tab awareness: the agent must know which tabs are open

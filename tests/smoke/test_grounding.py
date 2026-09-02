@@ -34,13 +34,13 @@ APP_PID = 4242
 # address field. The Toolbar container itself is not actionable and must not
 # appear.
 FIXTURE_SUMMARIES = (
-    'Button "Back" at (120,68) 44x24',
-    'Button "Forward" at (176,68) 44x24',
-    'Button "Reload" at (232,68) 44x24',
+    'Button "Back" at (142,80) 44x24',
+    'Button "Forward" at (198,80) 44x24',
+    'Button "Reload" at (254,80) 44x24',
     # The fixture's address field holds focus and its AXValue mirrors the
     # address text: the consent-free "click landed" + "text landed" signals
     # the provider consumes (ADR-2 state source).
-    'TextField "https://example.com" at (320,68) 400x24 value="https://example.com" (focused)',
+    'TextField "https://example.com" at (520,80) 400x24 value="https://example.com" (focused)',
 )
 
 
@@ -67,7 +67,7 @@ def test_element_summary_marks_focused_state() -> None:
         height=24.0,
     )
     line = element_summary(focused)
-    assert line == 'TextField "https://example.com" at (320,68) 400x24 (focused)'
+    assert line == 'TextField "https://example.com" at (520,80) 400x24 (focused)'
     # Unfocused elements keep the exact old format (parseable, no marker).
     assert not element_summary(focused.model_copy(update={"focused": False})).endswith(
         "(focused)"
@@ -77,14 +77,17 @@ def test_element_summary_marks_focused_state() -> None:
 def test_element_summary_is_parseable_and_handles_missing_title() -> None:
     reload = find_elements(_fixture_root(), role="Button", title="Reload")[0]
     line = element_summary(reload)
-    assert line == 'Button "Reload" at (232,68) 44x24'
+    assert line == 'Button "Reload" at (254,80) 44x24'
     # Coordinates and size are recoverable from the line (grounding contract).
     match = re.search(r"at \((\d+),(\d+)\) (\d+)x(\d+)", line)
     assert match is not None
-    assert tuple(int(g) for g in match.groups()) == (232, 68, 44, 24)
+    # The point is the element's CENTRE, not its origin: the model clicks what
+    # it is told, and a corner sits on the boundary where rounding lands outside.
+    assert tuple(int(g) for g in match.groups()) == (254, 80, 44, 24)
+    assert (254, 80) == (232 + 44 // 2, 68 + 24 // 2)
     # An element without a title is still actionable, just labelled generically.
     untitled = AXElement(role="Button", x=1.0, y=2.0, width=10.0, height=5.0)
-    assert element_summary(untitled) == 'Button "(untitled)" at (1,2) 10x5'
+    assert element_summary(untitled) == 'Button "(untitled)" at (6,4) 10x5'
 
 
 def test_interactive_summaries_respect_depth_cap() -> None:
@@ -177,17 +180,17 @@ def test_summaries_to_image_space_divides_by_points_per_pixel() -> None:
     """
     scaled = summaries_to_image_space(
         (
-            'Button "Reload" at (232,68) 44x24 value="x" (focused)',
+            'Button "Reload" at (254,80) 44x24 value="x" (focused)',
             "(AX grounding truncated — rely on the screenshot map for coordinates)",
         ),
         2.0,
     )
-    assert scaled[0] == 'Button "Reload" at (116,34) 22x12 value="x" (focused)'
+    assert scaled[0] == 'Button "Reload" at (127,40) 22x12 value="x" (focused)'
     # Lines without a coordinate fragment pass through untouched.
     assert scaled[1] == "(AX grounding truncated — rely on the screenshot map for coordinates)"
     # Factor 1.0 (no map / small display) is an identity passthrough.
-    assert summaries_to_image_space(('Button "OK" at (1,2) 3x4',), 1.0) == (
-        'Button "OK" at (1,2) 3x4',
+    assert summaries_to_image_space(('Button "OK" at (2,4) 3x4',), 1.0) == (
+        'Button "OK" at (2,4) 3x4',
     )
 
 
@@ -270,7 +273,7 @@ def test_summaries_include_deep_focused_element() -> None:
         ),
     )
     summaries = interactive_summaries(window)
-    assert any("TextField \"(untitled)\" at (158,90) 1164x24 (focused)" in line for line in summaries)
+    assert any("TextField \"(untitled)\" at (740,102) 1164x24 (focused)" in line for line in summaries)
 
 
 def _provider() -> Callable[[WorkingState], AgentTurn]:
@@ -374,19 +377,21 @@ def test_agent_grounds_provider_coordinates_from_ax(tmp_path) -> None:
     def grounded_provider(state: WorkingState) -> AgentTurn:
         if state.step_index == 0:
             # A weak model following the contract: find the Reload button line
-            # and click its center — coordinates come from the tree, not from
-            # imagination.
+                # and click the point it reports. No arithmetic: the summary
+                # already gives the centre, the point that survives rounding.
+                # Making the model offset from a corner is what put real
+                # clicks one point outside their target on a live page.
             reload = next(
                 line for line in state.ui_elements if 'Button "Reload"' in line
             )
             match = re.search(r"at \((\d+),(\d+)\) (\d+)x(\d+)", reload)
             assert match is not None
-            x, y, width, height = (int(g) for g in match.groups())
+            x, y, _width, _height = (int(g) for g in match.groups())
             return AgentTurn(
                 thought="reload the page",
                 sub_goal="click the Reload button",
                 action=MouseClick(
-                    type="mouse_click", x=x + width // 2, y=y + height // 2
+                    type="mouse_click", x=x, y=y
                 ),
             )
         if state.step_index == 1:
@@ -414,11 +419,13 @@ def test_agent_grounds_provider_coordinates_from_ax(tmp_path) -> None:
     )
     result = Agent(config).run()
     # Discovery + grounding: the provider saw the Safari fixture and clicked
-    # the *center* of the Reload button (232+22, 68+12), then the address bar.
+    # the point the summary reported — already the Reload button's centre
+    # (232+22, 68+12) — then the address bar.
     assert result.app == "Safari"
     assert [a.type for a in result.trajectory] == ["mouse_click", "mouse_click"]
     first = result.trajectory[0]
-    # The grounded click landed on the Reload button's center (232+22, 68+12).
+    # The grounded click landed on the Reload button's centre (232+22, 68+12),
+    # taken straight from the summary with no arithmetic in the model.
     assert (first.x, first.y) == (254, 80)
     assert result.distilled is not None and result.distilled.kind == "skill"
 
@@ -454,10 +461,10 @@ def test_ax_probe_result_carries_open_tabs() -> None:
     from computeruse.orchestrator.loop import AxProbeResult
 
     result = AxProbeResult(
-        summaries=("Button \"OK\" at (100,200) 40x20",),
+        summaries=("Button \"OK\" at (120,210) 40x20",),
         open_tabs=("GitHub", "Tab2"),
     )
-    assert result.summaries == ("Button \"OK\" at (100,200) 40x20",)
+    assert result.summaries == ("Button \"OK\" at (120,210) 40x20",)
     assert result.open_tabs == ("GitHub", "Tab2")
     # Default has empty tabs.
     default = AxProbeResult()

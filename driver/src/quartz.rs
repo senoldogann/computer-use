@@ -637,7 +637,63 @@ fn keycode_of(key: &str) -> Option<u16> {
         "7" => Some(QK::ANSI_7),
         "8" => Some(QK::ANSI_8),
         "9" => Some(QK::ANSI_9),
+        // Punctuation. Their absence made whole families of standard shortcuts
+        // unreachable — Cmd+Plus/Minus (zoom), Cmd+Comma (preferences),
+        // Cmd+[ / Cmd+] (back/forward). Observed in a live run: the model tried
+        // Cmd+"+" three times to enlarge text it could not read, was refused
+        // each time, and burned a third of its step budget on it.
+        //
+        // "+" maps to the *unshifted* Equal key deliberately: on a US layout
+        // Plus IS Shift+Equal, and every macOS app registers zoom-in on the
+        // Equal keycode. Requiring the caller to know that is a trap, so both
+        // spellings resolve here.
+        "=" | "plus" | "+" => Some(QK::ANSI_EQUAL),
+        "-" | "minus" => Some(QK::ANSI_MINUS),
+        "," | "comma" => Some(QK::ANSI_COMMA),
+        "." | "period" => Some(QK::ANSI_PERIOD),
+        "/" | "slash" => Some(QK::ANSI_SLASH),
+        "\\" | "backslash" => Some(QK::ANSI_BACKSLASH),
+        "[" | "leftbracket" => Some(QK::ANSI_LEFT_BRACKET),
+        "]" | "rightbracket" => Some(QK::ANSI_RIGHT_BRACKET),
+        ";" | "semicolon" => Some(QK::ANSI_SEMICOLON),
+        "'" | "quote" => Some(QK::ANSI_QUOTE),
+        "`" | "grave" => Some(QK::ANSI_GRAVE),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod keycode_tests {
+    use super::keycode_of;
+
+    #[test]
+    fn punctuation_shortcuts_resolve() {
+        // Cmd+Plus/Minus (zoom), Cmd+Comma (preferences) and Cmd+[/] (history)
+        // are standard on macOS; a map without them silently refuses a whole
+        // family of the shortcuts an agent reaches for first.
+        for key in [
+            "=", "plus", "+", "-", "minus", ",", "comma", ".", "period", "/", "slash",
+            "\\", "backslash", "[", "leftbracket", "]", "rightbracket", ";", "semicolon",
+            "'", "quote", "`", "grave",
+        ] {
+            assert!(keycode_of(key).is_some(), "expected a keycode for {key:?}");
+        }
+    }
+
+    #[test]
+    fn plus_and_equal_share_a_keycode() {
+        // Plus IS Shift+Equal on a US layout, and apps register zoom-in on the
+        // Equal keycode. Callers must not have to know that.
+        assert_eq!(keycode_of("+"), keycode_of("="));
+        assert_eq!(keycode_of("plus"), keycode_of("="));
+    }
+
+    #[test]
+    fn unknown_keys_are_still_refused() {
+        // The map stays closed: an unmapped key must fail loudly, not resolve
+        // to some neighbouring keycode.
+        assert!(keycode_of("f13").is_none());
+        assert!(keycode_of("").is_none());
     }
 }
 

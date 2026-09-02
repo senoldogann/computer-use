@@ -39,7 +39,7 @@ AX_MAX_ELEMENTS: Final[int] = 64
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.memory.semantic import SemanticStore
-from computeruse.orchestrator.client import AX_MAX_NODES, ActuationClient
+from computeruse.orchestrator.client import AX_MAX_DEPTH, AX_MAX_NODES, ActuationClient
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import (
     SETTLE_INTERVAL_S,
@@ -303,7 +303,7 @@ class Agent:
                     return AxProbeResult()
                 tree = client.ax_snapshot(
                     pid=current_pid,
-                    max_depth=12,
+                    max_depth=AX_MAX_DEPTH,
                     max_nodes=AX_MAX_NODES,
                 )
                 summaries = interactive_summaries(
@@ -336,7 +336,7 @@ class Agent:
                     return _focused_text_value_from_tree(
                         client.ax_snapshot(
                             pid=current_pid,
-                            max_depth=12,
+                            max_depth=AX_MAX_DEPTH,
                             max_nodes=AX_MAX_NODES,
                         )
                     )
