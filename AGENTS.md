@@ -249,6 +249,7 @@ computeruse/
 │   │   ├── prompts.py         # Scaffolding prompts & error-correction injectors
 │   │   ├── untrusted.py       # Screen text as data: <observed_data> framing + escaping
 │   │   ├── trace.py           # Per-step run trace (JSONL + optional step PNGs)
+│   │   ├── budget.py          # Wall-clock / token / cost ceilings for one run
 │   │   ├── planner.py         # Hierarchical goal decomposition + session checkpoints
 │   │   └── client.py          # Typed JSON-RPC client for the Rust driver (Unix socket)
 │   ├── providers/

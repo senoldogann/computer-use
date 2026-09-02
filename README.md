@@ -112,6 +112,13 @@ uv run python -m computeruse --goal "..." --provider my_provider:make_provider
 uv run python -m computeruse --goal "..." --model openai --real \
     --trace-dir ./traces --trace-screenshots
 
+# Ceilings for an unattended run. Checked between steps, so an action in flight
+# always completes; the failure episode and the trace are written before the
+# run stops. --max-cost uses published list prices and only works for a priced
+# --model openai[:id] (a custom transport has no known price — use --max-tokens).
+uv run python -m computeruse --goal "..." --model openai --real \
+    --deadline-seconds 600 --max-tokens 200000 --max-cost 1.50
+
 # Python type-checks (strict) and tests
 uv sync --extra dev
 uv run pyright src/computeruse

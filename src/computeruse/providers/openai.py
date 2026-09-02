@@ -37,7 +37,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final, Protocol, Self, cast
 
@@ -88,6 +88,48 @@ class ModelCallStats:
 
 class OpenAIError(RuntimeError):
     """An OpenAI API call failed; carries the API's own message for context."""
+
+
+@dataclass(frozen=True)
+class TokenPrice:
+    """USD per 1M tokens for one model (pure data)."""
+
+    input_per_million: float
+    output_per_million: float
+
+
+#: Published list prices, USD per 1M tokens, from OpenAI's July 30 2026 price
+#: cut (the same figures the module docstring reasons about). Used only for the
+#: CLI's ``--max-cost`` guardrail: it is a ceiling the operator sets so an
+#: unattended run cannot spend unboundedly, NOT an invoice. A model missing
+#: from this table has no price here, and the flag says so rather than
+#: guessing — a wrong number would be worse than no number.
+MODEL_PRICES: Final[Mapping[str, TokenPrice]] = {
+    "gpt-5.6-terra": TokenPrice(input_per_million=2.0, output_per_million=12.0),
+    "gpt-5.6-luna": TokenPrice(input_per_million=0.20, output_per_million=1.20),
+    "gpt-5.6-sol": TokenPrice(input_per_million=5.0, output_per_million=30.0),
+}
+
+
+def price_for(model: str) -> TokenPrice:
+    """The published price of one model, or a typed error naming the gap."""
+    price = MODEL_PRICES.get(model)
+    if price is None:
+        known = ", ".join(sorted(MODEL_PRICES))
+        raise OpenAIError(
+            f"no published price is known for model {model!r}, so a cost budget "
+            f"cannot be enforced for it (priced models: {known}). Use a token "
+            "budget instead."
+        )
+    return price
+
+
+def call_cost_usd(price: TokenPrice, stats: ModelCallStats) -> float:
+    """What one model call cost at the given price (pure)."""
+    return (
+        stats.prompt_tokens * price.input_per_million
+        + stats.completion_tokens * price.output_per_million
+    ) / 1_000_000
 
 
 def _require_dict(value: object, what: str) -> dict[str, object]:

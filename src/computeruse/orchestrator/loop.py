@@ -42,6 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
+from computeruse.orchestrator.budget import BudgetExceededError
 from computeruse.orchestrator.evidence import (
     ActionExpectation,
     CompletionVerdict,
@@ -728,6 +729,12 @@ class OodaRunner:
     #: A callable rather than a writer object so the loop stays free of file
     #: handles (Law 6.1) and a test can assert on the records directly.
     trace: Callable[[StepTrace], None] | None = None
+    #: Run-ceiling check, called once per step before anything is decided or
+    #: actuated; raises :class:`BudgetExceededError` when the run has spent its
+    #: allowance. A callable rather than a budget object because the counters
+    #: it reads (wall clock, tokens, cost) are the composition root's, and the
+    #: loop should not learn to keep them.
+    budget_guard: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
         # Trajectory of *successfully executed* actions in the current run.
@@ -805,7 +812,12 @@ class OodaRunner:
         # indistinguishable from a run that never started (Law 4.1).
         try:
             return self._step_until_finished(state, goal)
-        except (MaxStepsError, UnrecoverableFailureError, KillSwitchTripped) as exc:
+        except (
+            MaxStepsError,
+            UnrecoverableFailureError,
+            KillSwitchTripped,
+            BudgetExceededError,
+        ) as exc:
             self._finalize(
                 self._last_state,
                 outcome="failure",
@@ -823,6 +835,11 @@ class OodaRunner:
                 raise KillSwitchTripped(
                     f"human reclaimed control at step {state.step_index} for goal={goal!r}"
                 )
+            # Run ceilings are checked *between* steps, never mid-action: a run
+            # that stops with the cursor halfway through a drag is a worse
+            # outcome than one that overshoots its budget by a single step.
+            if self.budget_guard is not None:
+                self.budget_guard()
 
             # OBSERVE: one snapshot feeds the decision, the gates, and VERIFY.
             state = self._observe(state)
@@ -1987,6 +2004,8 @@ def failure_retrospective(exc: BaseException) -> str:
         return f"run truncated by the step budget: {exc}"
     if isinstance(exc, KillSwitchTripped):
         return f"human reclaimed control: {exc}"
+    if isinstance(exc, BudgetExceededError):
+        return f"run stopped by its budget: {exc}"
     if isinstance(exc, UnrecoverableFailureError):
         return f"recovery exhausted ({exc.failure.kind.value}): {exc}"
     return f"run ended abnormally: {exc}"

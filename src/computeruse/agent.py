@@ -128,6 +128,10 @@ class AgentConfig:
     # from. Off by default: a thirty-step run is thirty PNGs, which is the
     # right trade only when someone is actually looking at them.
     trace_screenshots: bool = False
+    # Run-ceiling check called once per step (wall clock / tokens / cost). The
+    # counters live with whoever owns the model transport, so the agent takes
+    # the check as a callable rather than owning a budget it cannot measure.
+    budget_guard: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -492,6 +496,7 @@ class Agent:
                 on_sub_goal_complete=on_sub_goal_complete_cb,
                 run_id=run_id,
                 trace=trace_sink,
+                budget_guard=self._config.budget_guard,
             )
             state = runner.run(self._config.goal)
 
