@@ -102,8 +102,9 @@ fn copy_attribute_coded(element: CFTypeRef, name: &str) -> (Option<CFType>, i32)
         )
     };
     if error == AX_ERROR_SUCCESS && !value.is_null() {
-        // Get-rule: the copy is ours, wrap without bumping.
-        (Some(unsafe { CFType::wrap_under_get_rule(value) }), error)
+        // Create/Copy rule: the copy from AXUIElementCopyAttributeValue is
+        // owned (+1 retain count), so wrap under create-rule without bumping.
+        (Some(unsafe { CFType::wrap_under_create_rule(value) }), error)
     } else {
         (None, error)
     }
@@ -745,6 +746,6 @@ fn enable_web_accessibility(app: CFTypeRef) {
 }
 
 /// May this process read the accessibility tree (consent check)?
-fn trusted() -> bool {
+pub fn trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
 }

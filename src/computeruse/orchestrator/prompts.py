@@ -30,6 +30,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, cast
 
+from pydantic import ValidationError
+
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import WorkingState
 from computeruse.orchestrator.schemas import Action, AgentTurn, ClipboardPaste, TypeText
@@ -78,8 +80,7 @@ ACTION_CONTRACT: Final[str] = (
     "  BATCHING RULES: batch only actions that are safe to execute SEQUENTIALLY from the CURRENT screen without re-observation — e.g. Cmd+L, then paste a URL, then Return; or two clicks on already-visible elements. NEVER batch an action whose target depends on a screen change caused by an earlier action in the same batch (e.g. do not click a search result in the same batch as the Return that submits the search). If any doubt, emit a single action. `finish` must be the LAST action of a batch.\n"
     "\n"
     "2. SUPPORTED ACTIONS:\n"
-    '- click_mark: {"type": "click_mark", "mark": int, "button": "left|right|middle", "click_count": 1|2} — PREFERRED for anything in the AX list: give the [N] shown beside the element and the system clicks its exact centre for you\n'
-    '- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2} — the fallback for targets the AX list does not name\n'
+    '- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2}\n'
     '- mouse_move: {"type": "mouse_move", "x": int, "y": int, "duration_ms": int (default 180)} — ONLY when hover, tooltip, or drag preparation is explicitly needed\n'
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
@@ -102,23 +103,17 @@ ACTION_CONTRACT: Final[str] = (
     "\n"
     "4. VISUAL GROUNDING & DISPLAY COORDINATES:\n"
     "   - Never reuse a coordinate from an earlier turn. Windows move, pages scroll, layouts adapt.\n"
-    "   - Derive every (x, y) from the CURRENT screenshot.\n"
+    "   - Derive every (x, y) from the CURRENT screenshot or the AX element list.\n"
     "   - Coordinate space: the screenshot is a SCALED-DOWN MAP of the screen (max 512px on its\n"
     "     longest side). Report x,y EXACTLY as they appear in that image. The system converts them\n"
     "     to real screen points for you — never apply any scale math yourself.\n"
-    "   - MARKS ARE THE RELIABLE PATH. Every AX element is listed with a number, [1], [2], ..., and\n"
-    "     the same elements are outlined on the screenshot. When your target is one of them, emit\n"
-    "     click_mark with that number: the system clicks the element's exact centre, with no scaling\n"
-    "     and no rounding. Estimating x,y for a listed element is strictly worse — the screenshot is\n"
-    "     downscaled ~3x, where body text is a few pixels tall and a link is easy to misplace by a\n"
-    "     whole row.\n"
-    "   - The AX list covers page content (links, headings, cells) as well as native chrome. Use the\n"
-    "     screenshot for what it does not list, and for layout and reading.\n"
-    "   - AX UI element coordinates are listed in the SAME image space as the screenshot, so the two\n"
-    "     sources are directly comparable. Each element is listed at its CENTER point: if you do aim\n"
-    "     with mouse_click, click that point EXACTLY as given — do not add half the width or height.\n"
-    "     The listed size is for judging what an element is, not for offsetting the click.\n"
-    "   - When you aim from the screenshot instead, click the CENTER of the target.\n"
+    "   - The AX list covers page content (links, headings, cells) as well as native chrome, and\n"
+    "     each element is outlined on the screenshot. Coordinates in the AX list are already EXACT\n"
+    "     CENTER points in the same image space: click that point EXACTLY as given with mouse_click\n"
+    "     — do not add half the width or height.\n"
+    "   - The listed size (e.g. 99x16) is for judging what an element is, not for offsetting the click.\n"
+    "   - For targets the AX list does not name, aim directly from the screenshot at the CENTER of\n"
+    "     the target element.\n"
     "\n"
     "5. SAFE BROWSER NAVIGATION & TEXT INPUT:\n"
     "   - To enter a URL or search query in Chrome/Safari, always in this order:\n"
@@ -277,11 +272,7 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # three pixels tall.
         observed.append(
             ObservedSection(
-                "AX UI elements — the [N] is the element's MARK: emit "
-                'click_mark with that number to click it exactly. These same '
-                "elements are outlined on the screenshot. Coordinates are "
-                "CENTER points in image space, for when you aim manually "
-                "instead:",
+                "AX UI elements (outlined on the screenshot; coordinates are exact CENTER points in image space):",
                 tuple(
                     f"[{index}] {element}"
                     for index, element in enumerate(state.ui_elements, 1)
@@ -520,6 +511,10 @@ def _normalize_action_payload(payload: dict[str, object]) -> dict[str, object]:
                 _normalize_action_dict({str(k): v for k, v in raw_item.items()})
             )
         result["actions"] = normalized_items
+        if "action" not in result and normalized_items:
+            # Tolerant batch inference: if the model specified actions=[...] but omitted
+            # the redundant top-level action, repeat the lead action automatically.
+            result["action"] = normalized_items[0]
     return result
 
 
@@ -577,19 +572,22 @@ def parse_decision(raw: str) -> AgentTurn:
     # ```json\n{"thought":...}\n```). Use a single matching pair so
     # prose that mentions braces earlier (e.g. "Plan {step 1}:") is
     # not mistaken for the payload.
+    candidate: str | None = None
     block = re.search(
         r"""```(?:json)?\s*(\{.*?\})\s*```""",
         stripped,
         flags=re.DOTALL | re.IGNORECASE,
     )
     if block is not None:
-        candidate = block.group(1)
-    else:
+        block_candidate = block.group(1)
+        try:
+            json.loads(block_candidate)
+            candidate = block_candidate
+        except json.JSONDecodeError:
+            candidate = None
+
+    if candidate is None:
         # Fallback: take the first *parseable* balanced ``{...}`` span.
-        # A naive first-``{``-to-last-``}`` slice is wrong twice over: an
-        # earlier prose brace (``"Plan {step 1}:"``) truncates the span,
-        # and a naive ``rfind("}")`` over-extends past stray closing
-        # braces in explanatory text. ``_first_json_object`` handles both.
         candidate = _first_json_object(stripped)
         if candidate is None:
             raise InvalidDecisionError(
@@ -621,23 +619,34 @@ def parse_decision(raw: str) -> AgentTurn:
     try:
         turn = AgentTurn.model_validate(normalized)
     except ValueError as exc:
+        details = ""
+        if isinstance(exc, ValidationError):
+            err_parts = [
+                f"{'.'.join(str(l) for l in err['loc'])}: {err['msg']}"
+                for err in exc.errors()[:2]
+            ]
+            if err_parts:
+                details = f" ({'; '.join(err_parts)})"
         raise InvalidDecisionError(
             cause=f"schema validation failed: {exc}",
-            hint="the decision did not match the action contract (wrong action "
-            "type, missing field, or invalid parameter); use exactly the "
-            "shapes listed above",
+            hint="the decision did not match the action contract"
+            f"{details}; use exactly the shapes listed above",
         ) from exc
     # Weak-model text hygiene: models frequently HTML-escape user-facing text
     # (observed in the field: a YouTube URL arrived as `watch?v=...&amp;t=1860s`
     # and was pasted literally, breaking the `t=` seek). Unescape pasted and
     # typed text deterministically so the driver always receives the plain
     # string the goal meant.
-    if turn.actions is not None:
-        turn = turn.model_copy(
-            update={"actions": [_unescape_text_action(item) for item in turn.actions]}
-        )
-    else:
-        turn = turn.model_copy(update={"action": _unescape_text_action(turn.action)})
+    turn = turn.model_copy(
+        update={
+            "action": _unescape_text_action(turn.action),
+            "actions": (
+                [_unescape_text_action(item) for item in turn.actions]
+                if turn.actions is not None
+                else None
+            ),
+        }
+    )
     return turn
 
 

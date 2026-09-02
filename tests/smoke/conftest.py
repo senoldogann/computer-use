@@ -45,6 +45,28 @@ def driver(request: pytest.FixtureRequest) -> Iterator[subprocess.Popen[str]]:
     whole suite into 331 green skips, so a run that verified nothing was
     indistinguishable from a run that verified everything.
     """
+    driver_dir = REPO_ROOT / "driver"
+    src_dir = driver_dir / "src"
+    cargo_toml = driver_dir / "Cargo.toml"
+    if src_dir.exists():
+        needs_build = not DRIVER_BIN.exists()
+        if not needs_build:
+            bin_mtime = DRIVER_BIN.stat().st_mtime
+            if (cargo_toml.exists() and cargo_toml.stat().st_mtime > bin_mtime) or any(
+                p.stat().st_mtime > bin_mtime for p in src_dir.rglob("*.rs")
+            ):
+                needs_build = True
+        if needs_build:
+            try:
+                subprocess.run(
+                    ["cargo", "build", "--manifest-path", str(cargo_toml)],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except (subprocess.SubprocessError, FileNotFoundError):
+                pass
+
     if not DRIVER_BIN.exists():
         if request.config.getoption(ALLOW_MISSING_DRIVER):
             pytest.skip(DRIVER_MISSING_MESSAGE)
@@ -60,6 +82,8 @@ def driver(request: pytest.FixtureRequest) -> Iterator[subprocess.Popen[str]]:
     try:
         # Wait for the socket to appear so tests never race the bind.
         for _ in range(50):
+            if proc.poll() is not None:
+                pytest.fail(f"driver exited prematurely with code {proc.returncode}")
             if SOCKET_PATH.exists():
                 break
             time.sleep(0.05)

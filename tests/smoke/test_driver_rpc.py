@@ -15,6 +15,23 @@ def test_ping_round_trip() -> None:
     assert payload.get("ok") == "pong"
 
 
+def test_health_round_trip() -> None:
+    payload = rpc_call({"method": "health"})
+    assert payload.get("ok") == "health"
+    assert payload.get("backend") == "simulated"
+    assert payload.get("trusted") is True
+
+
+def test_client_health() -> None:
+    from computeruse.orchestrator.client import ActuationClient
+    from tests.smoke.conftest import SOCKET_PATH
+
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        health = client.health()
+        assert health.get("ok") == "health"
+        assert health.get("backend") == "simulated"
+
+
 def test_mouse_move_ack() -> None:
     payload = rpc_call(
         {"method": "mouse_move", "params": {"x": 640, "y": 480, "duration_ms": 120}}
