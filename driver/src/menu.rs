@@ -54,6 +54,10 @@ use crate::ax;
 /// How a streamed line should be rendered in the panel.
 #[derive(Clone, Copy, PartialEq)]
 enum LineKind {
+    /// A structured step record from the agent (see `trace::EVENT_PREFIX`).
+    /// Carried as its own kind so the panel can render the plan, the model's
+    /// reasoning and the verification verdict as UI instead of as log text.
+    Event,
     /// stdout — the CLI's summary block, most important.
     Out,
     /// stderr — the runner's INFO step log, secondary.
@@ -492,6 +496,7 @@ fn drain_to_webview(webview: &WKWebView) {
             let f = match kind {
                 LineKind::Out => "window.Native.log(%s);",
                 LineKind::Dim => "window.Native.dim(%s);",
+                LineKind::Event => "window.Native.event(%s);",
                 LineKind::Err => "window.Native.err(%s);",
             };
             js.push_str(&f.replace("%s", &serde_json::to_string(line).unwrap_or_default()));
@@ -704,6 +709,10 @@ fn run_agent(goal: &str, app: Option<&str>) {
 }
 
 /// Read a child pipe line-by-line and enqueue each line for the UI.
+/// Marks a stdout line as a structured step record rather than log prose.
+/// Must match `computeruse.orchestrator.trace.EVENT_PREFIX`.
+const EVENT_PREFIX: &str = "@@CU ";
+
 fn pump_lines(reader: impl BufRead, is_stdout: bool) {
     let kind = if is_stdout { LineKind::Out } else { LineKind::Dim };
     for line in reader.lines().map_while(Result::ok) {
@@ -711,7 +720,16 @@ fn pump_lines(reader: impl BufRead, is_stdout: bool) {
         if trimmed.is_empty() {
             continue;
         }
-        SHARED.lock().unwrap().lines.push_back((kind, trimmed));
+        // Structured events arrive on the same stream as the log, tagged so
+        // the two can never be confused with each other.
+        match trimmed.strip_prefix(EVENT_PREFIX) {
+            Some(payload) => SHARED
+                .lock()
+                .unwrap()
+                .lines
+                .push_back((LineKind::Event, payload.to_string())),
+            None => SHARED.lock().unwrap().lines.push_back((kind, trimmed)),
+        }
     }
 }
 

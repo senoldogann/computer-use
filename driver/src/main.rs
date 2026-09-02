@@ -13,7 +13,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -147,6 +147,9 @@ fn make_backend(real: bool) -> Result<Box<dyn Backend>, BackendError> {
     }
 }
 
+/// Maximum request line size before truncating (16 MiB defensive ceiling).
+const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+
 fn handle_conn(stream: UnixStream, backend: &dyn Backend) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     let mut reader = io::BufReader::new(stream.try_clone()?);
@@ -154,7 +157,7 @@ fn handle_conn(stream: UnixStream, backend: &dyn Backend) -> io::Result<()> {
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line)?;
+        let n = (&mut reader).take(MAX_REQUEST_BYTES).read_line(&mut line)?;
         if n == 0 {
             break;
         }
@@ -190,6 +193,25 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
     // Helper: fold a backend failure into a structured Error response.
     let outcome = match req {
         Request::Ping => return Response::Pong,
+        Request::Health => {
+            #[cfg(target_os = "macos")]
+            let trusted = if backend.is_real() {
+                actuation_driver::ax::trusted()
+            } else {
+                true
+            };
+            #[cfg(not(target_os = "macos"))]
+            let trusted = true;
+
+            return Response::Health {
+                backend: if backend.is_real() {
+                    "quartz/real".to_string()
+                } else {
+                    "simulated".to_string()
+                },
+                trusted,
+            };
+        }
         Request::HotkeyState => {
             #[cfg(target_os = "macos")]
             {

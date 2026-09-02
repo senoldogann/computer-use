@@ -430,6 +430,58 @@ def test_audit_prompt_carries_observed_trail_but_not_agent_reasoning() -> None:
     )
     prompt = completion_prompt(state, claim="the display shows 138", app="Calculator")
     assert "StaticText=46 Open" in prompt
-    # The acting model's own history and beliefs must not contaminate the read.
     assert "step_0:mouse_click" not in prompt
     assert "something the actor believed" not in prompt
+
+
+def test_parse_batch_without_top_level_action() -> None:
+    """A model that emits only 'actions' (omitting top-level 'action') must succeed."""
+    raw = (
+        '{"thought": "batch thought", "sub_goal": "batch sub_goal", '
+        '"actions": [{"type": "mouse_click", "x": 10, "y": 20}, {"type": "wait", "duration_ms": 100, "reason": "settle"}]}'
+    )
+    turn = parse_decision(raw)
+    assert turn.action.type == "mouse_click"
+    assert turn.action.x == 10  # type: ignore[union-attr]
+    assert turn.actions is not None
+    assert len(turn.actions) == 2
+    assert turn.actions[0].type == "mouse_click"
+    assert turn.actions[1].type == "wait"
+
+
+def test_parse_batch_unescapes_both_action_and_actions() -> None:
+    """HTML entities must be unescaped in both turn.action and each turn.actions element."""
+    raw = (
+        '{"thought": "t", "sub_goal": "s", "action": {"type": "type_text", "text": "foo&amp;bar"}, '
+        '"actions": [{"type": "type_text", "text": "foo&amp;bar"}, {"type": "clipboard_paste", "text": "a&lt;b"}]}'
+    )
+    turn = parse_decision(raw)
+    assert turn.action.type == "type_text"
+    assert turn.action.text == "foo&bar"  # type: ignore[union-attr]
+    assert turn.actions is not None
+    assert turn.actions[0].text == "foo&bar"  # type: ignore[union-attr]
+    assert turn.actions[1].text == "a<b"  # type: ignore[union-attr]
+
+
+def test_parse_decision_pydantic_hint_includes_field_details() -> None:
+    """Schema validation failure must name the failing field in the hint for model guidance."""
+    raw = '{"thought": "t", "sub_goal": "s", "action": {"type": "mouse_click", "x": 10, "y": 20, "button": "invalid_btn"}}'
+    with pytest.raises(InvalidDecisionError) as exc:
+        parse_decision(raw)
+    assert "action.mouse_click.button" in exc.value.hint or "button" in exc.value.hint
+
+
+def test_parse_markdown_fenced_fallback_on_invalid_first_block() -> None:
+    """If the first fenced code block is not valid JSON, it falls back to a valid JSON span."""
+    raw = """Here is an explanation:
+```json
+{ this is not valid json
+```
+And here is the decision:
+```json
+{"thought": "t", "sub_goal": "s", "action": {"type": "mouse_click", "x": 10, "y": 20}}
+```"""
+    turn = parse_decision(raw)
+    assert turn.action.type == "mouse_click"
+    assert turn.action.x == 10  # type: ignore[union-attr]
+

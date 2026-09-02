@@ -14,6 +14,7 @@ use crate::backend::HostElement;
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     Ping,
+    Health,
     FocusedWindow,
     ListApps,
     HotkeyState,
@@ -154,6 +155,10 @@ pub struct ClipboardPasteParams {
 #[serde(tag = "ok", rename_all = "snake_case")]
 pub enum Response {
     Pong,
+    Health {
+        backend: String,
+        trusted: bool,
+    },
     Ack,
     HotkeyState {
         /// Whether the user pressed the global kill combo (Law 5.2).
@@ -372,6 +377,25 @@ mod tests {
             Request::ClipboardPaste(p) => assert_eq!(p.text, "https://example.com"),
             other => panic!("unexpected variant {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_unit_health() {
+        let raw = r#"{"method":"health"}"#;
+        let req: Request = serde_json::from_str(raw).expect("valid request");
+        assert!(matches!(req, Request::Health));
+    }
+
+    #[test]
+    fn serializes_health_response() {
+        let resp = Response::Health {
+            backend: "simulated".to_string(),
+            trusted: true,
+        };
+        let wire = resp.to_wire_string();
+        assert!(wire.contains(r#""ok":"health""#));
+        assert!(wire.contains(r#""backend":"simulated""#));
+        assert!(wire.contains(r#""trusted":true"#));
     }
 
     #[test]

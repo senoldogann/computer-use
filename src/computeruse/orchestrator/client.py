@@ -242,7 +242,11 @@ class ActuationClient:
         """
         payload = action_to_request(action)
         sock = self._require_socket()
-        sock.sendall(payload.encode("utf-8"))
+        try:
+            sock.sendall(payload.encode("utf-8"))
+        except OSError as exc:
+            self._reset_stream()
+            raise DriverConnectionError(self._socket_path, self._connect_retries) from exc
         response = self._read_response(
             action.type, timeout_seconds=action_timeout_seconds(action)
         )
@@ -267,13 +271,21 @@ class ActuationClient:
         if params:
             body["params"] = dict(params)
         payload = json.dumps(body, separators=(",", ":"))
-        sock.sendall((payload + "\n").encode("utf-8"))
+        try:
+            sock.sendall((payload + "\n").encode("utf-8"))
+        except OSError as exc:
+            self._reset_stream()
+            raise DriverConnectionError(self._socket_path, self._connect_retries) from exc
         return self._read_response(
             method,
             timeout_seconds=(
                 self._recv_timeout_seconds if timeout_seconds is None else timeout_seconds
             ),
         )
+
+    def health(self) -> dict[str, object]:
+        """Query driver status, active backend type and accessibility consent."""
+        return self.request("health")
 
     def _require_socket(self) -> socket.socket:
         """The live socket, reconnecting once if a previous call reset it.
@@ -517,7 +529,15 @@ class ActuationClient:
                 line = bytes(self._buf[:newline])
                 # Keep everything after the newline for the next read.
                 del self._buf[: newline + 1]
-                return json.loads(line.decode("utf-8"))
+                try:
+                    parsed = json.loads(line.decode("utf-8"))
+                except json.JSONDecodeError as exc:
+                    self._reset_stream()
+                    raise DriverRpcError(method=method, driver_message=f"malformed json: {exc}") from exc
+                if not isinstance(parsed, dict):
+                    self._reset_stream()
+                    raise DriverRpcError(method=method, driver_message="driver response is not a dict")
+                return cast(dict[str, object], parsed)
             self._scan_pos = len(self._buf)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -529,6 +549,9 @@ class ActuationClient:
             except TimeoutError as exc:
                 self._reset_stream()
                 raise DriverTimeoutError(method, timeout_seconds) from exc
+            except OSError as exc:
+                self._reset_stream()
+                raise DriverConnectionError(self._socket_path, self._connect_retries) from exc
             if not chunk:
                 self._reset_stream()
                 raise DriverConnectionError(self._socket_path, self._connect_retries)

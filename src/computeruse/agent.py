@@ -52,7 +52,7 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
-from computeruse.orchestrator.trace import RunTracer, StepTrace, new_run_id
+from computeruse.orchestrator.trace import RunTracer, StepTrace, event_line, new_run_id
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionDecision,
@@ -262,14 +262,26 @@ class Agent:
         # the id is what ties a log line, a trace directory and a user's
         # bug report to the same run.
         run_id = new_run_id()
-        trace_sink: Callable[[StepTrace], None] | None = None
+        # The UI panel reads stdout, so every step is announced there as a
+        # structured line whether or not a trace file is being written. Without
+        # it the window watching a run could only show the prose the log
+        # happened to emit, while the plan, the reasoning and the verification
+        # verdict stayed inside the process.
+        def announce(record: StepTrace) -> None:
+            print(event_line(record), flush=True)
+
+        trace_sink: Callable[[StepTrace], None] = announce
         if self._config.trace_dir is not None:
             tracer = RunTracer(
                 self._config.trace_dir,
                 run_id=run_id,
                 save_screenshots=self._config.trace_screenshots,
             )
-            trace_sink = tracer.record
+            def announce_and_record(record: StepTrace) -> None:
+                announce(record)
+                tracer.record(record)
+
+            trace_sink = announce_and_record
             LOGGER.info("run %s tracing to %s", run_id, tracer.directory)
         else:
             LOGGER.info("run %s starting", run_id)
