@@ -183,14 +183,24 @@ class Agent:
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
         distilled: DistillResult | None = None
 
-        def on_complete(trajectory: Trajectory, outcome: EpisodeOutcome) -> None:
-            # Distill against known history FIRST, then remember — so the fresh
-            # run is novel, and any future identical run is a duplicate (Law
-            # 3.3 wired through Law 4 memory).
+        def on_complete(
+            trajectory: Trajectory,
+            outcome: EpisodeOutcome,
+            retrospective: str | None,
+        ) -> None:
+            # A failed run is remembered but never distilled. Both halves
+            # matter: a workflow that did not work must not become a skill the
+            # next run is handed as a recipe, and a run that fought for twenty
+            # steps before hitting a wall is exactly the trace worth keeping
+            # (Law 4.1 failure retrospectives).
             nonlocal distilled
-            distilled = distill(trajectory, episodes_store.known_signatures())
-            if distilled.kind == "skill" and distilled.definition is not None:
-                skills_registry.save(distilled.definition)
+            if outcome == "success":
+                # Distill against known history FIRST, then remember — so the
+                # fresh run is novel, and any future identical run is a
+                # duplicate (Law 3.3 wired through Law 4 memory).
+                distilled = distill(trajectory, episodes_store.known_signatures())
+                if distilled.kind == "skill" and distilled.definition is not None:
+                    skills_registry.save(distilled.definition)
             episodes_store.record(
                 episode_from_trace(
                     app=trajectory.app,
@@ -198,6 +208,7 @@ class Agent:
                     steps=trajectory.steps,
                     step_descriptions=trajectory.step_descriptions,
                     outcome=outcome,
+                    retrospective=retrospective,
                 )
             )
             if outcome == "success":

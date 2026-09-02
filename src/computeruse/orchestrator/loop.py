@@ -681,7 +681,14 @@ class OodaRunner:
     # before positional actions. False when the app was merely discovered from
     # whatever was frontmost, where "drift" is not a meaningful concept.
     app_is_pinned: bool = False
-    on_complete: Callable[[Trajectory, EpisodeOutcome], None] | None = None
+    # DISTILL / remember. Fires on every terminal run, successful or not: the
+    # third argument is the retrospective, and it is the whole point of firing
+    # on a failure — the trajectory says what was tried, the retrospective says
+    # why it stopped. The caller decides what to do with each outcome (Law 3.1
+    # only ever wanted a *successful* flow distilled into a skill).
+    on_complete: (
+        Callable[[Trajectory, EpisodeOutcome, str | None], None] | None
+    ) = None
     # Goal-completion auditor (VERIFY, terminal): given the final state and the
     # model's own summary, decide whether the goal is *observably* satisfied.
     completion_check: Callable[[WorkingState, str], CompletionVerdict] | None = None
@@ -744,6 +751,10 @@ class OodaRunner:
         self._rejected_finishes: int = 0
         # Whether a physical action ran since ``_observation`` was taken.
         self._physical_since_capture: bool = False
+        # The most recent working state the stepping loop produced. Mirrored
+        # here only so an abnormal ending can be remembered against the state
+        # the run actually reached, not against the empty one it started from.
+        self._last_state: WorkingState = WorkingState(goal="")
 
     def run(self, goal: str) -> WorkingState:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
@@ -767,7 +778,26 @@ class OodaRunner:
         self._consecutive_failures = 0
         self._rejected_finishes = 0
         self._physical_since_capture = False
+        self._last_state = state
+        # Every abnormal ending — the step budget, an exhausted recovery
+        # ladder, a human takeover — is remembered as a failed episode before
+        # the typed error propagates. A run that worked for twenty steps and
+        # then hit a wall used to leave nothing behind at all, which made it
+        # indistinguishable from a run that never started (Law 4.1).
+        try:
+            return self._step_until_finished(state, goal)
+        except (MaxStepsError, UnrecoverableFailureError, KillSwitchTripped) as exc:
+            self._finalize(
+                self._last_state,
+                outcome="failure",
+                retrospective=failure_retrospective(exc),
+            )
+            raise
+
+    def _step_until_finished(self, state: WorkingState, goal: str) -> WorkingState:
+        """Run the cycle to a terminal outcome (the shell's stepping loop)."""
         for _ in range(self.max_steps):
+            self._last_state = state
             # Law 5: yield control to the human the instant a kill-switch trips,
             # even mid-workflow — never start a fresh action against a takeover.
             if self.kill_switch is not None and self.kill_switch.tripped():
@@ -837,6 +867,7 @@ class OodaRunner:
                     update={"action": batch_action, "actions": None}
                 )
                 state, finished, stop_batch = self._execute_one(state, single, goal)
+                self._last_state = state
                 if finished or stop_batch:
                     break
             if finished:
@@ -1641,7 +1672,11 @@ class OodaRunner:
         LOGGER.info("ooda finished goal=%r at step %s", goal, state.step_index)
         # DISTILL: hand the executed trajectory to the caller so a successful
         # run can become a reusable skill and every terminal run is remembered.
-        self._finalize(state, action)
+        self._finalize(
+            state,
+            outcome="success" if action.status == "success" else "failure",
+            retrospective=action.summary,
+        )
         return state, True, False
 
     def _audit_completion(self, state: WorkingState, finish: Finish) -> str | None:
@@ -1692,22 +1727,30 @@ class OodaRunner:
             "what blocked it."
         )
 
-    def _finalize(self, state: WorkingState, finish: Action) -> None:
+    def _finalize(
+        self,
+        state: WorkingState,
+        *,
+        outcome: EpisodeOutcome,
+        retrospective: str | None,
+    ) -> None:
         """Trigger the DISTILL/remember hooks on a terminal run.
 
-        Only fires when at least one action actually executed — an empty run
-        carries no trajectory to distil and no episode worth remembering.
-        Aborted runs (``max_steps``, unrecoverable failure) and kill-switch
-        takeovers never reach here: a truncated trace would teach the skill
-        store noise.
+        Every way a run can end reaches here, not just ``finish``. Aborted runs
+        used to leave nothing behind at all — a run that worked for twenty
+        steps and then exhausted its recovery ladder was as invisible to memory
+        as one that never started, so the same wall was walked into again on
+        the next attempt. Law 4.1 asks for failure retrospectives precisely
+        because that is the trace worth keeping.
+
+        Still gated on at least one executed action: a run that never touched
+        the host has no trajectory to remember, and the reason it failed is
+        already the caller's exception. What a *failure* trace must never do is
+        become a skill; that is the caller's call, and the retrospective is
+        passed so it can make it.
         """
         if self.on_complete is None or not self._executed:
             return
-        if not isinstance(finish, Finish):
-            raise RuntimeError(  # noqa: TRY004 - routing invariant, not a caller type error
-                "DISTILL requires a finish action; this is a coding error"
-            )
-        outcome: EpisodeOutcome = "success" if finish.status == "success" else "failure"
         self.on_complete(
             Trajectory(
                 app=self.app,
@@ -1716,6 +1759,7 @@ class OodaRunner:
                 step_descriptions=tuple(self._sub_goals),
             ),
             outcome,
+            retrospective,
         )
 
     @property
@@ -1847,6 +1891,23 @@ class OodaRunner:
             LOGGER.warning("skill load failed: %s", exc)
             return state
         return replace(state, skill=self._skill)
+
+
+def failure_retrospective(exc: BaseException) -> str:
+    """A short, honest account of why a run ended without finishing (pure).
+
+    Stored on the failed episode, so a later attempt at the same goal can be
+    told what stopped the last one. Named by cause rather than by exception
+    class: "recovery exhausted (consent_missing)" tells a human what to fix,
+    while "UnrecoverableFailureError" only tells them what raised.
+    """
+    if isinstance(exc, MaxStepsError):
+        return f"run truncated by the step budget: {exc}"
+    if isinstance(exc, KillSwitchTripped):
+        return f"human reclaimed control: {exc}"
+    if isinstance(exc, UnrecoverableFailureError):
+        return f"recovery exhausted ({exc.failure.kind.value}): {exc}"
+    return f"run ended abnormally: {exc}"
 
 
 class KillSwitchTripped(RuntimeError):

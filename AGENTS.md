@@ -200,7 +200,9 @@ not?).
        │
 [10. (post-run) DISTILL] ──► After the run completes, analyze the trajectory and synthesize a new
                              reusable Skill if novel. A run ended by max_steps, an unrecoverable
-                             failure, or a kill-switch takeover NEVER distills.
+                             failure, or a kill-switch takeover NEVER distills — but it IS recorded
+                             as a failed episode carrying a retrospective naming why it stopped, so
+                             the work it did before the wall is not thrown away (Law 4.1).
 ```
 
 **Coordinate-space invariant.** There is exactly one conversion between the
