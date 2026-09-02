@@ -104,6 +104,27 @@ class Wait(BaseModel):
     reason: str
 
 
+class WebSearch(BaseModel):
+    """Look something up rather than hunting for it on screen.
+
+    A non-physical action: no cursor, no focus, nothing the user has to share
+    the machine with. It exists because the alternative — opening a browser,
+    typing into a search box, reading results off a downscaled screenshot — is
+    a dozen fragile steps to obtain text the agent could simply have been
+    handed.
+    """
+
+    type: Literal["web_search"]
+    query: str = Field(min_length=1, max_length=400)
+
+
+class WebFetch(BaseModel):
+    """Read a page's text directly instead of scrolling through it."""
+
+    type: Literal["web_fetch"]
+    url: str = Field(min_length=1, max_length=2048)
+
+
 class Finish(BaseModel):
     type: Literal["finish"]
     status: Literal["success", "failed"]
@@ -118,6 +139,8 @@ Action = (
     | MouseScroll
     | TypeText
     | ClipboardPaste
+    | WebSearch
+    | WebFetch
     | PressHotkey
     | ActivateApp
     | LoadSkill

@@ -78,6 +78,8 @@ from computeruse.orchestrator.schemas import (
     MouseScroll,
     TypeText,
     Wait,
+    WebFetch,
+    WebSearch,
 )
 from computeruse.orchestrator.trace import StepTrace
 from computeruse.security.killswitch import KillSwitch
@@ -89,6 +91,7 @@ from computeruse.security.permissions import (
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
+from computeruse.tools import WebError, fetch_page, search_web
 from computeruse.vision.ax import (
     summaries_to_image_space,
     summaries_within,
@@ -247,13 +250,18 @@ class WorkingState:
     #: screen at once (a calculator covers the page whose number it used), and
     #: without a record of what the machine showed, such a goal is unprovable.
     observed_trail: tuple[str, ...] = ()
+    #: What the last non-physical tool returned — search hits, a page's text,
+    #: or the reason it could not answer. Held for exactly one turn: it is an
+    #: answer to the question the model just asked, and carrying it further
+    #: would let a stale page argue with what is now on screen.
+    tool_result: str | None = None
     # Hierarchical strategic plan (Phase 3): the decomposed sub-goal roadmap
     # the provider sees every turn. None when planning is disabled or the
     # goal needs no decomposition. Typed, never ``object`` (Law 6.2).
     plan: GoalPlan | None = None
 
 
-Routing = Literal["physical", "internal_wait", "internal_skill", "finish"]
+Routing = Literal["physical", "internal_wait", "internal_skill", "internal_tool", "finish"]
 
 
 @dataclass(frozen=True)
@@ -303,6 +311,11 @@ def _route_for(action: Action) -> Routing:
         return "physical"
     if action.type == "activate_app":
         return "physical"
+    # Tools reach the world without the host's input devices, so they are
+    # routed away from the driver entirely: no coordinate gate, no focus guard,
+    # no cursor to give back to the user afterwards.
+    if action.type in ("web_search", "web_fetch"):
+        return "internal_tool"
     if action.type == "wait":
         return "internal_wait"
     if action.type == "finish":
@@ -1060,6 +1073,14 @@ class OodaRunner:
                 verdict = self._act_and_verify(outcome.action)
             elif outcome.route == "internal_wait":
                 self._sleep_for(outcome.action)
+            elif outcome.route == "internal_tool":
+                # A tool answers with text, and that text IS the result the
+                # next turn reasons over — so it goes into the working state
+                # the same way a failure diagnostic does. Nothing physical
+                # happened, so there is nothing to verify against the screen.
+                state = replace(
+                    state, last_error=None, tool_result=self._run_tool(outcome.action)
+                )
             elif outcome.route == "internal_skill":
                 # Explicit Stage 2: the provider asked for this skill by id;
                 # mount it (replacing any auto-retrieved one).
@@ -2129,6 +2150,30 @@ class OodaRunner:
         import time
 
         time.sleep(duration_ms / 1000.0)
+
+    def _run_tool(self, action: Action) -> str:
+        """Run a non-physical tool and return what the next turn should read.
+
+        Failures come back as text rather than exceptions. A search that could
+        not reach its instance is information the model can act on — try a
+        different query, fall back to the browser, say it cannot look this up —
+        and routing it through the recovery ladder instead would spend the
+        escalation budget meant for actions that fight the screen.
+        """
+        try:
+            if isinstance(action, WebSearch):
+                hits = search_web(action.query)
+                if not hits:
+                    return f"web_search {action.query!r}: no results"
+                lines = "\n".join(f"- {hit.render()}" for hit in hits)
+                return f"web_search {action.query!r} returned:\n{lines}"
+            if isinstance(action, WebFetch):
+                text = fetch_page(action.url)
+                return f"web_fetch {action.url}:\n{text}"
+        except WebError as exc:
+            LOGGER.warning("ooda tool %s failed: %s", action.type, exc)
+            return f"{action.type} failed: {exc}"
+        raise ValueError(f"not a tool action: {action.type!r}")
 
     def _load_skill_for(self, action: Action) -> SkillDefinition:
         """Law 3 Stage 2: load the requested skill's full definition."""

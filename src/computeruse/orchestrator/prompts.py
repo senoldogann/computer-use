@@ -85,6 +85,8 @@ ACTION_CONTRACT: Final[str] = (
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
     '- type_text: {"type": "type_text", "text": str, "wpm": int (default 40)}\n'
+    '- web_search: {"type": "web_search", "query": str} — look something up without touching the screen. No cursor, no focus, no browser. Prefer this over opening a browser and typing into a search box.\n'
+    '- web_fetch: {"type": "web_fetch", "url": str} — read a page\'s text directly instead of scrolling through it on screen.\n'
     '- clipboard_paste: {"type": "clipboard_paste", "text": str} — preferred for URLs, search queries, and any long text (Cmd+V)\n'
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
     '- activate_app: {"type": "activate_app", "app": str} — brings an application (e.g. "Google Chrome", "Notes", "Finder") to the front\n'
@@ -246,6 +248,14 @@ class InvalidDecisionError(ValueError):
 def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
     """Render the immutable working state as model-facing context (pure)."""
     lines = [f"Goal: {state.goal}"]
+    if state.tool_result:
+        # The answer to the question the model asked on the previous turn.
+        # Held for one turn only: carrying a page's text forward would let a
+        # stale copy argue with what is now on screen.
+        lines.append("")
+        lines.append("Result of your last tool call:")
+        lines.append(state.tool_result)
+        lines.append("")
     if state.plan is not None:
         # Phase 3: the strategic roadmap the loop is executing against. The
         # provider sees the full plan (completed/in-progress/pending markers)
