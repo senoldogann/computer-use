@@ -35,10 +35,10 @@ def test_instantiate_parametric_skill() -> None:
     assert summary.parameters == ("query", "engine")
 
     instantiated = instantiate_skill(
-        template, {"query": "Freebuff AI", "engine": "Google"}
+        template, {"query": "accessibility API", "engine": "Google"}
     )
-    assert instantiated.description == "search Freebuff AI on Google"
-    assert instantiated.steps[1] == "Type search term -> type_text:text='Freebuff AI',wpm=60"
+    assert instantiated.description == "search accessibility API on Google"
+    assert instantiated.steps[1] == "Type search term -> type_text:text='accessibility API',wpm=60"
 
 
 def test_extract_facts_from_run_and_upsert(tmp_path: Path) -> None:

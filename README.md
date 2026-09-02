@@ -1,4 +1,4 @@
-# Freebuff Computer-Use Framework
+# Computer Use
 
 An **autonomous, human-centric computer-use system** that operates directly on
 the physical host — perceiving pixels, moving the real cursor along human-like
@@ -395,6 +395,22 @@ Working & tested:
 all three memory tiers, both ADR-2 grounding halves, and the three Law 5.2
 kill channels are implemented and tested. Multimodal vision input is live
 (screenshots feed the model via `screenshot_b64` + the OpenAI image_url
-route). Natural next frontiers: wiring the Set-of-Marks annotator into the
-OODA OBSERVE pipeline, multi-agent orchestration, and a fine-tuned
-skill-following model.
+route), Set-of-Marks annotation is wired into OBSERVE with a `click_mark`
+action that resolves a number to an element's own centre, and `--background`
+acts on an application through the accessibility API — pressing elements
+directly and photographing that window — so the agent can work in an app you
+have left behind another one without taking your cursor or your foreground.
+
+Natural next frontiers: multi-agent orchestration, a fine-tuned
+skill-following model, and per-window capture for applications that expose no
+pressable accessibility element.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: a change is finished
+when it has been measured on a real machine, all four gates are green, and the
+commit says what the root cause was.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
