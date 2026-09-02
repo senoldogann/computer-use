@@ -17,7 +17,7 @@ Every line of code, agent decision, and architectural module within this reposit
 ### Law 1: Physical Reality & Natural Actuation (No Synthetic Bypasses)
 1. **Direct Host Interaction**: The agent must never use synthetic backdoor shortcuts (e.g., launching isolated headless browser instances with clean profiles) when instructed to perform a task. It must interact with the user's real desktop environment.
 2. **Visual Spatial Grounding**: Actions must be spatially grounded through the host accessibility tree (AX, the primary source — see ADR-2) or visual perception (OCR/coordinate mapping, the fallback for apps without an AX tree), and confirmed by a visual diff before execution when verification is enabled. Axes are DPI/Retina-aware.
-3. **Human-like Kinematics**: Mouse movements must follow natural, continuous trajectories (cubic Bezier curves with distance-adaptive duration, realistic velocity profiles, variable typing speeds, post-click micro-pauses) rather than instantaneous coordinate teleportation. While the agent runs, a translucent sea-blue halo follows the cursor and a menu-bar status item shows the agent is active (Law 5.2: the user always sees what the agent is doing).
+3. **Human-like Kinematics**: Mouse movements must follow natural, continuous trajectories (cubic Bezier curves with distance-adaptive duration, realistic velocity profiles, variable typing speeds, post-click micro-pauses) rather than instantaneous coordinate teleportation. While the agent runs, a translucent emerald halo follows the cursor and a menu-bar status item shows the agent is active (Law 5.2: the user always sees what the agent is doing).
 
 ### Law 2: Model-Agnostic Orchestration & Scaffolding Supremacy
 1. **Weak-Model Resilience**: Never assume the underlying LLM has advanced native tool-use reasoning. The system must provide structured prompts, strict input/output contracts (JSON/Pydantic schemas), validation gates, and step-by-step reflection steps (Observe-Orient-Decide-Act / OODA).
@@ -128,38 +128,78 @@ To eliminate model hallucinations and ensure weak models always output valid com
 7. `load_skill`: `{"type": "load_skill", "skill_id": str}` (Explicitly mounts a skill, replacing the auto-retrieved one — see RETRIEVE).
 8. `wait`: `{"type": "wait", "duration_ms": int, "reason": str}`.
 9. `finish`: `{"type": "finish", "status": "success"|"failed", "summary": str}`.
+10. `clipboard_paste`: `{"type": "clipboard_paste", "text": str}` (Pastes text; semantically verified against the focused field's AXValue when determinable).
+11. `activate_app`: `{"type": "activate_app", "app": str}` (Brings a running app to the front via LaunchServices; verified by the focused-window probe).
 
 ---
 
-## 5. Execution State Machine (OODA Loop)
+## 5. Execution State Machine (Autonomy Cycle)
 
-Every agent step strictly executes the following cycle:
+Every agent step strictly executes the following cycle. The cycle is the OODA
+loop with the two steps that decide whether a run is *reliable* made explicit:
+VERIFY (did the action actually land?) and RECOVER (what happens when it did
+not?).
 
 ```
-[1. OBSERVE]  ──► Automatic, orchestrator-driven: inject the focused app's AX snapshot
-                  (element summaries + coordinates + focus state) into model context;
-                  when visual verification is enabled, also capture a Retina-aware screenshot.
-                  The model NEVER requests observation — it is injected before every decision.
+[1. OBSERVE]   ──► Automatic, orchestrator-driven, and taken as ONE immutable snapshot
+                   (Observation): the focused window, the frontmost app's AX element
+                   summaries, and — when vision is enabled — a screenshot downscaled to
+                   the exact map the model perceives. The snapshot carries its own
+                   ScreenMap, so image-space and screen-space can never drift apart.
+                   The model NEVER requests observation — it is injected before every
+                   decision.
        │
-[2. ORIENT]   ──► Compare against the previous step: focus-state changes, AX tree diffs, and
-                  (when enabled) pixel diff. If the last action failed, a structured last_error
-                  is injected into the next decision. Failure semantics: the model may re-attempt
-                  with corrected parameters, but the stuck-loop guard (Law 2.2) bounds repetition.
+[2. UNDERSTAND]──► The previous action's verdict and any recovery guidance are folded into
+                   last_error; the progress signature of this snapshot is compared with the
+                   one before the last action to answer "did anything actually move?".
        │
-[3. RETRIEVE] ──► Hybrid: the orchestrator scans the Skill Summary Index and auto-mounts the top
-                  same-app match (zero extra model tokens). The model may override by emitting
-                  load_skill for a different skill in DECIDE.
+[3. RETRIEVE]  ──► Hybrid: the orchestrator scans the Skill Summary Index and auto-mounts the top
+                   same-app match (zero extra model tokens). The model may override by emitting
+                   load_skill for a different skill in DECIDE. Repeated failure UNMOUNTS a skill:
+                   a workflow that keeps failing is actively misleading the model.
        │
-[4. DECIDE]   ──► LLM generates structured Thought + Sub-goal + Single Action JSON.
+[4. DECIDE]    ──► LLM generates structured Thought + Sub-goal + Action (or a small ordered batch).
        │
-[5. VALIDATE] ──► Permission Guard verifies Autonomy Level & safety bounds (e.g. destructive action check).
+[5. VALIDATE]  ──► Four gates, all before any physical effect: the Permission Guard (Autonomy
+                   Level + destructive-action check), the coordinate gate (image space → screen
+                   points via the snapshot's ScreenMap), the fail-closed display-bounds check, and
+                   the positional gate — one live window read that catches both focus drift (the
+                   target app no longer owns the screen) and decision staleness (the host moved on
+                   during the model's turn).
        │
-[6. ACTUATE]  ──► Physical Actuation Engine executes action with human-like kinematics.
+[6. ACT]       ──► Physical Actuation Engine executes the action with human-like kinematics,
+                   with the kill switch polled before, during and after.
        │
-[7. (post-run) DISTILL] ──► After the run completes (finish or max_steps), analyze the trajectory
-                            and synthesize a new reusable Skill if novel. A run interrupted by
-                            max_steps or abort NEVER distills.
+[7. VERIFY]    ──► Every action declares an expected postcondition, and independent witnesses
+                   report on it: the AX surface, the focused field's AXValue, the frontmost app,
+                   and (with --verify) a pixel diff. Rules: one CONFIRMED witness outweighs silent
+                   ones; a witness that cannot speak is INCONCLUSIVE and NEVER fails an action; a
+                   *direct* denial (the text is not in the field, the wrong app is frontmost) is
+                   conclusive alone, while two *circumstantial* witnesses ("nothing changed") must
+                   agree before an action is called a miss.
+       │
+[8. RECOVER]   ──► A failure is classified (FailureKind), counted per signature, and answered with
+                   escalating guidance: RETRY → ALTERNATE (change the method) → REPLAN (abandon the
+                   tactic, unmount skills) → ABORT. The ladder is finite, so one obstacle can never
+                   consume a whole run, and no single failure ends a run that could still recover.
+       │
+[9. FINISH]    ──► A claimed success is AUDITED before it is accepted: a separate, narrowly-scoped
+                   read of the current screen (goal + claim + screenshot, without the actor's own
+                   reasoning) must agree the goal is observably satisfied. A rejected claim folds
+                   back as an ordinary recoverable error.
+       │
+[10. (post-run) DISTILL] ──► After the run completes, analyze the trajectory and synthesize a new
+                             reusable Skill if novel. A run ended by max_steps, an unrecoverable
+                             failure, or a kill-switch takeover NEVER distills.
 ```
+
+**Coordinate-space invariant.** There is exactly one conversion between the
+model's image space and the driver's logical screen points, and `ScreenMap`
+owns both directions: `to_image` for everything perception hands the model (AX
+rects included), `to_screen` for every coordinate the model hands back. A
+screenshot whose ScreenMap cannot be computed is never shown to the model — a
+frame with an unknown coordinate space produces confidently wrong clicks, which
+is strictly worse than telling the model it is blind.
 
 ---
 
@@ -179,7 +219,7 @@ computeruse/
 │       ├── ax.rs              # Accessibility tree (AXUIElement) snapshot + focused-window probe
 │       ├── bezier.rs          # Pure trajectory math: cubic Bezier, distance-adaptive duration
 │       ├── hotkey.rs          # Kill-switch event tap (Command+Shift+Escape)
-│       ├── indicator.rs       # Menu-bar status item + sea-blue cursor halo (AppKit, macOS only)
+│       ├── indicator.rs       # Menu-bar status item + emerald cursor halo (AppKit, macOS only)
 │       ├── menu.rs            # Menu-bar chat launcher: Liquid-Glass panel (WKWebView) + agent subprocess
 │       ├── bin/menu.rs        # `actuation-menu` binary entry
 │       └── lib.rs
@@ -190,9 +230,12 @@ computeruse/
 │   ├── cli.py                 # CLI wiring: flags, driver spawn, error surfacing, summary output
 │   ├── agent.py               # Agent: activate-on-start, OODA orchestration, distill-on-complete
 │   ├── orchestrator/
-│   │   ├── loop.py            # OODA state machine: observe/orient/retrieve/decide/validate/actuate
+│   │   ├── loop.py            # Autonomy cycle: observe/understand/retrieve/decide/validate/act/verify/recover
+│   │   ├── evidence.py        # Expected postconditions + multi-witness verification verdicts (pure)
+│   │   ├── failures.py        # Failure taxonomy + the bounded recovery ladder (pure)
 │   │   ├── schemas.py         # Pydantic action contracts (discriminated unions, strict typing)
 │   │   ├── prompts.py         # Scaffolding prompts & error-correction injectors
+│   │   ├── planner.py         # Hierarchical goal decomposition + session checkpoints
 │   │   └── client.py          # Typed JSON-RPC client for the Rust driver (Unix socket)
 │   ├── providers/
 │   │   └── openai.py          # LLM transport (model-agnostic seam: OpenAI-compatible)
@@ -201,6 +244,7 @@ computeruse/
 │   │   ├── coordinates.py     # Retina-to-virtual coordinate transformation
 │   │   ├── capture.py         # Display capture (verification only)
 │   │   ├── diff.py            # Pre/post action visual diffing
+│   │   ├── som.py             # Set-of-Marks overlay annotator (unit-tested; not yet wired into OODA)
 │   │   └── focus.py           # Focused-app discovery + activation
 │   ├── skills/
 │   │   ├── registry.py        # Summary-index & lazy-loading engine (two-stage retrieval)
@@ -208,7 +252,8 @@ computeruse/
 │   │   └── schemas.py         # SkillDefinition / SkillSummary types
 │   ├── memory/
 │   │   ├── episodic.py        # Past execution traces & retrospectives
-│   │   └── semantic.py        # Key-value UI patterns & preferences
+│   │   ├── semantic.py        # Key-value UI patterns & preferences
+│   │   └── schemas.py         # Episodic/semantic memory payload types
 │   └── security/
 │       ├── autonomy.py        # Autonomy levels, permission guard, confirmation requirement
 │       └── killswitch.py      # Interrupt detection & handoff
@@ -232,7 +277,7 @@ When contributing code or modifying this repository, any AI assistant **MUST** f
 - **No Multi-Mode Functions**: Functions must do one thing reliably. Avoid boolean flag parameters that branch function behavior into two different paths.
 
 ### 7.2 Error Handling & Resilience
-- Always raise explicit, domain-specific errors (e.g., `CoordinateOutOfBoundsError`, `VisualVerificationFailedError`, `PermissionDeniedError`).
+- Always raise explicit, domain-specific errors (e.g., `CoordinateOutOfBoundsError`, `VerificationFailedError`, `StaleObservationError`, `FocusLostError`, `PermissionDeniedError`).
 - Never use bare `except:` or catch-all exception blocks that suppress root causes.
 - External API calls and OS input streams must incorporate exponential backoff with warning logs before raising the terminal error.
 - Error payloads must contain rich debug context: target coordinates, screen dimensions, active window title, and action payload.
@@ -269,7 +314,7 @@ These decisions were made deliberately; do not revert them to a single-language 
 | Typing | `pyright --strict` | ADR-1 requirement; zero-error gate in CI |
 | Lint/format | `ruff` (curated default rule set) | Import sorting, pyflakes, pyupgrade — dev extra, CI gate |
 | Schemas | Pydantic v2 | Discriminated unions for the action contract |
-| LLM transport | `openai` SDK (OpenAI-compatible) | Model-agnostic seam; `OPENAI_API_KEY` from env |
+| LLM transport | stdlib `urllib` transport in `providers/openai.py` (OpenAI-compatible) | Model-agnostic seam; `OPENAI_API_KEY` from env; no `openai` SDK dependency |
 | Test runner | `pytest` | Smoke tests drive the real driver over a Unix socket |
 | Rust driver | `core-graphics`, `core-foundation`, `objc2-app-kit` (macOS-gated) | Low-level OS APIs for actuation + AppKit indicator |
 

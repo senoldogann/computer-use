@@ -16,7 +16,7 @@ from computeruse.memory.semantic import SemanticEntry, SemanticStore, search_ent
 from computeruse.orchestrator.loop import OodaRunner, WorkingState
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.security.autonomy import AutonomyLevel
-from tests.smoke.conftest import SOCKET_PATH
+from tests.smoke.conftest import SIMULATED_SETTLE, SOCKET_PATH
 
 
 def _entry(**overrides: object) -> SemanticEntry:
@@ -178,6 +178,7 @@ def test_agent_retrieves_app_knowledge_for_provider(tmp_path) -> None:
         autonomy_level=AutonomyLevel.GUARDED,
         enable_visual_verification=False,
         max_steps=5,
+        **SIMULATED_SETTLE,
     )
     result = Agent(config).run()
     assert seen and "[Safari] shortcut.fullscreen: Ctrl+Cmd+F" in seen[0]

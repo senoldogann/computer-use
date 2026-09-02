@@ -53,6 +53,47 @@ jobs:
           path: driver/target/debug/actuation-driver
           retention-days: 1
 
+  # ── Rust (macOS): compile + clippy the macOS-gated actuation layer ──
+  # The driver's real-backend modules (quartz/ax/hotkey/indicator/menu) are
+  # cfg(target_os = "macos")-gated, so the Ubuntu Rust job never compiles
+  # them — this leg exists so the ~2,900 lines that touch the real host are
+  # always type-checked, clippy-clean, and unit-tested on every CI run (M8;
+  # the H1 scroll-axis swap is exactly the class of bug this catches). The
+  # unit tests in these modules are pure (scroll-axis mapping, menu arg
+  # wiring, icon pixels), so no Accessibility consent is needed.
+  macos-rust:
+    name: Rust (macOS — real backend gates)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: driver
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            driver/target
+          key: cargo-macos-${{ hashFiles('driver/Cargo.lock') }}
+          restore-keys: cargo-macos-
+
+      - name: Build driver binary
+        run: cargo build --all-targets
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
   # ── Python: lint + typecheck + test ──────────────────────────────
   python:
     name: Python (ruff + pyright + pytest)

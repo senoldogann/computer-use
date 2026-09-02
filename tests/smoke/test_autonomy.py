@@ -64,6 +64,19 @@ def test_level2_guarded_blocks_destructive() -> None:
     assert decide_permission(AutonomyLevel.GUARDED, Risk.NONE) is PermissionDecision.ALLOW
 
 
+def test_level2_guarded_confirms_routine_stateful_actions() -> None:
+    """M2: save/close/confirm dialog actions pause for a sign-off in guarded
+    mode — the ``_ROUTINE_MARKERS`` classification must be live policy, not
+    dead code that falls through to ALLOW like ordinary navigation."""
+    assert decide_permission(AutonomyLevel.GUARDED, Risk.ROUTINE) is PermissionDecision.CONFIRM
+
+
+def test_level3_full_auto_runs_routine_actions() -> None:
+    """M2: full autonomy still auto-runs routine-but-stateful actions; only
+    destructive ones require confirmation (Law 5.3 safety boundary)."""
+    assert decide_permission(AutonomyLevel.FULL, Risk.ROUTINE) is PermissionDecision.ALLOW
+
+
 def test_level3_full_still_confirms_destructive_actions() -> None:
     # Full autonomy never bypasses the destructive-action safety boundary.
     assert decide_permission(AutonomyLevel.FULL, Risk.DESTRUCTIVE) is PermissionDecision.CONFIRM

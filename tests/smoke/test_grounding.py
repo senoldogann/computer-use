@@ -23,9 +23,10 @@ from computeruse.vision import (
     element_summary,
     find_elements,
     interactive_summaries,
+    summaries_to_image_space,
 )
 from computeruse.vision.ax import open_tabs_from_tree
-from tests.smoke.conftest import SOCKET_PATH
+from tests.smoke.conftest import SIMULATED_SETTLE, SOCKET_PATH
 
 APP_PID = 4242
 
@@ -114,6 +115,106 @@ def test_interactive_summaries_bounded_by_count_not_only_depth() -> None:
     summaries = interactive_summaries(deep, max_depth=40)
     assert len(summaries) == 24
     assert summaries[0].startswith('Button "btn-40"')
+
+
+def test_interactive_summaries_put_web_content_before_browser_chrome() -> None:
+    """The count budget is not starved by browser chrome (field regression).
+
+    Chrome's AX tree lists its toolbar/tab chrome before the page's WebArea;
+    a plain DFS with a count cap filled the budget with chrome buttons and
+    the Google result links never reached the provider — the agent then
+    guessed coordinates. Web content must get the budget first.
+    """
+    chrome = tuple(
+        AXElement(
+            role="Button", title=f"toolbar-{i}", x=100.0, y=50.0, width=40.0, height=24.0
+        )
+        for i in range(30)
+    )
+    links = tuple(
+        AXElement(
+            role="Link",
+            title=f"result-{i}",
+            x=150.0,
+            y=200.0 + i * 40,
+            width=400.0,
+            height=30.0,
+        )
+        for i in range(10)
+    )
+    web_area = AXElement(
+        role="WebArea",
+        title="page",
+        x=0.0,
+        y=0.0,
+        width=1200.0,
+        height=800.0,
+        children=links,
+    )
+    root = AXElement(role="Window", title="Chrome", children=(*chrome, web_area))
+    summaries = interactive_summaries(root, max_depth=12, max_count=12)
+    # All 10 page links come before any chrome element, and the budget caps
+    # the rest of the chrome list.
+    assert len(summaries) == 12
+    assert summaries[0].startswith('Link "result-0"')
+    assert all(line.startswith('Link "result-') for line in summaries[:10])
+    assert any(line.startswith('Button "toolbar-') for line in summaries[10:])
+
+
+def test_interactive_summaries_without_web_area_keep_dfs_order() -> None:
+    """Non-browser apps (no WebArea) keep the plain DFS order."""
+    root = _fixture_root()
+    assert interactive_summaries(root) == FIXTURE_SUMMARIES
+
+
+def test_summaries_to_image_space_divides_by_points_per_pixel() -> None:
+    """AX rects are logical points; the model's space is the smaller image map.
+
+    Direction matters more than magnitude here: multiplying instead of
+    dividing pushed every AX coordinate off the right edge of the model's own
+    screenshot, and the actuation gate then scaled it a second time into a
+    point the bounds check rejected. AX grounding was silently dead.
+    """
+    scaled = summaries_to_image_space(
+        (
+            'Button "Reload" at (232,68) 44x24 value="x" (focused)',
+            "(AX grounding truncated — rely on the screenshot map for coordinates)",
+        ),
+        2.0,
+    )
+    assert scaled[0] == 'Button "Reload" at (116,34) 22x12 value="x" (focused)'
+    # Lines without a coordinate fragment pass through untouched.
+    assert scaled[1] == "(AX grounding truncated — rely on the screenshot map for coordinates)"
+    # Factor 1.0 (no map / small display) is an identity passthrough.
+    assert summaries_to_image_space(('Button "OK" at (1,2) 3x4',), 1.0) == (
+        'Button "OK" at (1,2) 3x4',
+    )
+
+
+def test_summaries_round_trip_through_the_actuation_gate() -> None:
+    """An AX coordinate handed to the model comes back as the same screen point.
+
+    This is the invariant the two directions exist to hold: whatever the model
+    reads off an AX line, the coordinate gate must convert back to where the
+    element actually is. Off-by-a-factor bugs die here rather than on a host.
+    """
+    from computeruse.orchestrator.loop import scale_action_coordinates
+    from computeruse.orchestrator.schemas import MouseClick
+    from computeruse.vision import Point, ScreenMap, Size
+
+    screen_map = ScreenMap(logical=Size(1512.0, 982.0), image=Size(512.0, 333.0))
+    element_point = Point(600.0, 400.0)
+    line = f'Button "Go" at ({element_point.x:.0f},{element_point.y:.0f}) 44x24'
+    (in_image,) = summaries_to_image_space((line,), screen_map.points_per_pixel)
+    model_x, model_y = (int(v) for v in in_image.split("at (")[1].split(")")[0].split(","))
+    actuated = scale_action_coordinates(
+        MouseClick(type="mouse_click", x=model_x, y=model_y),
+        screen_map.points_per_pixel,
+    )
+    assert isinstance(actuated, MouseClick)
+    # One image pixel is ~3 screen points, so a round trip lands within that.
+    assert abs(actuated.x - element_point.x) <= screen_map.points_per_pixel
+    assert abs(actuated.y - element_point.y) <= screen_map.points_per_pixel
 
 
 def test_summaries_include_deep_focused_element() -> None:
@@ -309,6 +410,7 @@ def test_agent_grounds_provider_coordinates_from_ax(tmp_path) -> None:
         autonomy_level=AutonomyLevel.GUARDED,
         enable_visual_verification=False,  # simulated driver never renders
         max_steps=10,
+        **SIMULATED_SETTLE,
     )
     result = Agent(config).run()
     # Discovery + grounding: the provider saw the Safari fixture and clicked

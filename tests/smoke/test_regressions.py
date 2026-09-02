@@ -9,6 +9,8 @@ from __future__ import annotations
 import socket
 import time
 
+import pytest
+
 from computeruse.orchestrator.client import ActuationClient
 from computeruse.orchestrator.loop import OodaRunner, WorkingState
 from computeruse.orchestrator.schemas import (
@@ -119,9 +121,9 @@ def test_f3_pipelined_responses_not_discarded() -> None:
     try:
         # Both responses arrive in a single write; a naive read discards the 2nd.
         server.sendall(b'{"ok":"ack"}\n{"ok":"pong"}\n')
-        first = client._read_response()
+        first = client._read_response("test", timeout_seconds=5.0)
         assert first == {"ok": "ack"}
-        second = client._read_response()
+        second = client._read_response("test", timeout_seconds=5.0)
         assert second == {"ok": "pong"}, f"pipelined response lost: {second}"
     finally:
         server.close()
@@ -137,7 +139,7 @@ def test_f3_split_response_reassembled() -> None:
         payload = b'{"ok":"ack"}'
         server.sendall(payload[:5])
         server.sendall(payload[5:] + b"\n")
-        assert client._read_response() == {"ok": "ack"}
+        assert client._read_response("test", timeout_seconds=5.0) == {"ok": "ack"}
     finally:
         server.close()
         client.close()
@@ -157,3 +159,49 @@ def test_f4_second_connection_served_while_first_idle() -> None:
         assert time.monotonic() - started < 3.0, "second connection starved"
     finally:
         blocker.close()
+
+# --- Per-action deadlines and stream integrity -------------------------------
+
+
+def test_action_deadline_covers_human_paced_typing() -> None:
+    """A long ``type_text`` must not time out on a perfectly healthy driver.
+
+    The driver paces keystrokes at human speed by design, so a 400-character
+    paste legitimately takes minutes. Under the old flat 10s deadline the
+    client gave up mid-word, and — worse — kept using the same socket, so the
+    driver's late ACK was read as the answer to the *next* request and every
+    response after that answered the wrong question.
+    """
+    from computeruse.orchestrator.client import action_timeout_seconds
+    from computeruse.orchestrator.schemas import ActivateApp, MouseClick, TypeText
+
+    long_text = "x" * 400
+    assert action_timeout_seconds(TypeText(type="type_text", text=long_text, wpm=40)) > 120
+    # A short action keeps a tight deadline: a hung driver must not stall a run.
+    assert action_timeout_seconds(MouseClick(type="mouse_click", x=1, y=1)) <= 15
+    # ``open -a`` may cold-launch an application.
+    assert action_timeout_seconds(ActivateApp(type="activate_app", app="Safari")) >= 30
+
+
+def test_timeout_drops_the_socket_instead_of_desyncing_it() -> None:
+    """An expired read abandons the stream rather than reusing it.
+
+    Keeping the socket would pair the driver's late reply with the following
+    request forever. Dropping it costs one reconnect; misattributing every
+    later response costs the run.
+    """
+    import socket
+
+    from computeruse.orchestrator.client import DriverTimeoutError
+
+    server, client_sock = socket.socketpair()
+    client = ActuationClient("/unused", connect_retries=1)
+    client._sock = client_sock  # type: ignore[attr-defined]  # test seam
+    try:
+        # The server never answers; the deadline must fire and reset the stream.
+        with pytest.raises(DriverTimeoutError, match="did not answer"):
+            client._read_response("screenshot", timeout_seconds=0.05)
+        assert not client.is_connected, "a timed-out stream must not be reused"
+    finally:
+        server.close()
+        client.close()

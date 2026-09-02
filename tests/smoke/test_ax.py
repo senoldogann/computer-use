@@ -36,6 +36,42 @@ def test_ax_snapshot_wire_shape() -> None:
     assert root.get("title") == "Safari"
 
 
+def test_ax_snapshot_omitted_max_nodes_uses_driver_default() -> None:
+    """Clients that predate the node budget must keep working (wire-back-compat)."""
+    payload = rpc_call({"method": "ax_snapshot", "params": {"pid": APP_PID, "max_depth": 8}})
+    assert payload.get("ok") == "ax_snapshot"
+    root = payload.get("root")
+    assert isinstance(root, dict)
+    assert root.get("role") == "Application"
+
+
+def test_ax_snapshot_node_budget_bounds_payload() -> None:
+    """A small max_nodes caps the returned tree; overflow siblings are dropped.
+
+    Fixture shape: Application (free root) > Window > 5 chrome children, no
+    WebArea. With max_nodes=8 the chrome pool is 2: the Window spends one
+    slot, the first child spends the second, and the remaining 4 siblings
+    are dropped (no empty stubs).
+    """
+    payload = rpc_call(
+        {"method": "ax_snapshot", "params": {"pid": APP_PID, "max_depth": 8, "max_nodes": 8}}
+    )
+    assert payload.get("ok") == "ax_snapshot"
+    root = payload.get("root")
+    assert isinstance(root, dict)
+    window = root["children"][0]
+    assert len(window["children"]) == 1, "budget exhausted after one chrome child"
+    assert window["children"][0]["title"] == "", "first child is the Toolbar"
+
+
+def test_ax_snapshot_large_budget_keeps_whole_fixture() -> None:
+    """A generous budget leaves the fixture intact (no accidental truncation)."""
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        root = client.ax_snapshot(pid=APP_PID, max_depth=8, max_nodes=4096)
+    window = root.children[0]
+    assert len(window.children) == 5
+
+
 def test_typed_ax_snapshot_via_client() -> None:
     root = _fixture_root()
     assert root.role == "Application"

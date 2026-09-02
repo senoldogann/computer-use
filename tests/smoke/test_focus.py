@@ -19,7 +19,7 @@ from computeruse.orchestrator.prompts import decision_prompt
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.security.autonomy import AutonomyLevel
 from computeruse.vision import FocusedWindow, window_summary
-from tests.smoke.conftest import SOCKET_PATH, rpc_call
+from tests.smoke.conftest import SIMULATED_SETTLE, SOCKET_PATH, rpc_call
 
 FIXTURE_SUMMARY = "Safari — GitHub — computeruse (cursor 420,300)"
 
@@ -208,6 +208,7 @@ def test_agent_auto_discovers_focused_app(tmp_path) -> None:
         autonomy_level=AutonomyLevel.GUARDED,
         enable_visual_verification=False,  # simulated driver never renders
         max_steps=10,
+        **SIMULATED_SETTLE,
     )
     result = Agent(config).run()
     assert result.app == "Safari"
@@ -252,6 +253,7 @@ def test_discovery_feeds_knowledge_and_window_context(tmp_path) -> None:
         autonomy_level=AutonomyLevel.GUARDED,
         enable_visual_verification=False,
         max_steps=10,
+        **SIMULATED_SETTLE,
     )
     result = Agent(config).run()
     assert result.app == "Safari"

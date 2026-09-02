@@ -9,6 +9,7 @@ one subprocess run of the actual CLI.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -21,12 +22,13 @@ from computeruse.agent import Agent, AgentConfig
 from computeruse.cli import discover_app
 from computeruse.orchestrator.client import ActuationClient, DriverRpcError
 from computeruse.orchestrator.loop import MaxStepsError, StuckLoopError, WorkingState
+from computeruse.orchestrator.planner import SessionCheckpoint
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.security.autonomy import AutonomyLevel, PermissionDeniedError
 from computeruse.vision.ax import AXElement
 from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.focus import FocusedWindow
-from tests.smoke.conftest import DRIVER_BIN, REPO_ROOT, SOCKET_PATH
+from tests.smoke.conftest import DRIVER_BIN, REPO_ROOT, SIMULATED_SETTLE, SOCKET_PATH
 
 # Deterministic 1x1 BGRA frame for fake sensor fakes: valid per
 # ScreenCapture's size validator, tiny, and hermetic — the OBSERVE path
@@ -76,6 +78,7 @@ def _config(tmp_path: Path, *, goal: str = "open the menu", level: AutonomyLevel
         autonomy_level=level,
         enable_visual_verification=False,  # simulated driver never renders
         max_steps=10,
+        **SIMULATED_SETTLE,
     )
 
 
@@ -101,6 +104,60 @@ def test_second_run_of_same_flow_is_duplicate(tmp_path) -> None:
     assert len(second.skills) == 1
 
 
+def test_checkpoint_records_real_step_count(tmp_path) -> None:
+    """H2: a session checkpoint records the executed step count, not 0.
+
+    The callback fires from inside ``runner.run()`` where ``runner`` is
+    already bound; an earlier ``"runner" in locals()`` guard could never see
+    the closure variable and always persisted ``completed_steps_count=0``.
+    """
+    config = AgentConfig(
+        goal="focus the address bar then search for latest AI news",
+        app="Safari",
+        provider=_click_provider(),
+        socket_path=str(SOCKET_PATH),
+        store_dir=tmp_path / "store",
+        enable_visual_verification=False,  # simulated driver never renders
+        enable_vision=False,
+        enable_planning=True,
+        max_steps=10,
+        **SIMULATED_SETTLE,
+    )
+    Agent(config).run()
+    checkpoint_dir = config.store_dir / "checkpoints"
+    files = sorted(checkpoint_dir.glob("*.json"))
+    assert files, "a multi-sub-goal plan must persist session checkpoints"
+    checkpoint = SessionCheckpoint.load(files[-1])
+    assert checkpoint.completed_steps_count == 2, (
+        "the checkpoint must count the two executed clicks, not 0"
+    )
+
+
+def _ax_grounded_click_provider() -> Callable[[WorkingState], AgentTurn]:
+    """Click the centre of the Reload button, read from the AX summaries.
+
+    This is the shape a well-behaved model follows: the coordinate comes from
+    perception, never from imagination.
+    """
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            reload_line = next(
+                line for line in state.ui_elements if 'Button "Reload"' in line
+            )
+            match = re.search(r"at \((\d+),(\d+)\) (\d+)x(\d+)", reload_line)
+            assert match is not None
+            x, y, width, height = (int(group) for group in match.groups())
+            return _click("click reload", "click the Reload button", x + width // 2, y + height // 2)
+        return AgentTurn(
+            thought="done",
+            sub_goal="workflow complete",
+            action=Finish(type="finish", status="success", summary="reload clicked"),
+        )
+
+    return provider
+
+
 def test_guard_blocks_destructive_at_observer(tmp_path) -> None:
     def destructive_provider(state: WorkingState) -> AgentTurn:
         if state.step_index == 0:
@@ -120,32 +177,71 @@ def test_guard_blocks_destructive_at_observer(tmp_path) -> None:
         autonomy_level=AutonomyLevel.OBSERVER,  # never acts
         enable_visual_verification=False,
         max_steps=5,
+        **SIMULATED_SETTLE,
     )
     with pytest.raises(PermissionDeniedError):
         Agent(config).run()
 
 
-def test_simulated_driver_verification_catches_miss(tmp_path) -> None:
-    """A run against a driver that cannot render must fail loudly — either the
-    pixels say the click never landed, or (first, under verify) the coordinate
-    is rejected as outside the observed display. The honest answer is a
-    failure, never a phantom success."""
+def test_closed_loop_verifies_a_grounded_click_end_to_end(tmp_path) -> None:
+    """The whole cycle through the real driver socket, with witnesses agreeing.
+
+    AX generates the coordinate, the map converts it, the driver actuates it,
+    and the pixel + AX witnesses corroborate that it landed. Exercising this
+    offline is the reason the simulated backend models focus and paints a
+    click marker: with an inert fixture, every verified action looked like a
+    miss and the closed loop could only ever be tested on a real display.
+    """
     config = AgentConfig(
-        goal="click",
+        goal="click reload",
         app="Safari",
-        provider=_click_provider(),
+        provider=_ax_grounded_click_provider(),
         socket_path=str(SOCKET_PATH),
         store_dir=tmp_path / "store2",
         autonomy_level=AutonomyLevel.GUARDED,
         enable_visual_verification=True,
         max_steps=10,
+        **SIMULATED_SETTLE,
+    )
+    result = Agent(config).run()
+    assert result.state.last_error is None
+    assert [action.type for action in result.trajectory] == ["mouse_click"]
+
+
+def test_phantom_coordinate_is_rejected_end_to_end(tmp_path) -> None:
+    """A coordinate off the observed display never reaches the physical layer.
+
+    The honest outcome of a hallucinated coordinate is a reported failure and
+    an empty trajectory — never a phantom success that the memory layer then
+    learns from.
+    """
+
+    def phantom_provider() -> Callable[[WorkingState], AgentTurn]:
+        def provider(state: WorkingState) -> AgentTurn:
+            if state.step_index == 0:
+                return _click("click", "click a phantom target", 9000, 9000)
+            return AgentTurn(
+                thought="cannot proceed",
+                sub_goal="give up",
+                action=Finish(type="finish", status="failed", summary="target not found"),
+            )
+
+        return provider
+
+    config = AgentConfig(
+        goal="click",
+        app="Safari",
+        provider=phantom_provider(),
+        socket_path=str(SOCKET_PATH),
+        store_dir=tmp_path / "store3",
+        autonomy_level=AutonomyLevel.GUARDED,
+        enable_visual_verification=True,
+        max_steps=10,
+        **SIMULATED_SETTLE,
     )
     result = Agent(config).run()
     assert result.state.last_error is not None
-    assert (
-        "VisualVerificationFailedError" in result.state.last_error
-        or "outside the observed" in result.state.last_error
-    )
+    assert "outside the observed" in result.state.last_error
     # Nothing executed, so nothing was learned from a phantom run.
     assert result.trajectory == ()
     assert result.distilled is None
@@ -155,9 +251,9 @@ def test_simulated_driver_verification_catches_miss(tmp_path) -> None:
 class _SensorDeadClient:
     """Driver client whose screen sensor refuses (Screen Recording consent).
 
-    Mimics the real driver's behaviour when consent is missing: perception
-    probes (focused window, AX tree) work, but every capture is refused — the
-    exact condition a user hits on first real run.
+    Everything else answers normally, so the test isolates the one failure the
+    fail-fast startup probe exists to catch: perception configured but
+    unavailable.
     """
 
     def __enter__(self) -> Self:
@@ -181,7 +277,7 @@ class _SensorDeadClient:
     def hotkey_state(self) -> bool:
         return False
 
-    def ax_snapshot(self, pid: int, max_depth: int) -> AXElement:
+    def ax_snapshot(self, pid: int, max_depth: int, max_nodes: int) -> AXElement:
         return AXElement(role="Window", title="GitHub")
 
     def send(self, _action: object) -> None:
@@ -214,6 +310,7 @@ def test_visual_verification_fails_fast_on_dead_sensor(monkeypatch, tmp_path) ->
         store_dir=tmp_path / "store",
         enable_visual_verification=True,
         max_steps=10,
+        **SIMULATED_SETTLE,
     )
     with pytest.raises(RuntimeError, match="Screen Recording consent"):
         Agent(config).run()
@@ -247,6 +344,7 @@ def test_verification_disabled_tolerates_dead_sensor(monkeypatch, tmp_path) -> N
         enable_visual_verification=False,
         enable_vision=False,
         max_steps=10,
+        **SIMULATED_SETTLE,
     )
     result = Agent(config).run()
     assert result.state.last_error is None
@@ -267,7 +365,10 @@ def test_capture_surfaces_driver_message(monkeypatch) -> None:
     monkeypatch.setattr(
         client,
         "request",
-        lambda _method, _params: {"ok": "error", "message": "Screen Recording consent required"},
+        lambda _method, _params=None, *, timeout_seconds=None: {
+            "ok": "error",
+            "message": "Screen Recording consent required",
+        },
     )
     with pytest.raises(DriverRpcError, match="Screen Recording consent required"):
         client.capture()
@@ -278,7 +379,12 @@ def test_client_activate_app_surfaces_driver_message(monkeypatch) -> None:
     client = ActuationClient("/unused", connect_retries=1)
     calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+    def fake_request(
+        method: str,
+        params: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
         calls.append((method, params))
         return {"ok": "error", "message": "cannot activate app 'Nope': `open -a` exited with Some(1)"}
 
@@ -323,7 +429,7 @@ class _RecordingClient:
         self.calls.append("hotkey_state")
         return False
 
-    def ax_snapshot(self, pid: int, max_depth: int) -> AXElement:
+    def ax_snapshot(self, pid: int, max_depth: int, max_nodes: int) -> AXElement:
         self.calls.append(f"ax:{pid}")
         return AXElement(role="Window", title="GitHub")
 
@@ -341,6 +447,7 @@ def _activate_config(tmp_path: Path, *, app: str, activate: bool) -> AgentConfig
         enable_visual_verification=False,
         activate_app_on_start=activate,
         max_steps=10,
+        **SIMULATED_SETTLE,
     )
 
 
@@ -404,6 +511,25 @@ def test_cli_surfaces_stuck_loop_and_max_steps(monkeypatch, capsys) -> None:
     assert "stuck loop" in capsys.readouterr().err
     assert main(["--goal", "click"]) == 1
     assert "max steps" in capsys.readouterr().err
+
+
+def test_cli_verify_defaults_on_for_real_model_runs() -> None:
+    """--verify defaults ON for real LLM runs (closed-loop feedback)."""
+    from computeruse.cli import parse_args, resolve_verify
+
+    # Real LLM run with no explicit flag: verification auto-enables so a
+    # missed click is caught instead of silently repeated.
+    real_model = parse_args(["--goal", "click", "--real", "--model", "openai"])
+    assert resolve_verify(real_model) is True
+    # Explicit --no-verify wins.
+    explicit_off = parse_args(
+        ["--goal", "click", "--real", "--model", "openai", "--no-verify"]
+    )
+    assert resolve_verify(explicit_off) is False
+    # Simulated/demo runs stay off: a simulated driver can never render, so
+    # verification would fail by design.
+    demo = parse_args(["--goal", "click"])
+    assert resolve_verify(demo) is False
 
 
 def test_cli_activates_named_app_only_with_real() -> None:

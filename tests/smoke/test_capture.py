@@ -20,6 +20,7 @@ from computeruse.vision import (
     to_luma_grid,
     verify_capture_region,
 )
+from computeruse.vision.capture import crop_capture
 from computeruse.vision.coordinates import (
     DisplayGeometry,
     Point,
@@ -30,6 +31,40 @@ from computeruse.vision.coordinates import (
 from tests.smoke.conftest import SOCKET_PATH, rpc_call
 
 # --- Pure decode -------------------------------------------------------------
+
+
+def test_crop_capture_slices_raw_bytes_before_decode() -> None:
+    """M4: cropping raw BGRA bytes yields a standalone capture of the region.
+
+    Each pixel is a distinct 4-byte value (x + y*width indices), so a correct
+    crop can be asserted byte-for-byte.
+    """
+    width, height = 4, 2
+    capture = ScreenCapture(
+        display_id=0,
+        width=width,
+        height=height,
+        scale=2.0,
+        data=bytes(range(width * height * 4)),
+    )
+    cropped = crop_capture(capture, Rect(Point(1, 0), Size(2, 2)))
+    assert (cropped.width, cropped.height) == (2, 2)
+    assert cropped.scale == 2.0
+    # Row 0 (base 0): pixels x=1, x=2 -> bytes 4..12; row 1 (base 16): x=1, x=2.
+    assert cropped.data == bytes(range(4, 12)) + bytes(range(20, 28))
+
+
+def test_crop_capture_out_of_bounds_clamps_like_grid_crop() -> None:
+    """M4: out-of-bounds edges clamp; a fully-outside region is empty, so the
+    diff reads "unchanged" exactly as the old decode-then-crop path did."""
+    capture = ScreenCapture(
+        display_id=0, width=8, height=8, scale=1.0, data=bytes(8 * 8 * 4)
+    )
+    empty = crop_capture(capture, Rect(Point(100, 100), Size(4, 4)))
+    assert (empty.width, empty.height) == (0, 0)
+    assert empty.data == b""
+    partial = crop_capture(capture, Rect(Point(6, 6), Size(10, 10)))
+    assert (partial.width, partial.height) == (2, 2)
 
 
 def test_to_luma_grid_reads_bgra_not_rgba() -> None:
@@ -119,17 +154,21 @@ def test_typed_capture_round_trip_via_client() -> None:
     with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
         capture = client.capture()
     assert capture.pixel_format == "bgra8"
-    assert capture.scale == 2.0
-    grid = to_luma_grid(capture)
-    assert len(grid) == capture.height == 36
-    assert all(len(row) == capture.width == 64 for row in grid)
+    assert capture.scale == 1.0
+    assert (capture.width, capture.height) == (1024, 768)
+    # Decode a corner rather than the whole frame: ``to_luma_grid`` is a pure
+    # Python double loop, and a full 1024x768 decode costs seconds for no
+    # extra signal. Cropping first is also how the ORIENT path itself works.
+    grid = to_luma_grid(crop_capture(capture, Rect(Point(0, 0), Size(16, 16))))
+    assert len(grid) == 16
+    assert all(len(row) == 16 for row in grid)
 
 
 def test_simulated_checkerboard_matches_expected_luma() -> None:
     """The simulated backend's frame is a deterministic 8×8 checkerboard."""
     with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
         capture = client.capture()
-    grid = to_luma_grid(capture)
+    grid = to_luma_grid(crop_capture(capture, Rect(Point(0, 0), Size(16, 16))))
     top_left = Rect(Point(0, 0), Size(8, 8))
     second = Rect(Point(8, 0), Size(8, 8))
     assert all(
@@ -182,10 +221,11 @@ def test_edited_region_verifies_changed_and_neighbour_stable() -> None:
         after = client.capture()
 
     # Flip the top-left 16×16 block to black in the "after" frame. The
-    # checked region is 16×16 logical points = 32×32 physical pixels (scale
-    # 2.0), so a *smaller* flip (e.g. 8×8) covers only 6.25% of the region
-    # and sits under verdict()'s 15% change threshold — the change must be
-    # big enough to be a real, detectable edit.
+    # simulated display is 1:1 (scale 1.0), so a 20×20 point region contains
+    # 400 pixels of which 128 (the two white checker blocks inside the flip)
+    # change: 32% — comfortably over verdict()'s 15% change threshold and
+    # under its 50% "wholesale takeover" noise cap, so this reads as a real,
+    # localized edit rather than a whole-region replacement.
     mutated = bytearray(after.data)
     for y in range(16):
         base = y * after.width * 4
@@ -200,14 +240,14 @@ def test_edited_region_verifies_changed_and_neighbour_stable() -> None:
 
     # Region covering the flipped block plus untouched blocks: CHANGED.
     changed = verify_capture_region(
-        before, after, Rect(Point(0, 0), Size(12, 12))
+        before, after, Rect(Point(0, 0), Size(20, 20))
     )
     assert changed.verdict.kind is ChangeKind.CHANGED
     assert changed.changed
 
     # A region entirely outside the edit: still UNCHANGED.
     stable = verify_capture_region(
-        before, after, Rect(Point(12, 0), Size(12, 12))
+        before, after, Rect(Point(20, 0), Size(20, 20))
     )
     assert stable.verdict.kind is ChangeKind.UNCHANGED
 
@@ -260,6 +300,53 @@ def test_to_logical_resolution_passthrough_at_scale_one() -> None:
         data=bytes(3 * 2 * 4),
     )
     assert to_logical_resolution(capture) is capture
+
+
+def test_downscale_to_max_side_creates_the_vlm_map() -> None:
+    """The screenshot map matches what OpenAI `detail: low` will show (512px)."""
+    from computeruse.vision.capture import downscale_to_max_side
+
+    # 1024x600 -> 512x300 (longest side capped, aspect preserved, scale 1.0).
+    width, height = 1024, 600
+    capture = ScreenCapture(
+        display_id=0, width=width, height=height, scale=1.0, data=bytes(width * height * 4)
+    )
+    mapped = downscale_to_max_side(capture)
+    assert (mapped.width, mapped.height) == (512, 300)
+    assert mapped.scale == 1.0
+    # The coordinate gate's factor: screen points per image pixel.
+    assert mapped.width * 2.0 == width
+
+
+def test_downscale_to_max_side_sampled_content_stays_grounded() -> None:
+    """Nearest-neighbour sampling keeps a painted region's position exact."""
+    from computeruse.vision.capture import downscale_to_max_side
+
+    width, height = 1024, 600
+    buf = bytearray(width * height * 4)
+    # Paint a 200x100 white block at logical (300, 200) -> image (150, 100).
+    for y in range(200, 300):
+        base = (y * width + 300) * 4
+        buf[base : base + 200 * 4] = b"\xff\xff\xff\xff" * 200
+    capture = ScreenCapture(display_id=0, width=width, height=height, scale=1.0, data=bytes(buf))
+    mapped = downscale_to_max_side(capture)
+    # The block's top-left lands at the mapped pixel (150, 100) and is white.
+    i = (100 * mapped.width + 150) * 4
+    assert mapped.data[i : i + 4] == b"\xff\xff\xff\xff"
+
+
+def test_downscale_to_max_side_passthrough_when_small() -> None:
+    """A display already within 512px is not resampled (factor stays 1.0)."""
+    from computeruse.vision.capture import downscale_to_max_side
+
+    capture = ScreenCapture(
+        display_id=0,
+        width=480,
+        height=320,
+        scale=1.0,
+        data=bytes(480 * 320 * 4),
+    )
+    assert downscale_to_max_side(capture) is capture
 
 
 def test_capture_to_png_encodes_valid_png() -> None:

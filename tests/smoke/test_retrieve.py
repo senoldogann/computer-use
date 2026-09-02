@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from computeruse.agent import Agent, AgentConfig
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState
 from computeruse.orchestrator.prompts import decision_prompt
 from computeruse.orchestrator.schemas import AgentTurn, Finish, LoadSkill, MouseClick
 from computeruse.security.autonomy import AutonomyLevel
@@ -128,6 +128,44 @@ def test_retrieve_refuses_other_app_skill() -> None:
     final = runner.run("export the menu")
     assert seen == [None, None]
     assert final.skill is None
+
+
+def test_retrieve_preserves_open_tabs_after_mount() -> None:
+    """M3: mounting a skill must not drop the observed browser tabs.
+
+    The RETRIEVE rebuild happens between OBSERVE and the provider decision, so
+    a rebuild that silently resets ``open_tabs`` to ``()`` would blind the
+    model to stray tabs exactly when it needs them.
+    """
+    seen_tabs: list[tuple[str, ...]] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        seen_tabs.append(state.open_tabs)
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="first",
+                sub_goal="click",
+                action=MouseClick(type="mouse_click", x=1, y=1),
+            )
+        return AgentTurn(
+            thought="done",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    tabs = ("GitHub — computeruse", "Inbox")
+    runner = _runner(
+        provider=provider,
+        ax_probe=lambda: AxProbeResult(
+            summaries=('Button "Reload" at (232,68) 44x24',),
+            open_tabs=tabs,
+        ),
+    )
+    final = runner.run("export the menu")
+    assert seen_tabs, "the provider must have decided at least once"
+    # Every provider turn — including the skill-mount one — sees the tabs.
+    assert all(turn_tabs == tabs for turn_tabs in seen_tabs)
+    assert final.open_tabs == tabs
 
 
 def test_explicit_load_skill_mounts_and_replaces() -> None:

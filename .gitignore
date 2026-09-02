@@ -14,6 +14,12 @@ driver/target/
 # Runtime sockets
 *.sock
 
+# Secrets — the OpenAI key lives in ~/.computeruse/env or a local .env,
+# and neither may ever reach the repository.
+.env
+.env.*
+!.env.example
+
 # macOS
 .DS_Store
 
@@ -21,3 +27,9 @@ driver/target/
 .ccm/
 .freebuff/
 data/
+
+# Third-party agent-tooling scaffolding vendored by local tools, not project
+# source (same reason `data/` is ignored: it is a cache of someone else's repo).
+.agents/
+skills/
+skills-lock.json

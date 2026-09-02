@@ -7,14 +7,16 @@ corrective hints on invalid JSON. This module is the *transport* half — a
 plain ``prompt -> text`` callable backed by OpenAI's Chat Completions API.
 
 Model choice (August 2026 lineup): the default is ``gpt-5.6-terra`` — the
-balanced tier of the GPT-5.6 family ($2.50/$15 per 1M tokens). Our loop makes
-one small JSON decision per turn against a compact context (goal, UI-element
-summaries, mounted skill, action contract), and the scaffold + visual
-verification already compensate for weaker models — so the flagship
-``gpt-5.6-sol`` ($5/$30) is 2x the price for marginal gain, while
-``gpt-5.6-luna`` ($1/$6) risks hallucinated coordinates on a *physical* host,
-where a miss costs real retries. Terra is the cost/quality sweet spot; pass
-``openai:gpt-5.6-luna`` (or any other id) to override.
+balanced tier of the GPT-5.6 family. OpenAI's July 30, 2026 price cut set
+Terra at $2/$12 per 1M tokens (input/output), Luna at $0.20/$1.20, and left
+Sol at $5/$30. Our loop makes one small JSON decision per turn against a
+compact context (goal, UI-element summaries, mounted skill, action
+contract), and the scaffold + visual verification already compensate for
+weaker models — so the flagship ``gpt-5.6-sol`` is ~2.5x Terra's price for
+marginal gain, while ``gpt-5.6-luna`` risks hallucinated coordinates on a
+*physical* host, where a miss costs real retries. Terra remains the
+cost/quality sweet spot; pass ``openai:gpt-5.6-luna`` (or any other id) to
+override.
 
 Cost friendliness: the API key comes from ``OPENAI_API_KEY`` (never from the
 repo). The scaffold's ``decision_prompt`` keeps the stable prefix (application
@@ -29,11 +31,17 @@ failure (Law 6.3).
 from __future__ import annotations
 
 import json
+import logging
 import os
+import ssl
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Final, Protocol, Self, cast
+
+LOGGER = logging.getLogger(__name__)
 
 # The balanced GPT-5.6 tier (see module docstring for the rationale).
 DEFAULT_MODEL: Final[str] = os.environ.get("OPENAI_MODEL", "gpt-5.6-terra")
@@ -50,6 +58,32 @@ class HttpResponse(Protocol):
 
 
 Opener = Callable[..., HttpResponse]
+
+# A transport failure is *transient* (worth retrying) only when it smells
+# like the wire: timeouts, resets, and TLS alerts. Anything else (e.g. a
+# protocol bug in the opener) fails fast — re-running won't fix it.
+_MAX_TRANSPORT_RETRIES: Final[int] = 3
+_TRANSPORT_BACKOFF_BASE_SECONDS: Final[float] = 0.5
+
+
+def _is_retryable_oserror(exc: OSError) -> bool:
+    """Pure: is this OS error one a retry could plausibly fix?"""
+    return isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError))
+
+
+@dataclass(frozen=True)
+class ModelCallStats:
+    """Usage + latency of one successful model call (pure data).
+
+    Consumed by a caller-provided sink so the panel/CLI can show live token
+    and elapsed-time counters without the transport knowing anything about
+    the UI layer.
+    """
+
+    total_tokens: int
+    prompt_tokens: int
+    completion_tokens: int
+    elapsed_s: float
 
 
 class OpenAIError(RuntimeError):
@@ -76,6 +110,7 @@ def openai_model(
     timeout_seconds: float = 180.0,
     max_tokens: int = 512,
     http_open: Opener | None = None,
+    stats_sink: Callable[[ModelCallStats], None] | None = None,
 ) -> Callable[..., str]:
     """Build a model callable (prompt, [image_b64] -> reply) backed by OpenAI.
 
@@ -95,6 +130,7 @@ def openai_model(
     opener = http_open if http_open is not None else urllib.request.urlopen
 
     def model_call(prompt: str, image_b64: str | None = None) -> str:
+        started_at = time.perf_counter()
         if image_b64:
             user_content: list[dict[str, object]] = [
                 {"type": "text", "text": prompt},
@@ -102,7 +138,13 @@ def openai_model(
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:image/png;base64,{image_b64}",
-                        "detail": "high",
+                        # The frame is already a 512px-max screenshot map
+                        # (downscale_to_max_side), so "low" detail is a no-op:
+                        # the model sees exactly the map whose scale factor
+                        # the coordinate gate knows. ~85 tokens instead of
+                        # ~1,100 (512px tiling) per turn — a real latency/cost
+                        # win per step, with coordinates still exact.
+                        "detail": "low",
                     },
                 },
             ]
@@ -130,16 +172,37 @@ def openai_model(
             },
             method="POST",
         )
-        try:
-            with opener(request, timeout=timeout_seconds) as response:
-                payload: dict[str, object] = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            # HTTPError is an OSError; catch it first and surface the API's
-            # own body (e.g. "model not found", "insufficient quota").
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
-            raise OpenAIError(f"OpenAI API error {exc.code}: {detail}") from exc
-        except OSError as exc:
-            raise OpenAIError(f"OpenAI request failed: {exc}") from exc
+        # Transient transport failures (timeouts, connection resets, TLS/SSL
+        # alerts like SSLV3_ALERT_BAD_RECORD_MAC from a flaky middlebox) must
+        # never kill a run outright: exponential backoff with warning logs
+        # (AGENTS.md §7.2) before raising the terminal OpenAIError. HTTP-level
+        # errors stay terminal — the API answered, and 4xx/5xx tell the user
+        # what to fix (key, quota, model).
+        attempt = 0
+        while True:
+            try:
+                with opener(request, timeout=timeout_seconds) as response:
+                    payload: dict[str, object] = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                # HTTPError is an OSError; catch it first and surface the API's
+                # own body (e.g. "model not found", "insufficient quota").
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+                raise OpenAIError(f"OpenAI API error {exc.code}: {detail}") from exc
+            except OSError as exc:
+                attempt += 1
+                if attempt >= _MAX_TRANSPORT_RETRIES or not _is_retryable_oserror(exc):
+                    raise OpenAIError(f"OpenAI request failed: {exc}") from exc
+                wait_s = _TRANSPORT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                LOGGER.warning(
+                    "OpenAI transport failure (%s); retrying in %.1fs (attempt %d/%d)",
+                    exc,
+                    wait_s,
+                    attempt,
+                    _MAX_TRANSPORT_RETRIES,
+                )
+                time.sleep(wait_s)
+        elapsed_s = time.perf_counter() - started_at
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
             raise OpenAIError(f"OpenAI response missing choices: {payload}")
@@ -148,6 +211,47 @@ def openai_model(
         content = message.get("content")
         if not isinstance(content, str):
             raise OpenAIError(f"OpenAI response missing text content: {payload}")
+        # usage is optional on the wire; when absent (proxies, some fakes) the
+        # sink still gets the latency with zeroed token counts.
+        usage_raw = payload.get("usage")
+        # dict[Unknown, Unknown] from the isinstance narrowing would poison
+        # strict typing; an explicit cast keeps the element type concrete.
+        usage: dict[str, object]
+        if isinstance(usage_raw, dict):
+            usage = cast(dict[str, object], usage_raw)
+        else:
+            usage = dict[str, object]()  # proxies may omit usage entirely
+
+        def usage_int(key: str, default: int = 0) -> int:
+            """Read an int usage field, tolerating proxies that send strings."""
+            value = usage.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                return default
+            try:
+                return int(value)
+            except ValueError:
+                return default
+
+        prompt_tokens = usage_int("prompt_tokens")
+        completion_tokens = usage_int("completion_tokens")
+        total = prompt_tokens + completion_tokens
+        LOGGER.info(
+            "openai %s: %.1fs, %d tokens (prompt %d / completion %d)",
+            selected,
+            elapsed_s,
+            total,
+            prompt_tokens,
+            completion_tokens,
+        )
+        if stats_sink is not None:
+            stats_sink(
+                ModelCallStats(
+                    total_tokens=total,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    elapsed_s=elapsed_s,
+                )
+            )
         return content
 
     return model_call

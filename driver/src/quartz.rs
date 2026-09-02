@@ -320,8 +320,17 @@ impl Backend for QuartzBackend {
 
     fn scroll(&self, dx: i64, dy: i64) -> Result<(), BackendError> {
         // A scroll wheel event carries its deltas as fields; the `highsierra`
-        // constructor lets us pass pixel units directly.
-        let event = CGEvent::new_scroll_event(self.source.clone(), ScrollEventUnit::PIXEL, 2, dx as i32, dy as i32, 0)
+        // constructor lets us pass pixel units directly. The wheel mapping is
+        // the pure helper so the axis contract is unit-tested (H1).
+        let (wheel1, wheel2) = scroll_wheels(dx, dy);
+        let event = CGEvent::new_scroll_event(
+            self.source.clone(),
+            ScrollEventUnit::PIXEL,
+            2,
+            wheel1 as i32,
+            wheel2 as i32,
+            0,
+        )
         .map_err(|()| BackendError("failed to create scroll event".to_string()))?;
         event.post(CGEventTapLocation::HID);
         Ok(())
@@ -431,12 +440,20 @@ impl Backend for QuartzBackend {
         self.hotkey(&[Modifier::Command], "v")
     }
 
-    fn ax_snapshot(&self, pid: u32, max_depth: u8) -> Result<HostElement, BackendError> {
-        crate::ax::ax_snapshot(pid, max_depth)
+    fn ax_snapshot(&self, pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElement, BackendError> {
+        crate::ax::ax_snapshot(pid, max_depth, max_nodes)
     }
 
     fn focused_window(&self) -> Result<FocusedWindow, BackendError> {
         crate::ax::focused_window()
+    }
+
+    fn list_apps(&self) -> Result<Vec<String>, BackendError> {
+        // On-screen window owners: what the user is actually running, without
+        // Accessibility/Screen Recording consent (owner names are public).
+        // Best-effort by contract: an empty list means "unknown", never
+        // "no apps are running" (an inference gap is safer than a lie).
+        Ok(crate::ax::window_owner_names())
     }
 
     fn capture(&self, display_id: u32) -> Result<CaptureFrame, BackendError> {
@@ -532,6 +549,35 @@ fn image_to_bgra(
     Ok(context.data().to_vec())
 }
 
+/// Map the contract's (dx, dy) deltas onto CGEvent scroll wheels.
+///
+/// Two independent conversions happen here, and both were wrong before:
+///
+/// **Axis.** ``CGEventCreateScrollWheelEvent2`` takes ``wheel1`` as the
+/// *vertical* axis and ``wheel2`` as the *horizontal* one, while the RPC
+/// contract (``MouseScroll``) names ``dy`` vertical and ``dx`` horizontal.
+/// Passing them straight through would scroll sideways for every "scroll
+/// down", so the axes are deliberately crossed.
+///
+/// **Sign.** A positive Quartz wheel delta scrolls the view *up* (the same
+/// convention a physical wheel rolled away from you follows, and the one
+/// every scripting layer on macOS exposes). The orchestrator's contract — and
+/// the instruction the model is given — is the opposite and more natural one:
+/// ``dy`` positive means "show me what is below", i.e. scroll DOWN. Emitting
+/// the raw sign made every "scroll down to find the target" move the page the
+/// wrong way; the agent then saw the target recede, scrolled again, and burned
+/// its whole step budget going backwards. Negating here is what makes the
+/// documented contract true on the host.
+///
+/// Note for verification on real hardware: macOS's "natural scrolling"
+/// preference inverts the *user's* input device, not synthesized wheel events,
+/// so this mapping should hold regardless of that setting — but it is worth
+/// one confirming run, and the agent's own recovery guidance tells it to try
+/// the opposite direction if a scroll reveals nothing.
+fn scroll_wheels(dx: i64, dy: i64) -> (i64, i64) {
+    (-dy, -dx)
+}
+
 /// Maps a printable key name to a virtual keycode for hotkeys (US layout).
 /// Type text uses the Unicode route, so this only needs the keys users put in
 /// a `press_hotkey`: letters, digits, and the common named keys.
@@ -604,3 +650,43 @@ fn keystroke_delay(_char_count: usize, wpm: u32) -> u64 {
     (60_000 / (wpm * 5)).clamp(20, 400)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_wheels_puts_dy_on_the_vertical_wheel1() {
+        // A pure "scroll down" request (dx=0, dy>0) must land on wheel1, the
+        // vertical axis — never on wheel2 (horizontal), which would translate
+        // the request into a sideways scroll on the host (H1 regression).
+        let (wheel1, wheel2) = scroll_wheels(0, 300);
+        assert_eq!(wheel1, -300);
+        assert_eq!(wheel2, 0);
+    }
+
+    #[test]
+    fn scroll_wheels_inverts_sign_so_positive_dy_scrolls_down() {
+        // The contract says dy>0 reveals content BELOW. Quartz's positive
+        // wheel delta scrolls up, so the driver must emit the negation —
+        // without it every "scroll down to find the target" moved the page
+        // away from the target.
+        let (down_wheel, _) = scroll_wheels(0, 300);
+        let (up_wheel, _) = scroll_wheels(0, -300);
+        assert!(down_wheel < 0, "dy>0 must produce a negative Quartz wheel delta");
+        assert!(up_wheel > 0, "dy<0 must produce a positive Quartz wheel delta");
+    }
+
+    #[test]
+    fn scroll_wheels_puts_dx_on_the_horizontal_wheel2() {
+        let (wheel1, wheel2) = scroll_wheels(-40, 0);
+        assert_eq!(wheel1, 0);
+        assert_eq!(wheel2, 40);
+    }
+
+    #[test]
+    fn scroll_wheels_preserves_combined_deltas() {
+        let (wheel1, wheel2) = scroll_wheels(10, -20);
+        assert_eq!((wheel1, wheel2), (20, -10));
+    }
+}

@@ -15,6 +15,7 @@ use crate::backend::HostElement;
 pub enum Request {
     Ping,
     FocusedWindow,
+    ListApps,
     HotkeyState,
     MouseMove(MouseMoveParams),
     MouseClick(MouseClickParams),
@@ -86,6 +87,17 @@ pub struct AxSnapshotParams {
     pub pid: u32,
     /// Traversal depth cap (0 == the app root only).
     pub max_depth: u8,
+    /// Node-count cap for the whole snapshot, applied web-first (bounded
+    /// walk + bounded payload on heavy apps like Chrome with a large page).
+    /// Optional for wire-back-compat: old clients that omit it get the
+    /// default, so a driver upgrade never breaks an older orchestrator.
+    #[serde(default = "default_ax_max_nodes")]
+    pub max_nodes: u32,
+}
+
+/// Back-compat default for clients that predate the node budget.
+pub fn default_ax_max_nodes() -> u32 {
+    4096
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +136,12 @@ pub enum Response {
         cursor_x: f64,
         cursor_y: f64,
     },
+    ListApps {
+        /// Display names of the running applications with on-screen windows.
+        /// Lets the orchestrator infer the goal's target app from what the
+        /// user actually runs (autonomous activation, no ``--app`` needed).
+        apps: Vec<String>,
+    },
     AxSnapshot {
         /// The app's accessibility tree root (ADR-2 primary source).
         root: HostElement,
@@ -146,9 +164,69 @@ pub enum Response {
     Error { message: String },
 }
 
+impl Response {
+    /// Serialize to the wire (the caller appends the newline).
+    ///
+    /// ``serde_json::to_string`` validates/escapes every character of the
+    /// payload, which costs ~1s for a 40MB base64 screenshot (measured on a
+    /// Retina display — the dominant per-step latency). The base64 payload is
+    /// pre-encoded ASCII with no characters that need escaping, so manual
+    /// construction is memcpy-speed and byte-identical to serde's output
+    /// (pinned by the unit test below). All other responses are small and
+    /// keep the serde path.
+    pub fn to_wire_string(&self) -> String {
+        let Response::Screenshot {
+            display_id,
+            format,
+            width,
+            height,
+            scale,
+            data_base64,
+        } = self
+        else {
+            return serde_json::to_string(self).expect("response serialization cannot fail");
+        };
+        // Reuse serde for the f64 alone so the JSON number literal is always
+        // valid ("2.0", never the bare "2" that Display produces).
+        let scale_json = serde_json::to_string(scale).expect("f64 serialization cannot fail");
+        let mut out = String::with_capacity(data_base64.len() + 128);
+        out.push_str("{\"ok\":\"screenshot\",\"display_id\":");
+        out.push_str(&display_id.to_string());
+        out.push_str(",\"format\":\"");
+        out.push_str(format);
+        out.push_str("\",\"width\":");
+        out.push_str(&width.to_string());
+        out.push_str(",\"height\":");
+        out.push_str(&height.to_string());
+        out.push_str(",\"scale\":");
+        out.push_str(&scale_json);
+        out.push_str(",\"data_base64\":\"");
+        out.push_str(data_base64);
+        out.push('"');
+        out.push('}');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_screenshot_serialization_matches_serde() {
+        let response = Response::Screenshot {
+            display_id: 0,
+            format: "bgra8",
+            width: 2,
+            height: 1,
+            scale: 2.0,
+            data_base64: "AAEC/w==".to_string(),
+        };
+        assert_eq!(
+            response.to_wire_string(),
+            serde_json::to_string(&response).expect("serde serialization")
+        );
+    }
 
     #[test]
     fn parses_snake_case_mouse_move() {
@@ -168,6 +246,13 @@ mod tests {
         let raw = r#"{"method":"hotkey_state"}"#;
         let req: Request = serde_json::from_str(raw).expect("valid request");
         assert!(matches!(req, Request::HotkeyState));
+    }
+
+    #[test]
+    fn parses_unit_list_apps() {
+        let raw = r#"{"method":"list_apps"}"#;
+        let req: Request = serde_json::from_str(raw).expect("valid request");
+        assert!(matches!(req, Request::ListApps));
     }
 
     #[test]

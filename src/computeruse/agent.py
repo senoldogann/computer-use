@@ -39,8 +39,16 @@ AX_MAX_ELEMENTS: Final[int] = 64
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.memory.semantic import SemanticStore
-from computeruse.orchestrator.client import ActuationClient
-from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState
+from computeruse.orchestrator.client import AX_MAX_NODES, ActuationClient
+from computeruse.orchestrator.evidence import CompletionVerdict
+from computeruse.orchestrator.loop import (
+    SETTLE_INTERVAL_S,
+    SETTLE_MAX_POLLS,
+    AxProbeResult,
+    OodaRunner,
+    WorkingState,
+)
+from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
 from computeruse.security.autonomy import (
     AutonomyLevel,
@@ -81,7 +89,23 @@ class AgentConfig:
     # on whatever window is frontmost (typically the launching terminal),
     # which is almost never the app the goal means.
     activate_app_on_start: bool = False
+    # True when the app name was *inferred from the goal* rather than named by
+    # the user. An inference can name an app that is not installed; an
+    # activation failure must then degrade to acting on the frontmost app
+    # (with a loud warning) instead of aborting the run — autonomy means the
+    # agent adapts, not that a guess becomes a hard stop.
+    tolerate_activation_failure: bool = False
     kill_switch: KillSwitch | None = None
+    # Goal-completion auditor: re-reads the current screen against the model's
+    # own success claim before the run is allowed to end. None means the claim
+    # is accepted on the model's word — acceptable for a scripted provider,
+    # never for an LLM driving a real host.
+    completion_check: Callable[[WorkingState, str], CompletionVerdict] | None = None
+    # Post-action settle budget in seconds (polls x interval). Zero disables
+    # the wait, which is only correct against a backend that never renders —
+    # a real host needs the beat or verification reads a half-drawn frame.
+    settle_max_polls: int = SETTLE_MAX_POLLS
+    settle_interval_s: float = SETTLE_INTERVAL_S
     max_steps: int = 100
     connect_retries: int = 3
     # Phase 3: when True, the goal is decomposed into sub-goals and the loop
@@ -181,9 +205,21 @@ class Agent:
                 try:
                     client.activate_app(self._config.app)
                 except Exception as exc:
-                    raise RuntimeError(
-                        f"cannot activate app {self._config.app!r}: {exc}"
-                    ) from exc
+                    if self._config.tolerate_activation_failure:
+                        # Goal-inferred app that LaunchServices cannot resolve
+                        # (not installed, misspelled): proceed on whatever is
+                        # frontmost and let the OODA loop adapt (Law 5.1
+                        # autonomy — a guess must never hard-stop a run).
+                        LOGGER.warning(
+                            "goal-inferred app %r could not be activated (%s); "
+                            "proceeding on the frontmost app",
+                            self._config.app,
+                            exc,
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"cannot activate app {self._config.app!r}: {exc}"
+                        ) from exc
             # ADR-2 OBSERVE: probe the frontmost app once at run start. It
             # names the app (when none was configured) and yields the pid that
             # feeds the per-turn AX grounding probe below — the agent knows
@@ -232,17 +268,44 @@ class Agent:
             # summarized into the compact lines the provider sees every turn —
             # so a decision's coordinates come from real elements, and the
             # pixel pipeline still verifies whatever the provider picks.
-            def ax_probe() -> AxProbeResult:
-                current_pid: int | None = None
+            # One focused-window read per OBSERVE cycle is shared by every
+            # probe (window probe, AX grounding, focused-text): re-reading the
+            # frontmost pid inside each probe would triple the per-step RPC
+            # traffic for the same information (L9).
+            cached_pid: int | None = None
+
+            def window_probe() -> FocusedWindow:
+                nonlocal cached_pid
+                current = client.focused_window()
+                if current.pid > 0:
+                    cached_pid = current.pid
+                return current
+
+            def _current_pid() -> int | None:
+                """The frontmost pid, re-read only when the cache is stale."""
+                nonlocal cached_pid
+                if cached_pid is not None and cached_pid > 0:
+                    return cached_pid
                 try:
-                    current_fw = client.focused_window()
-                    current_pid = current_fw.pid
+                    current = client.focused_window()
+                    if current.pid > 0:
+                        cached_pid = current.pid
                 except Exception:  # noqa: BLE001 - probe is best-effort fallback
-                    if focused is not None:
-                        current_pid = focused.pid
-                if current_pid is None or current_pid <= 0:
+                    if focused is not None and focused.pid > 0:
+                        cached_pid = focused.pid
+                if cached_pid is None or cached_pid <= 0:
+                    return None
+                return cached_pid
+
+            def ax_probe() -> AxProbeResult:
+                current_pid = _current_pid()
+                if current_pid is None:
                     return AxProbeResult()
-                tree = client.ax_snapshot(pid=current_pid, max_depth=12)
+                tree = client.ax_snapshot(
+                    pid=current_pid,
+                    max_depth=12,
+                    max_nodes=AX_MAX_NODES,
+                )
                 summaries = interactive_summaries(
                     tree,
                     max_count=AX_MAX_ELEMENTS,
@@ -251,10 +314,12 @@ class Agent:
                     # The DFS budget was exhausted: page content deeper in the
                     # tree is absent from this list. Say so explicitly so the
                     # model grounds on the screenshot instead of assuming the
-                    # listed elements are the whole actionable surface.
+                    # listed elements are the whole actionable surface. The
+                    # count is interpolated so the note cannot desync from the
+                    # configured budget (L15).
                     truncation_note = (
-                        "(AX grounding truncated at 64 elements — page content may "
-                        "be missing; rely on the screenshot for coordinates)"
+                        f"(AX grounding truncated at {AX_MAX_ELEMENTS} elements — page content may "
+                        "be missing; rely on the screenshot map for coordinates)"
                     )
                     summaries = summaries + (truncation_note,)
                 return AxProbeResult(
@@ -264,18 +329,16 @@ class Agent:
 
             def focused_text_value_probe() -> str | None:
                 """Value of the focused text field via the driver's AX tree."""
-                current_pid: int | None = None
-                try:
-                    current_fw = client.focused_window()
-                    current_pid = current_fw.pid
-                except Exception:  # noqa: BLE001 - probe is best-effort perception
-                    if focused is not None:
-                        current_pid = focused.pid
-                if current_pid is None or current_pid <= 0:
+                current_pid = _current_pid()
+                if current_pid is None:
                     return None
                 try:
                     return _focused_text_value_from_tree(
-                        client.ax_snapshot(pid=current_pid, max_depth=12)
+                        client.ax_snapshot(
+                            pid=current_pid,
+                            max_depth=12,
+                            max_nodes=AX_MAX_NODES,
+                        )
                     )
                 except Exception:  # noqa: BLE001 - probe is best-effort perception
                     return None
@@ -300,11 +363,10 @@ class Agent:
             # Phase 3: hierarchical planning — decompose the goal into ordered
             # sub-goals up front, and checkpoint each sub-goal transition so a
             # killed run can resume from where it stopped (SessionCheckpoint).
-            plan = None
+            plan: GoalPlan | None = None
             on_sub_goal_complete_cb: Callable[[GoalPlan], None] | None = None
             if self._config.enable_planning:
                 from computeruse.orchestrator.planner import (
-                    GoalPlan,
                     SessionCheckpoint,
                     decompose_goal,
                 )
@@ -315,7 +377,12 @@ class Agent:
                 def _on_sub_goal_complete(current_plan: GoalPlan) -> None:
                     # Persist the plan's progress so a later run can resume
                     # from the in-progress sub-goal instead of restarting.
-                    steps_count = len(runner.executed_trajectory) if "runner" in locals() else 0
+                    # ``runner`` is bound by the time this callback fires (it
+                    # is only ever invoked from inside ``runner.run()``), so
+                    # the executed count is always real (H2: an earlier
+                    # ``"runner" in locals()`` guard could never see the
+                    # closure variable and always recorded 0).
+                    steps_count = len(runner.executed_trajectory)
                     SessionCheckpoint(
                         session_id=current_plan.plan_id,
                         plan=current_plan,
@@ -339,7 +406,7 @@ class Agent:
                 ),
                 verify_enabled=self._config.enable_visual_verification,
                 vision_enabled=self._config.enable_vision,
-                window_probe=client.focused_window,
+                window_probe=window_probe,
                 ax_probe=ax_probe,
                 # ADR-2 semantic postcondition: the focused field's AXValue
                 # lets type_text/clipboard_paste be verified against what the
@@ -352,8 +419,15 @@ class Agent:
                 skill_scan=lambda q: tuple(skills_registry.search(q)),
                 skill_loader=skills_registry.load,
                 app=app,
+                # The focus guard only makes sense for a run pinned to a named
+                # app: when the app was merely discovered from whatever was
+                # frontmost, "drift away from it" is not a failure state.
+                app_is_pinned=self._config.app is not None,
                 on_complete=on_complete,
+                completion_check=self._config.completion_check,
                 knowledge=knowledge,
+                settle_max_polls=self._config.settle_max_polls,
+                settle_interval_s=self._config.settle_interval_s,
                 max_steps=self._config.max_steps,
                 plan=plan,
                 on_sub_goal_complete=on_sub_goal_complete_cb,

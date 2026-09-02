@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Modifier = Literal["command", "shift", "alt", "control"]
 
@@ -109,8 +109,33 @@ Action = (
 
 
 class AgentTurn(BaseModel):
-    """Single OODA loop decision frame emitted by the LLM."""
+    """Single OODA loop decision frame emitted by the LLM.
+
+    OpenAI's computer-use agent (CUA) emits *action sequences* — several
+    actions per model turn, executed in order — which cuts the per-step LLM
+    round-trips that dominate wall-clock time. ``actions`` is that batch:
+    when present, the loop executes each action in sequence within one turn
+    (verifying each one and stopping the batch on the first failure).
+    ``action`` remains the single-action form and is always required so the
+    model emits one canonical lead action; for a batch it must repeat the
+    first element of ``actions``.
+    """
 
     thought: str
     sub_goal: str
     action: Action = Field(discriminator="type")
+    # Optional ordered batch executed within this single turn. Validated to be
+    # non-empty and to place ``finish`` (if present) strictly last — a batch
+    # must never continue acting after the run has ended.
+    actions: list[Action] | None = None
+
+    @model_validator(mode="after")
+    def _validate_batch(self) -> AgentTurn:
+        if self.actions is None:
+            return self
+        if not self.actions:
+            raise ValueError("'actions' must contain at least one action")
+        for index, item in enumerate(self.actions):
+            if item.type == "finish" and index != len(self.actions) - 1:
+                raise ValueError("'finish' must be the last action of a batch")
+        return self

@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import ssl
 import urllib.error
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Self
 
 import pytest
@@ -84,6 +87,21 @@ def test_openai_model_requires_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
         openai_model("gpt-5.6-terra")
 
 
+def test_openai_model_retries_transient_tls_failures() -> None:
+    """A flaky-wire SSL failure (e.g. SSLV3_ALERT_BAD_RECORD_MAC) must be
+    retried with backoff, not kill the run: two TLS failures then success."""
+    opener, captured = _fake_opener(
+        ssl.SSLError("SSLV3_ALERT_BAD_RECORD_MAC ssl/tls alert bad record mac"),
+        ssl.SSLError("SSLV3_ALERT_BAD_RECORD_MAC ssl/tls alert bad record mac"),
+        _FakeResponse(
+            json.dumps({"choices": [{"message": {"content": "the reply"}}]})
+        ),
+    )
+    model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
+    assert model("hi") == "the reply"
+    assert len(captured) == 3, "the two failures must be retried, then succeed"
+
+
 def test_openai_model_success_and_request_shape() -> None:
     opener, captured = _fake_opener(
         _FakeResponse(json.dumps({"choices": [{"message": {"content": "the reply"}}]}))
@@ -155,7 +173,7 @@ def test_openai_transport_drives_the_ooda_loop() -> None:
     # The first prompt carried the working context (goal + action contract).
     first_prompt = captured[0]["body"]["messages"][0]["content"]
     assert "Goal: g" in first_prompt
-    assert "You are driving a physical macOS computer" in first_prompt
+    assert "You are operating a real macOS computer" in first_prompt
 
 
 def test_cli_load_model_resolves_openai_specs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,3 +213,41 @@ def test_openai_model_multimodal_request_shape() -> None:
     assert msg["content"][0] == {"type": "text", "text": "look at this"}
     assert msg["content"][1]["type"] == "image_url"
     assert "data:image/png;base64," in msg["content"][1]["image_url"]["url"]
+
+
+# --- API key resolution ------------------------------------------------------
+
+
+def test_api_key_resolution_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exported key wins; otherwise a local .env beats the shared store.
+
+    The precedence matters operationally: a user must be able to run one goal
+    against a different key without editing files, and a checkout must be able
+    to override the machine default without touching it.
+    """
+    import computeruse.cli as cli_module
+
+    local = tmp_path / ".env"
+    shared = tmp_path / "store-env"
+    local.write_text('OPENAI_API_KEY="local-key"\n', encoding="utf-8")
+    shared.write_text("# a comment\n\nOPENAI_API_KEY=shared-key\n", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "ENV_FILES", (local, shared))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "exported-key")
+    assert cli_module.load_api_key() is True
+    assert os.environ["OPENAI_API_KEY"] == "exported-key"
+
+    monkeypatch.delenv("OPENAI_API_KEY")
+    assert cli_module.load_api_key() is True
+    assert os.environ["OPENAI_API_KEY"] == "local-key"
+
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setattr(cli_module, "ENV_FILES", (shared,))
+    assert cli_module.load_api_key() is True
+    assert os.environ["OPENAI_API_KEY"] == "shared-key"
+
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setattr(cli_module, "ENV_FILES", (tmp_path / "missing",))
+    assert cli_module.load_api_key() is False
