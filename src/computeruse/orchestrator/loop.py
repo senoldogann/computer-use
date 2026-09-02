@@ -955,7 +955,8 @@ class OodaRunner:
         circumstantial: list[Evidence] = []
 
         if expectation.expected_app is not None:
-            verdict = app_evidence(expectation.expected_app, self._probe_app_name())
+            observed_app, observed_bundle = self._probe_app_identity()
+            verdict = app_evidence(expectation.expected_app, observed_app, observed_bundle)
             reports.append(("frontmost_app", verdict))
             direct.append(verdict)
         if expectation.expected_text is not None:
@@ -1031,14 +1032,21 @@ class OodaRunner:
         verification = verify_capture_region(before, after, verification_region(target))
         return Evidence.CONFIRMED if verification.changed else Evidence.CONTRADICTED
 
-    def _probe_app_name(self) -> str | None:
+    def _probe_app_identity(self) -> tuple[str | None, str]:
+        """The frontmost app's localized name and its bundle id (best effort).
+
+        Both identities are returned together because either one alone can be
+        wrong about whether the right app is in front: the name is translated
+        per locale, and the bundle id is empty for hosts without a bundle.
+        """
         if self.window_probe is None:
-            return None
+            return None, ""
         try:
-            return self.window_probe().app_name
+            focused = self.window_probe()
         except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
             LOGGER.debug("window probe failed during verification: %s", exc)
-            return None
+            return None, ""
+        return focused.app_name, focused.bundle_id
 
     def _probe_text_value(self) -> str | None:
         if self.focused_text_value is None:
@@ -1100,7 +1108,10 @@ class OodaRunner:
         """
         if not self.app_is_pinned or not current.app_name:
             return
-        if app_evidence(self.app, current.app_name) is not Evidence.CONTRADICTED:
+        if (
+            app_evidence(self.app, current.app_name, current.bundle_id)
+            is not Evidence.CONTRADICTED
+        ):
             return
         LOGGER.warning(
             "focus drifted to %r; re-activating %r before %s",
@@ -1114,7 +1125,11 @@ class OodaRunner:
         except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
             LOGGER.debug("window probe failed after re-activation: %s", exc)
             return
-        if after is not None and app_evidence(self.app, after.app_name) is Evidence.CONTRADICTED:
+        if (
+            after is not None
+            and app_evidence(self.app, after.app_name, after.bundle_id)
+            is Evidence.CONTRADICTED
+        ):
             raise FocusLostError(
                 f"the target application {self.app!r} is not frontmost "
                 f"({after.app_name!r} is), and re-activating it did not help; "

@@ -293,7 +293,9 @@ def text_evidence(expected: str, observed: str | None) -> Evidence:
     return Evidence.CONFIRMED if expected in observed else Evidence.CONTRADICTED
 
 
-def app_evidence(expected: str, observed: str | None) -> Evidence:
+def app_evidence(
+    expected: str, observed: str | None, bundle_id: str | None = None
+) -> Evidence:
     """Does the frontmost application match the one an activation requested?
 
     Direct: naming the wrong frontmost application denies the activation
@@ -302,7 +304,22 @@ def app_evidence(expected: str, observed: str | None) -> Evidence:
     Matching is case-insensitive and accepts either name containing the other,
     because LaunchServices names ("Google Chrome") and AX titles ("Chrome")
     routinely disagree about the same application.
+
+    ``bundle_id`` is checked as an independent identity, and it is the one that
+    survives translation. macOS shows apps under localized names: on a Turkish
+    desktop Calculator is "Hesap Makinesi", which shares no substring with
+    "Calculator". Comparing names alone, an agent asked to work in Calculator
+    concluded a different app was in front of it and refused to act — while
+    activating the name it *could* see failed too, because no bundle on disk
+    carries the translated name. Accepting a bundle-id match ends that
+    deadlock: "com.apple.calculator" is the same string in every language, and
+    the caller may pass either identity as ``expected``.
     """
+    if bundle_id:
+        wanted = expected.casefold()
+        bundle = bundle_id.casefold()
+        if bundle == wanted or bundle.rsplit(".", 1)[-1] == wanted.replace(" ", ""):
+            return Evidence.CONFIRMED
     if observed is None or not observed:
         return Evidence.INCONCLUSIVE
     left = expected.casefold()

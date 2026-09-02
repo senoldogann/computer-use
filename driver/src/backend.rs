@@ -73,7 +73,17 @@ pub struct FocusedWindow {
     /// Process id of the frontmost application (feeds ``ax_snapshot``).
     pub pid: i32,
     /// Application name (its AXTitle; may be empty for odd hosts).
+    ///
+    /// **Localized.** On a Turkish system Calculator reports "Hesap Makinesi".
+    /// Never compare a caller-supplied app name against this alone — use
+    /// ``bundle_id``, which does not change with the user's language.
     pub app_name: String,
+    /// The app's `CFBundleIdentifier` ("com.apple.calculator"), or "" when the
+    /// host has no bundle. This is the app's stable identity: unlike
+    /// ``app_name`` it is the same in every locale, which is what lets the
+    /// orchestrator tell "the user switched apps" apart from "the same app
+    /// under its translated name".
+    pub bundle_id: String,
     /// Title of the focused window inside that app ("" when none).
     pub window_title: String,
     /// Cursor position in global logical points (Y grows down).
@@ -572,6 +582,12 @@ impl Backend for SimulatedBackend {
         let state = self.state();
         Ok(FocusedWindow {
             pid: 4242,
+            // A synthetic but well-formed bundle id, so tests exercise the
+            // same identity path the real backend uses.
+            bundle_id: format!(
+                "com.simulated.{}",
+                state.frontmost_app.to_lowercase().replace(' ', "-")
+            ),
             app_name: state.frontmost_app.clone(),
             window_title: "GitHub — computeruse".to_string(),
             cursor_x: 420.0,

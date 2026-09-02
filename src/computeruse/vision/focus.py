@@ -25,7 +25,15 @@ class FocusedWindow(BaseModel):
     #: Process id of the frontmost application (feeds ``ax_snapshot``).
     pid: int
     #: Application name (its AXTitle; empty for odd hosts).
+    #:
+    #: **Localized**: on a Turkish desktop Calculator reports "Hesap Makinesi".
+    #: Compare against :attr:`bundle_id` too before concluding the frontmost
+    #: app is a different one.
     app_name: str
+    #: The app's ``CFBundleIdentifier`` ("com.apple.calculator"), "" when the
+    #: host has no bundle. Locale-independent, so it — not ``app_name`` — is
+    #: what identifies an application across languages.
+    bundle_id: str = ""
     #: Title of the focused window inside that app ("" when none).
     window_title: str = ""
     #: Cursor position in global logical points (Y grows down).

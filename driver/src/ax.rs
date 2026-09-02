@@ -37,6 +37,8 @@ use core_graphics::window::{
     kCGWindowListOptionOnScreenOnly, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 
+use objc2_app_kit::NSRunningApplication;
+
 use crate::backend::{BackendError, FocusedWindow, HostElement, NodeBudget};
 
 // AX C API (ApplicationServices framework). Declared directly — the
@@ -287,6 +289,7 @@ pub fn focused_window() -> Result<FocusedWindow, BackendError> {
     if let Some((pid, app_name)) = frontmost_window_owner() {
         return Ok(FocusedWindow {
             pid,
+            bundle_id: bundle_id_for_pid(pid),
             app_name,
             window_title: String::new(),
             cursor_x,
@@ -335,6 +338,7 @@ fn focused_application_via_ax(cursor_x: f64, cursor_y: f64) -> Result<FocusedWin
         .unwrap_or_default();
     Ok(FocusedWindow {
         pid,
+        bundle_id: bundle_id_for_pid(pid),
         app_name,
         window_title,
         cursor_x,
@@ -527,6 +531,21 @@ fn descendant_text(children: &[HostElement], max_chars: usize) -> String {
         Some((cut, _)) => trimmed[..cut].to_string(),
         None => trimmed.to_string(),
     }
+}
+
+/// The `CFBundleIdentifier` of a running process, or "" when it has none.
+///
+/// The app's locale-independent identity. `app_name` is whatever the system
+/// shows the user, which is translated: on a Turkish desktop Calculator is
+/// "Hesap Makinesi", so an agent told to work in "Calculator" saw a different
+/// app in front of it and refused to act, while activating "Hesap Makinesi"
+/// failed too because no bundle on disk has that name. Both identities are now
+/// carried, and the bundle id is the one that settles the question.
+pub fn bundle_id_for_pid(pid: i32) -> String {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .and_then(|app| app.bundleIdentifier())
+        .map(|id| id.to_string())
+        .unwrap_or_default()
 }
 
 /// Ask an Electron-shaped app to build its web-content accessibility tree.

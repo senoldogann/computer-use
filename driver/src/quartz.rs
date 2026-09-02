@@ -21,6 +21,8 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
+use objc2_app_kit::{NSApplicationActivationOptions, NSWorkspace};
+
 use crate::backend::{
     Backend, BackendError, Button, CaptureFrame, FocusedWindow, HostElement, Modifier, TrajectoryStep,
 };
@@ -371,26 +373,35 @@ impl Backend for QuartzBackend {
         // Accessibility consent and acts on the user's real, already-running
         // app — the opposite of a synthetic bypass (Law 1). The name is
         // passed as a single argv so no shell quoting can inject anything.
-        let status = std::process::Command::new("open")
+        let by_name = std::process::Command::new("open")
             .args(["-a", app_name])
             .status()
-            .map_err(|e| {
-                BackendError(format!("failed to launch `open -a {app_name}`: {e}"))
-            })?;
-        if !status.success() {
-            return Err(BackendError(format!(
-                "cannot activate app {app_name:?}: `open -a` exited with {:?}. Use \
-                 the app's full name as shown in the Dock/Finder (e.g. 'Google \
-                 Chrome', not 'Chrome').",
-                status.code()
-            )));
+            .map_err(|e| BackendError(format!("failed to launch `open -a {app_name}`: {e}")))?;
+        if by_name.success() {
+            std::thread::sleep(Duration::from_millis(300));
+            return Ok(());
         }
-        // The activated app's window takes a moment to arrive at the front;
-        // the OBSERVE probe right after this call should see the app the
-        // caller asked for, not the previous frontmost window.
-        std::thread::sleep(Duration::from_millis(300));
-        Ok(())
+        // `open -a` matches the bundle's name on disk, which is NOT what the
+        // user (or our own focused_window probe) sees: macOS shows apps under
+        // translated names, and Calculator.app appears as "Hesap Makinesi" on
+        // a Turkish desktop. Asking to activate the name that is actually on
+        // screen therefore failed, while asking for the English name failed
+        // the focus check — the agent deadlocked between two names for one
+        // app and gave up. Fall back to matching a *running* app by its
+        // localized name or bundle id and activating it directly.
+        if activate_running_app(app_name) {
+            std::thread::sleep(Duration::from_millis(300));
+            return Ok(());
+        }
+        Err(BackendError(format!(
+            "cannot activate app {app_name:?}: `open -a` exited with {:?} and no \
+             running application matches that name or bundle id. Use the name \
+             shown in the Dock/Finder (e.g. 'Google Chrome', not 'Chrome'), or \
+             the bundle id (e.g. 'com.apple.calculator').",
+            by_name.code()
+        )))
     }
+
 
     fn type_text(&self, text: &str, wpm: u32) -> Result<(), BackendError> {
         let per_key = keystroke_delay(text.chars().count(), wpm);
@@ -695,6 +706,38 @@ mod keycode_tests {
         assert!(keycode_of("f13").is_none());
         assert!(keycode_of("").is_none());
     }
+}
+
+/// Bring an already-running app to the front by localized name or bundle id.
+///
+/// The escape hatch for apps `open -a` cannot name. Matching is
+/// case-insensitive on both identities because the caller is a language model
+/// copying a name off a screen, not a shell script. Returns whether an app was
+/// found and asked to activate.
+fn activate_running_app(wanted: &str) -> bool {
+    let wanted = wanted.to_lowercase();
+    let workspace = NSWorkspace::sharedWorkspace();
+    let running = workspace.runningApplications();
+    for app in running.iter() {
+        let name = app
+            .localizedName()
+            .map(|n| n.to_string())
+            .unwrap_or_default()
+            .to_lowercase();
+        let bundle = app
+            .bundleIdentifier()
+            .map(|b| b.to_string())
+            .unwrap_or_default()
+            .to_lowercase();
+        if name == wanted || bundle == wanted {
+            // ActivateAllWindows so a multi-window app comes forward whole;
+            // activating only the key window leaves the rest behind the
+            // previous app, and the agent's next coordinate read would be of
+            // a window that is still occluded.
+            return app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+        }
+    }
+    false
 }
 
 /// Human-like inter-key delay in ms from a target WPM (Law 1 cadence).
