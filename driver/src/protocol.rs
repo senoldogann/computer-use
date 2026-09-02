@@ -26,6 +26,7 @@ pub enum Request {
     Screenshot(ScreenshotParams),
     AxSnapshot(AxSnapshotParams),
     AxPress(AxPressParams),
+    AxSetValue(AxSetValueParams),
     AppPid(AppPidParams),
     ActivateApp(ActivateAppParams),
     ClipboardPaste(ClipboardPasteParams),
@@ -40,6 +41,15 @@ pub struct AxPressParams {
     pub pid: u32,
     pub x: i64,
     pub y: i64,
+}
+
+/// Write text into the element at a point, without focusing its application.
+#[derive(Debug, Deserialize)]
+pub struct AxSetValueParams {
+    pub pid: u32,
+    pub x: i64,
+    pub y: i64,
+    pub text: String,
 }
 
 /// Resolve a running application's pid from the name the user would type.
@@ -154,6 +164,12 @@ pub enum Response {
         /// bundle id — an ordinary answer, not an error: the app may simply
         /// not be running yet.
         pid: Option<i32>,
+    },
+    AxSetValue {
+        /// Whether the element accepted the text. `false` means it is not
+        /// writable this way and the caller should type instead; `true` means
+        /// accepted, not that the application reacted.
+        wrote: bool,
     },
     AxPress {
         /// Whether an accessibility element accepted the press. `false` means

@@ -69,12 +69,14 @@ from computeruse.orchestrator.schemas import (
     ActivateApp,
     AgentTurn,
     ClickMark,
+    ClipboardPaste,
     Finish,
     LoadSkill,
     MouseClick,
     MouseDrag,
     MouseMove,
     MouseScroll,
+    TypeText,
     Wait,
 )
 from computeruse.orchestrator.trace import StepTrace
@@ -758,6 +760,12 @@ class OodaRunner:
     #: directly, returning whether it accepted. When it declines, the ordinary
     #: synthetic click runs instead, so this can only ever add reach.
     quiet_press: Callable[[Point], bool] | None = None
+    #: Optional quiet text path: put a value into the target app's focused
+    #: element, returning whether it was accepted. Without it, background mode
+    #: covers clicks only — typing falls back to the global event stream, the
+    #: focus gate fronts the target to make that safe, and the mode silently
+    #: stops being a background mode the first time the agent types.
+    quiet_type: Callable[[str], bool] | None = None
     knowledge: tuple[str, ...] = ()
     # Post-action settle budget, in polls of ``settle_interval_s``. The
     # runner is a mechanism and defaults to no wait; pacing is a product
@@ -1199,8 +1207,9 @@ class OodaRunner:
             # is silence, not a miss, and the recovery ladder must not treat it
             # as one.
             return Evidence.INCONCLUSIVE
-        quiet = self._pressed_quietly(action)
+        quiet = self._pressed_quietly(action) or self._typed_quietly(action)
         if not quiet:
+            self._warn_if_leaving_the_background(action)
             self._guard_positional(action)
         before = self._pre_action_frame(expectation)
         if before is not None:
@@ -2011,6 +2020,47 @@ class OodaRunner:
             return self.quiet_press(Point(action.x, action.y))
         except Exception as exc:  # noqa: BLE001 - the loud path is the fallback
             LOGGER.debug("quiet press unavailable, using a synthetic click: %s", exc)
+            return False
+
+    def _warn_if_leaving_the_background(self, action: Action) -> None:
+        """Say so when background mode has to take the loud path.
+
+        Clicks and text have accessibility equivalents; hotkeys, scrolling and
+        dragging do not, so they go through the global event stream — which
+        means the focus gate must bring the target forward for them to land
+        where they are aimed. That is correct, but it silently ends the one
+        promise the mode makes, and a user who asked to keep working in their
+        own window deserves to know the moment it stops holding rather than
+        discovering it when their window drops behind.
+        """
+        if self.quiet_press is None and self.quiet_type is None:
+            return
+        LOGGER.warning(
+            "background mode: %s has no accessibility equivalent, so %r is "
+            "coming to the front for it",
+            action.type,
+            self.app,
+        )
+
+    def _typed_quietly(self, action: Action) -> bool:
+        """Try to put text into the target's focused element, without the keyboard.
+
+        Same bargain as :meth:`_pressed_quietly`: synthetic keystrokes go to
+        whatever is frontmost, and writing the value on the element does not.
+        Note the semantic difference — this *replaces* the field's contents
+        where typing appends — which is why it is opt-in and why the ordinary
+        path remains the fallback for everything it declines.
+        """
+        if self.quiet_type is None:
+            return False
+        if not isinstance(action, (TypeText, ClipboardPaste)):
+            return False
+        if not action.text:
+            return False
+        try:
+            return self.quiet_type(action.text)
+        except Exception as exc:  # noqa: BLE001 - the loud path is the fallback
+            LOGGER.debug("quiet type unavailable, using the keyboard: %s", exc)
             return False
 
     def _execute_physical(self, action: Action) -> None:

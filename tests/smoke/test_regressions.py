@@ -6,6 +6,7 @@ it fails here before it can bite in production.
 
 from __future__ import annotations
 
+import logging
 import socket
 import time
 
@@ -26,6 +27,7 @@ from computeruse.orchestrator.schemas import (
     Finish,
     MouseClick,
     MouseMove,
+    MouseScroll,
     PressHotkey,
     TypeText,
 )
@@ -391,3 +393,89 @@ def test_background_mode_refuses_to_front_the_app() -> None:
         provider=provider, execute_physical=executed.append, max_steps=5
     ).run(goal="ordinary run")
     assert [a.type for a in executed] == ["activate_app"]
+
+
+def test_text_takes_the_quiet_path_in_background_mode() -> None:
+    """Typing goes to whatever is frontmost, so it needed its own quiet path.
+
+    Without it the mode covered clicks only: the focus gate had to front the
+    target for the keystrokes to land, and the run silently stopped being a
+    background run the first time the agent typed.
+    """
+    written: list[str] = []
+    executed: list[Action] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="type it",
+                action=TypeText(type="type_text", text="hello", wpm=40),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        quiet_type=lambda text: bool(written.append(text)) or True,
+        max_steps=5,
+    )
+    runner.run(goal="type quietly")
+    assert written == ["hello"]
+    assert executed == []
+
+
+def test_a_declined_quiet_write_still_types() -> None:
+    executed: list[Action] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="type it",
+                action=TypeText(type="type_text", text="hello", wpm=40),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        quiet_type=lambda _text: False,
+        max_steps=5,
+    ).run(goal="type loudly")
+    assert [a.type for a in executed] == ["type_text"]
+
+
+def test_leaving_the_background_is_announced(caplog) -> None:
+    """A promise that stops holding must not stop holding silently."""
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="scroll",
+                action=MouseScroll(type="mouse_scroll", dx=0, dy=100),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _a: None,
+        quiet_press=lambda _p: True,
+        app="Calculator",
+        max_steps=5,
+    )
+    with caplog.at_level(logging.WARNING):
+        runner.run(goal="scroll in the background")
+    assert any("coming to the front" in record.getMessage() for record in caplog.records)

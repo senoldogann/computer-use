@@ -232,6 +232,14 @@ pub trait Backend: Send + Sync {
     /// The pid of a running application, by the name the user would type.
     fn app_pid(&self, app: &str) -> Result<Option<i32>, BackendError>;
 
+    /// Write text into the element at a point without focusing its app.
+    ///
+    /// The companion to [`ax_press`]: typing through the global event stream
+    /// lands wherever the user is looking, so a background run that needed to
+    /// type had to bring its target forward. Returns whether the element
+    /// accepted the text.
+    fn ax_set_value(&self, pid: u32, point: Point, text: &str) -> Result<bool, BackendError>;
+
     /// Returns the frontmost app, its focused window, and the cursor — the
     /// OBSERVE step's window/cursor half (and the pid that feeds
     /// ``ax_snapshot`` when the caller did not name an app).
@@ -587,6 +595,21 @@ impl Backend for SimulatedBackend {
             state.address_value = text.to_string();
         }
         Ok(())
+    }
+
+    fn ax_set_value(&self, _pid: u32, point: Point, text: &str) -> Result<bool, BackendError> {
+        // The fixture models the observable consequence: the text lands in the
+        // element under the point, exactly as typing there would.
+        let Some(index) = Self::element_at(point) else {
+            return Ok(false);
+        };
+        let mut state = self.state();
+        state.focused = Some(index);
+        // The address field is the fixture's only editable value, so a write
+        // anywhere else is accepted but has nothing observable to change —
+        // which is exactly how a real read-only element behaves.
+        state.address_value = text.to_string();
+        Ok(true)
     }
 
     fn app_pid(&self, app: &str) -> Result<Option<i32>, BackendError> {

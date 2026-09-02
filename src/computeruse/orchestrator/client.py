@@ -411,6 +411,31 @@ class ActuationClient:
         pid = response.get("pid")
         return int(pid) if isinstance(pid, int) else None
 
+    def ax_set_value(self, pid: int, x: float, y: float, text: str) -> bool:
+        """Write text into the element at a point, without focusing its app.
+
+        The companion to :meth:`ax_press`, and what makes background mode more
+        than click-only: synthetic typing goes through the global event stream,
+        so it lands wherever the user is looking, and a background run that
+        needed to type had to bring its target forward first.
+
+        **This replaces the element's contents**, where typing appends at the
+        insertion point. That matches how the agent reaches a field in
+        practice — focus it, then put a value in it — but it is a real
+        difference, and an append would need the read-modify-write the caller
+        can do explicitly.
+
+        Verified on a real desktop: text landed in a background TextEdit
+        document while Chrome stayed frontmost.
+        """
+        response = self.request(
+            "ax_set_value", {"pid": pid, "x": int(x), "y": int(y), "text": text}
+        )
+        if response.get("ok") != "ax_set_value":
+            message = str(response.get("message", "unknown driver error"))
+            raise DriverRpcError(method="ax_set_value", driver_message=message)
+        return bool(response.get("wrote", False))
+
     def ax_press(self, pid: int, x: float, y: float) -> bool:
         """Ask the element at a point inside an app to activate itself.
 
