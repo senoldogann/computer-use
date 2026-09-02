@@ -129,6 +129,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "them (a finish marks the current sub-goal done); checkpoints are "
         "written to --store/checkpoints for resumability.",
     )
+    parser.add_argument(
+        "--trace-dir",
+        default=None,
+        help="Write one JSON object per step (decision, action, verification "
+        "verdict, error) to <trace-dir>/<run_id>/steps.jsonl. Off by default.",
+    )
+    parser.add_argument(
+        "--trace-screenshots",
+        action="store_true",
+        help="With --trace-dir, also save the exact frame the model decided "
+        "from for each step, as <trace-dir>/<run_id>/step-NNN.png.",
+    )
     return parser.parse_args(argv)
 
 
@@ -434,6 +446,8 @@ def build_config(
         completion_check=completion_check,
         max_steps=args.max_steps,
         enable_planning=getattr(args, "plan", False),
+        trace_dir=Path(args.trace_dir) if args.trace_dir is not None else None,
+        trace_screenshots=getattr(args, "trace_screenshots", False),
     )
 
 
@@ -605,7 +619,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = Agent(config).run()
 
         print(f"goal        : {config.goal}")
+        print(f"run_id      : {result.run_id}")
         print(f"app         : {result.app}")
+        if config.trace_dir is not None:
+            print(f"trace       : {config.trace_dir / result.run_id}")
         if config.activate_app_on_start:
             print(f"activated   : {config.app}")
         print(f"steps       : {len(result.state.completed_steps)}")

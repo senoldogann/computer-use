@@ -52,6 +52,7 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
+from computeruse.orchestrator.trace import RunTracer, StepTrace, new_run_id
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionDecision,
@@ -119,6 +120,14 @@ class AgentConfig:
     # Session checkpoints are written under ``store_dir/checkpoints`` so an
     # interrupted run can be resumed with the same plan.
     enable_planning: bool = False
+    # Observability: when set, every step of the run is appended as one JSON
+    # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
+    # entirely — a run pays nothing for a diagnostic nobody asked for.
+    trace_dir: Path | None = None
+    # Whether each traced step also saves the exact frame the model decided
+    # from. Off by default: a thirty-step run is thirty PNGs, which is the
+    # right trade only when someone is actually looking at them.
+    trace_screenshots: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +146,9 @@ class AgentResult:
     knowledge: tuple[str, ...]
     # Law 3.2: the skill mounted into the working context by RETRIEVE (if any).
     skill: SkillDefinition | None = None
+    # This run's identity. Always present (a run is identifiable even when
+    # nothing is being written), and the directory name under ``trace_dir``.
+    run_id: str = ""
 
 
 def guarded(
@@ -182,6 +194,21 @@ class Agent:
         skills_registry = SkillRegistry(self._config.store_dir / "skills")
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
         distilled: DistillResult | None = None
+        # Every run is identifiable, whether or not anything is written down:
+        # the id is what ties a log line, a trace directory and a user's
+        # bug report to the same run.
+        run_id = new_run_id()
+        trace_sink: Callable[[StepTrace], None] | None = None
+        if self._config.trace_dir is not None:
+            tracer = RunTracer(
+                self._config.trace_dir,
+                run_id=run_id,
+                save_screenshots=self._config.trace_screenshots,
+            )
+            trace_sink = tracer.record
+            LOGGER.info("run %s tracing to %s", run_id, tracer.directory)
+        else:
+            LOGGER.info("run %s starting", run_id)
 
         def on_complete(
             trajectory: Trajectory,
@@ -463,6 +490,8 @@ class Agent:
                 max_steps=self._config.max_steps,
                 plan=plan,
                 on_sub_goal_complete=on_sub_goal_complete_cb,
+                run_id=run_id,
+                trace=trace_sink,
             )
             state = runner.run(self._config.goal)
 
@@ -475,4 +504,5 @@ class Agent:
             skills=tuple(skills_registry.index()),
             knowledge=knowledge,
             skill=state.skill,
+            run_id=run_id,
         )

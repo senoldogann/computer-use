@@ -75,6 +75,7 @@ from computeruse.orchestrator.schemas import (
     MouseScroll,
     Wait,
 )
+from computeruse.orchestrator.trace import StepTrace
 from computeruse.security.killswitch import KillSwitch
 from computeruse.security.permissions import (
     PermissionConfirmationRequired,
@@ -257,6 +258,16 @@ class StepOutcome:
     action: Action
     route: Routing
     step_label: str
+
+    @property
+    def step_index(self) -> int:
+        """Index of the step this outcome describes.
+
+        ``state`` is the *post*-decision projection, whose ``step_index`` has
+        already advanced past this step — so the step being described is the
+        one before it.
+        """
+        return self.state.step_index - 1
 
 
 def _route_for(action: Action) -> Routing:
@@ -709,6 +720,14 @@ class OodaRunner:
     # transition so a caller can checkpoint the session (resumability).
     plan: GoalPlan | None = None
     on_sub_goal_complete: Callable[[GoalPlan], None] | None = None
+    #: Identity of this run, stamped onto every traced step. Empty when the
+    #: caller did not name one — the loop never invents an id it would then be
+    #: the only holder of.
+    run_id: str = ""
+    #: Observability sink: one record per step, whatever the step's outcome.
+    #: A callable rather than a writer object so the loop stays free of file
+    #: handles (Law 6.1) and a test can assert on the records directly.
+    trace: Callable[[StepTrace], None] | None = None
 
     def __post_init__(self) -> None:
         # Trajectory of *successfully executed* actions in the current run.
@@ -944,6 +963,7 @@ class OodaRunner:
         # the pre-action list, so a failure below cannot pollute it (F2).
         state = outcome.state
 
+        verdict: Evidence | None = None
         try:
             if outcome.route == "physical":
                 # The repetition guard runs inside the recovery path, not
@@ -954,22 +974,29 @@ class OodaRunner:
                 # still guarantees termination, because a trip that keeps
                 # repeating climbs to ABORT within a handful of turns.
                 self._guard_stuck_loop(outcome.action, goal)
-                self._act_and_verify(outcome.action)
+                verdict = self._act_and_verify(outcome.action)
             elif outcome.route == "internal_wait":
                 self._sleep_for(outcome.action)
             elif outcome.route == "internal_skill":
                 # Explicit Stage 2: the provider asked for this skill by id;
                 # mount it (replacing any auto-retrieved one).
                 self._skill = self._load_skill_for(outcome.action)
-        except KillSwitchTripped:
+        except KillSwitchTripped as exc:
             # Physical drivers may also raise a trip (e.g. during a long
             # type/drag); propagate it out cleanly rather than folding it
             # into a generic failure.
+            self._trace_step(decision, outcome, verdict=None, error=str(exc))
             raise
         except Exception as exc:  # noqa: BLE001 - shell must survive provider/OS faults
             # RECOVER: classify, count, and hand the model an escalating hint.
             # The failed step is deliberately NOT added to completed_steps (F2)
             # so the next turn sees an accurate picture of what actually ran.
+            # Traced *before* the ladder gets its turn: ``_register_failure``
+            # may abort the run outright, and the step that ended it is the
+            # one a person will want to read.
+            self._trace_step(
+                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}"
+            )
             hint = self._register_failure(exc, outcome.action, goal)
             state = replace(state, last_error=hint)
             LOGGER.warning("ooda step %s failed: %s", outcome.action.type, hint)
@@ -979,7 +1006,18 @@ class OodaRunner:
         # claim the auditor rejects must leave no trace in the history (F2),
         # exactly like a failed action.
         if outcome.route == "finish":
-            return self._finish(state, outcome.action, outcome.step_label, goal)
+            state, finished, stop_batch = self._finish(
+                state, outcome.action, outcome.step_label, goal
+            )
+            # A rejected completion claim is the interesting case: the trace
+            # carries the auditor's reason, not just "the model said done".
+            self._trace_step(
+                decision,
+                outcome,
+                verdict=None,
+                error=None if finished else state.last_error,
+            )
+            return state, finished, stop_batch
 
         # The action succeeded: only now does the step enter the completed
         # history, keeping the trace honest for the next cycle (F2). The
@@ -998,6 +1036,7 @@ class OodaRunner:
             )
         if outcome.route == "physical":
             self._record_for_progress(outcome.action)
+        self._trace_step(decision, outcome, verdict=verdict, error=None)
         # A successful action clears obsolete recovery diagnostics: the
         # provider must not keep steering around a failure that already
         # recovered (M1). A stuck-loop hint is re-injected by the next
@@ -1015,15 +1054,57 @@ class OodaRunner:
         )
         return state, False, False
 
+    def _trace_step(
+        self,
+        decision: AgentTurn,
+        outcome: StepOutcome,
+        *,
+        verdict: Evidence | None,
+        error: str | None,
+    ) -> None:
+        """Hand one step to the observability sink (best effort, never fatal).
+
+        Emitted for every step whatever its ending, because the step worth
+        reading is almost always the one that failed. A sink that raises is
+        swallowed with a warning: diagnostics must not be able to end a run
+        they exist to explain.
+        """
+        if self.trace is None:
+            return
+        try:
+            self.trace(
+                StepTrace(
+                    run_id=self.run_id,
+                    step=outcome.step_index,
+                    app=self.app,
+                    window=(
+                        window_summary(self._observation.window)
+                        if self._observation.window is not None
+                        else None
+                    ),
+                    thought=decision.thought,
+                    sub_goal=decision.sub_goal,
+                    action=outcome.action.model_dump(exclude_none=True),
+                    route=outcome.route,
+                    verdict=verdict.value if verdict is not None else None,
+                    error=error,
+                    screenshot_b64=self._observation.screenshot_b64,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - a trace sink must never kill a run
+            LOGGER.warning("run trace sink failed: %s", exc)
+
     # ------------------------------------------------------------------
     # ACT + VERIFY
     # ------------------------------------------------------------------
 
-    def _act_and_verify(self, action: Action) -> None:
+    def _act_and_verify(self, action: Action) -> Evidence:
         """Gate, actuate, and corroborate one physical action.
 
         Every gate runs before the host is touched, in cheapest-first order,
-        and each raises a typed error the recovery ladder understands.
+        and each raises a typed error the recovery ladder understands. The
+        returned verdict is what the witnesses concluded, for the run trace —
+        a contradiction has already raised by then.
         """
         expectation = expectation_for(action)
         self._guard_positional(action)
@@ -1042,7 +1123,7 @@ class OodaRunner:
         self._last_capture_hash = None
         self._last_screenshot_b64 = None
 
-        self._verify(
+        return self._verify(
             action, expectation, before, before_ui, before_content, before_window
         )
 
@@ -1072,7 +1153,7 @@ class OodaRunner:
         before_ui: tuple[str, ...],
         before_content: tuple[str, ...],
         before_window: FocusedWindow | None,
-    ) -> None:
+    ) -> Evidence:
         """Collect independent witnesses and judge whether the action landed.
 
         The decisive design choice: a witness that cannot speak returns
@@ -1084,7 +1165,7 @@ class OodaRunner:
         pixel-only diff could judge without inventing failures.
         """
         if not expectation.is_verifiable:
-            return
+            return Evidence.INCONCLUSIVE
         if expectation.needs_settle:
             self._wait_for_settle(before_window)
 
@@ -1151,6 +1232,7 @@ class OodaRunner:
             # Not verified is not failed: say so once, at debug volume, and
             # let the model's own next observation be the arbiter.
             LOGGER.debug("ooda %s unverified (no conclusive witness): %s", action.type, detail)
+        return outcome
 
     def _pixel_evidence(
         self, before: ScreenCapture, expectation: ActionExpectation

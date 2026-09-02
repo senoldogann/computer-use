@@ -106,6 +106,12 @@ uv run python -m computeruse --goal "..." --model my_module:my_model
 # ... or bring your own state->AgentTurn provider:
 uv run python -m computeruse --goal "..." --provider my_provider:make_provider
 
+# Record what happened: one JSON object per step (decision, action, verification
+# verdict, error) under <trace-dir>/<run_id>/steps.jsonl, plus the frame the
+# model decided from for each step.
+uv run python -m computeruse --goal "..." --model openai --real \
+    --trace-dir ./traces --trace-screenshots
+
 # Python type-checks (strict) and tests
 uv sync --extra dev
 uv run pyright src/computeruse
