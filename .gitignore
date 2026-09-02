@@ -23,7 +23,9 @@ driver/target/
 # macOS
 .DS_Store
 
-# Codebuff / CCM tooling runtime data (logs, generation caches, project ids)
+# Caches written into this checkout by editors and agent tooling. Named
+# individually because an ignore rule has to name the directory it ignores;
+# none of them are part of this project.
 .ccm/
 .freebuff/
 data/
