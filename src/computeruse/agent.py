@@ -45,11 +45,14 @@ from computeruse.orchestrator.loop import (
     SETTLE_INTERVAL_S,
     SETTLE_MAX_POLLS,
     AxProbeResult,
+    Observation,
     OodaRunner,
     WorkingState,
+    target_element_label,
 )
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
+from computeruse.orchestrator.trace import RunTracer, StepTrace, new_run_id
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionDecision,
@@ -117,6 +120,27 @@ class AgentConfig:
     # Session checkpoints are written under ``store_dir/checkpoints`` so an
     # interrupted run can be resumed with the same plan.
     enable_planning: bool = False
+    # Observability: when set, every step of the run is appended as one JSON
+    # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
+    # entirely — a run pays nothing for a diagnostic nobody asked for.
+    trace_dir: Path | None = None
+    # Which display the run observes and acts on. 0 is the main display; a
+    # secondary display's id comes from the host. The capture carries that
+    # display's global origin, so coordinates read off its screenshot convert
+    # back into the global space the driver actuates in.
+    display_id: int = 0
+    # Whether the OBSERVE screenshot is annotated with the AX element boxes
+    # (Set-of-Marks). ``click_mark`` itself does not depend on this — it reads
+    # the element list, which exists with vision off entirely.
+    enable_set_of_marks: bool = True
+    # Whether each traced step also saves the exact frame the model decided
+    # from. Off by default: a thirty-step run is thirty PNGs, which is the
+    # right trade only when someone is actually looking at them.
+    trace_screenshots: bool = False
+    # Run-ceiling check called once per step (wall clock / tokens / cost). The
+    # counters live with whoever owns the model transport, so the agent takes
+    # the check as a callable rather than owning a budget it cannot measure.
+    budget_guard: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -135,16 +159,33 @@ class AgentResult:
     knowledge: tuple[str, ...]
     # Law 3.2: the skill mounted into the working context by RETRIEVE (if any).
     skill: SkillDefinition | None = None
+    # This run's identity. Always present (a run is identifiable even when
+    # nothing is being written), and the directory name under ``trace_dir``.
+    run_id: str = ""
 
 
-def guarded(level: AutonomyLevel) -> Callable[[AgentTurn], PermissionDecision]:
+def guarded(
+    level: AutonomyLevel,
+) -> Callable[[AgentTurn, Observation], PermissionDecision]:
     """Build the VALIDATE-step guard for an autonomy level (pure).
 
-    The runner expects a decision -> permission callable; this closes the gap
-    between the pure risk/decision functions and that shape. ``turn`` is
-    contextually typed by the return annotation, keeping pyright strict happy.
+    The guard is handed the decision *and* the observation it was made against,
+    because the two sources disagree about what an action does and only one of
+    them is trustworthy. The model's ``sub_goal`` is its own account ("continue
+    with the flow"); the accessibility title under the pointer is the machine's
+    ("Delete account"). Classifying the control the click will actually hit is
+    what makes Law 5.1 a guard rather than a request for the model's opinion.
     """
-    return lambda turn: decide_permission(level, classify_risk(turn))
+
+    def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
+        return decide_permission(
+            level,
+            classify_risk(
+                turn, target_label=target_element_label(turn.action, observation)
+            ),
+        )
+
+    return guard
 
 
 class Agent:
@@ -166,15 +207,40 @@ class Agent:
         skills_registry = SkillRegistry(self._config.store_dir / "skills")
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
         distilled: DistillResult | None = None
+        # Every run is identifiable, whether or not anything is written down:
+        # the id is what ties a log line, a trace directory and a user's
+        # bug report to the same run.
+        run_id = new_run_id()
+        trace_sink: Callable[[StepTrace], None] | None = None
+        if self._config.trace_dir is not None:
+            tracer = RunTracer(
+                self._config.trace_dir,
+                run_id=run_id,
+                save_screenshots=self._config.trace_screenshots,
+            )
+            trace_sink = tracer.record
+            LOGGER.info("run %s tracing to %s", run_id, tracer.directory)
+        else:
+            LOGGER.info("run %s starting", run_id)
 
-        def on_complete(trajectory: Trajectory, outcome: EpisodeOutcome) -> None:
-            # Distill against known history FIRST, then remember — so the fresh
-            # run is novel, and any future identical run is a duplicate (Law
-            # 3.3 wired through Law 4 memory).
+        def on_complete(
+            trajectory: Trajectory,
+            outcome: EpisodeOutcome,
+            retrospective: str | None,
+        ) -> None:
+            # A failed run is remembered but never distilled. Both halves
+            # matter: a workflow that did not work must not become a skill the
+            # next run is handed as a recipe, and a run that fought for twenty
+            # steps before hitting a wall is exactly the trace worth keeping
+            # (Law 4.1 failure retrospectives).
             nonlocal distilled
-            distilled = distill(trajectory, episodes_store.known_signatures())
-            if distilled.kind == "skill" and distilled.definition is not None:
-                skills_registry.save(distilled.definition)
+            if outcome == "success":
+                # Distill against known history FIRST, then remember — so the
+                # fresh run is novel, and any future identical run is a
+                # duplicate (Law 3.3 wired through Law 4 memory).
+                distilled = distill(trajectory, episodes_store.known_signatures())
+                if distilled.kind == "skill" and distilled.definition is not None:
+                    skills_registry.save(distilled.definition)
             episodes_store.record(
                 episode_from_trace(
                     app=trajectory.app,
@@ -182,6 +248,7 @@ class Agent:
                     steps=trajectory.steps,
                     step_descriptions=trajectory.step_descriptions,
                     outcome=outcome,
+                    retrospective=retrospective,
                 )
             )
             if outcome == "success":
@@ -241,7 +308,7 @@ class Agent:
             # error instead of a page of repeated failures (Law 6.3).
             if self._config.enable_visual_verification or self._config.enable_vision:
                 try:
-                    client.capture()
+                    client.capture(self._config.display_id)
                 except Exception as exc:
                     if self._config.enable_visual_verification:
                         raise RuntimeError(
@@ -405,12 +472,13 @@ class Agent:
                 # One capture source, two consumers: ORIENT verification and
                 # the multimodal OBSERVE screenshot are the same frame stream.
                 sensor=(
-                    client.capture
+                    (lambda: client.capture(self._config.display_id))
                     if (self._config.enable_visual_verification or self._config.enable_vision)
                     else None
                 ),
                 verify_enabled=self._config.enable_visual_verification,
                 vision_enabled=self._config.enable_vision,
+                set_of_marks_enabled=self._config.enable_set_of_marks,
                 window_probe=window_probe,
                 ax_probe=ax_probe,
                 # ADR-2 semantic postcondition: the focused field's AXValue
@@ -436,6 +504,9 @@ class Agent:
                 max_steps=self._config.max_steps,
                 plan=plan,
                 on_sub_goal_complete=on_sub_goal_complete_cb,
+                run_id=run_id,
+                trace=trace_sink,
+                budget_guard=self._config.budget_guard,
             )
             state = runner.run(self._config.goal)
 
@@ -448,4 +519,5 @@ class Agent:
             skills=tuple(skills_registry.index()),
             knowledge=knowledge,
             skill=state.skill,
+            run_id=run_id,
         )

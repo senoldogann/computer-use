@@ -42,6 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
+from computeruse.orchestrator.budget import BudgetExceededError
 from computeruse.orchestrator.evidence import (
     ActionExpectation,
     CompletionVerdict,
@@ -67,6 +68,7 @@ from computeruse.orchestrator.schemas import (
     Action,
     ActivateApp,
     AgentTurn,
+    ClickMark,
     Finish,
     LoadSkill,
     MouseClick,
@@ -75,6 +77,7 @@ from computeruse.orchestrator.schemas import (
     MouseScroll,
     Wait,
 )
+from computeruse.orchestrator.trace import StepTrace
 from computeruse.security.killswitch import KillSwitch
 from computeruse.security.permissions import (
     PermissionConfirmationRequired,
@@ -84,7 +87,12 @@ from computeruse.security.permissions import (
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
-from computeruse.vision.ax import summaries_to_image_space, summary_covering
+from computeruse.vision.ax import (
+    summaries_to_image_space,
+    summaries_within,
+    summary_covering,
+    summary_label,
+)
 from computeruse.vision.capture import (
     SCREENSHOT_MAP_MAX_SIDE,
     ScreenCapture,
@@ -102,8 +110,14 @@ from computeruse.vision.coordinates import (
     Rect,
     ScreenMap,
     Size,
+    point_in_frame,
 )
 from computeruse.vision.focus import FocusedWindow, window_summary
+from computeruse.vision.som import (
+    MarkElement,
+    annotate_set_of_marks,
+    parse_ax_elements_to_marks,
+)
 
 if TYPE_CHECKING:
     # Type-only import: memory.schemas imports orchestrator.schemas, whose
@@ -254,6 +268,16 @@ class StepOutcome:
     route: Routing
     step_label: str
 
+    @property
+    def step_index(self) -> int:
+        """Index of the step this outcome describes.
+
+        ``state`` is the *post*-decision projection, whose ``step_index`` has
+        already advanced past this step — so the step being described is the
+        one before it.
+        """
+        return self.state.step_index - 1
+
 
 def _route_for(action: Action) -> Routing:
     """Classify an action's routing constraint (pure function).
@@ -309,40 +333,72 @@ def same_physical_action(left: Action, right: Action) -> bool:
     return left.model_dump(exclude_none=True) == right.model_dump(exclude_none=True)
 
 
-def scale_action_coordinates(action: Action, factor: float) -> Action:
-    """Map a model-emitted coordinate action from image space to screen points.
+def map_action_to_screen(action: Action, screen_map: ScreenMap) -> Action:
+    """Map a model-emitted coordinate action into global screen points.
 
     The VLM perceives the screenshot as a scaled-down map (max 512px, see
-    :func:`computeruse.vision.capture.downscale_to_max_side`), so every
-    coordinate it reports is in *image* pixels while the driver clicks in
-    *logical screen points*. This pure gate converts one space to the other
-    with the single deterministic factor computed at capture time — the model
-    never does scale math, and a coordinate picked from either the screenshot
-    or the (equally image-space) AX summaries lands exactly where the model
-    pointed. Non-coordinate actions pass through unchanged (pure).
+    :func:`computeruse.vision.capture.downscale_to_max_side`) of *one* display,
+    so every coordinate it reports is in image pixels measured from that
+    display's corner — while the driver clicks in global logical points
+    measured from the desktop's. :class:`ScreenMap` owns both halves of that
+    conversion (the scale and the display's origin), so this gate cannot apply
+    one and forget the other: a bare factor was enough while everything ran on
+    the primary display and silently wrong the moment it did not.
+
+    Non-coordinate actions pass through unchanged (pure).
     """
-    if factor <= 0:
-        raise ValueError(f"coordinate scale factor must be positive, got {factor}")
-    if factor == 1.0:
+    if screen_map.is_identity:
         return action
 
-    def scaled(value: int) -> int:
-        return round(value * factor)
+    def mapped(x: int, y: int) -> tuple[int, int]:
+        point = screen_map.to_screen(Point(float(x), float(y)))
+        return round(point.x), round(point.y)
 
-    if isinstance(action, MouseClick):
-        return action.model_copy(update={"x": scaled(action.x), "y": scaled(action.y)})
-    if isinstance(action, MouseMove):
-        return action.model_copy(update={"x": scaled(action.x), "y": scaled(action.y)})
+    if isinstance(action, (MouseClick, MouseMove)):
+        x, y = mapped(action.x, action.y)
+        return action.model_copy(update={"x": x, "y": y})
     if isinstance(action, MouseDrag):
+        start_x, start_y = mapped(action.start_x, action.start_y)
+        end_x, end_y = mapped(action.end_x, action.end_y)
         return action.model_copy(
             update={
-                "start_x": scaled(action.start_x),
-                "start_y": scaled(action.start_y),
-                "end_x": scaled(action.end_x),
-                "end_y": scaled(action.end_y),
+                "start_x": start_x,
+                "start_y": start_y,
+                "end_x": end_x,
+                "end_y": end_y,
             }
         )
     return action
+
+
+def resolve_mark(action: Action, marks: tuple[MarkElement, ...]) -> Action:
+    """Turn a mark selection into a click on that element's centre (pure).
+
+    The point of the mark channel: the returned click is already in logical
+    screen points, taken from the accessibility rect itself, so it never passes
+    through the image-space conversion the model's own coordinates need. On a
+    Retina display that conversion is ~3.3 points per image pixel, which is
+    most of a link's height — the single largest source of near-misses.
+
+    Non-mark actions pass through untouched. An unknown mark raises rather
+    than clicking somewhere plausible: the model picked a number that does not
+    name anything, and guessing which element it meant is how an agent clicks
+    the wrong thing confidently.
+    """
+    if not isinstance(action, ClickMark):
+        return action
+    for mark in marks:
+        if mark.index == action.mark:
+            centre_x = mark.rect.origin.x + mark.rect.size.width / 2
+            centre_y = mark.rect.origin.y + mark.rect.size.height / 2
+            return MouseClick(
+                type="mouse_click",
+                x=max(0, round(centre_x)),
+                y=max(0, round(centre_y)),
+                button=action.button,
+                click_count=action.click_count,
+            )
+    raise UnknownMarkError(requested=action.mark, available=len(marks))
 
 
 def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REPEAT_TOLERANCE_PX) -> bool:
@@ -422,6 +478,33 @@ def target_point_of(action: Action) -> Point | None:
     if isinstance(action, MouseDrag):
         return Point(action.end_x, action.end_y)
     return None
+
+
+def target_element_label(action: Action, observation: Observation) -> str | None:
+    """The title of the accessibility element a positional action targets (pure).
+
+    This is what turns the autonomy guard from a check on the model's narration
+    into a check on the machine: a click lands on a control with a name, and
+    that name is the honest description of what the click will do.
+
+    Reads ``raw_ui_elements`` deliberately — the summaries in *logical screen
+    points*. The guard runs after the coordinate gate, so the action's
+    coordinates are screen points too; looking them up in the image-space list
+    (``ui_elements``, roughly 3x smaller numbers) would return whichever
+    unrelated element happened to sit at the scaled-down position, which is a
+    safety check answering about the wrong button.
+
+    ``None`` for non-positional actions and whenever no summarised element
+    covers the point — the element list is budget-capped, so absence is "no
+    information", never "nothing is there".
+    """
+    target = target_point_of(action)
+    if target is None:
+        return None
+    line = summary_covering(observation.raw_ui_elements, target.x, target.y)
+    if line is None:
+        return None
+    return summary_label(line)
 
 
 def verification_region(target: Point, *, size: float = 48.0) -> Rect:
@@ -541,6 +624,11 @@ class Observation:
     open_tabs: tuple[str, ...]
     #: Change-tolerant layout signature used for progress and staleness.
     signature: str
+    #: The AX elements as numbered marks, in *logical screen points*, indexed
+    #: exactly as the model sees them listed. This is what a ``click_mark``
+    #: resolves against, so a selected target lands on the element's own centre
+    #: rather than on a coordinate estimated from a 3x-downscaled image.
+    marks: tuple[MarkElement, ...] = ()
 
     @property
     def app_name(self) -> str | None:
@@ -624,7 +712,10 @@ class OodaRunner:
     ) = None
     skill_loader: Callable[[str], SkillDefinition] | None = None
     kill_switch: KillSwitch | None = None
-    guard: Callable[[AgentTurn], PermissionDecision] | None = None
+    # VALIDATE (Law 5.1). Takes the observation as well as the decision:
+    # a safety verdict about a click has to be able to look at what is
+    # under the pointer, not only at how the model described the click.
+    guard: Callable[[AgentTurn, Observation], PermissionDecision] | None = None
     confirm_handler: Callable[[AgentTurn], bool] | None = None
     sensor: Callable[[], ScreenCapture] | None = None
     # Whether ``sensor`` is used for VERIFY (pre/post action pixel comparison).
@@ -633,6 +724,11 @@ class OodaRunner:
     # Whether ``sensor`` is used for the multimodal OBSERVE screenshot that
     # the provider sees each turn. Off = no screenshot is attached.
     vision_enabled: bool = False
+    # Whether the OBSERVE screenshot is annotated with the AX element boxes
+    # (Set-of-Marks). Independent of ``click_mark``, which works off the
+    # element list and stays available with vision off entirely — this only
+    # controls what is drawn onto the picture.
+    set_of_marks_enabled: bool = True
     window_probe: Callable[[], FocusedWindow] | None = None
     ax_probe: Callable[[], AxProbeResult] | None = None
     # Semantic postcondition probe for typed/pasted text: returns the focused
@@ -647,7 +743,14 @@ class OodaRunner:
     # before positional actions. False when the app was merely discovered from
     # whatever was frontmost, where "drift" is not a meaningful concept.
     app_is_pinned: bool = False
-    on_complete: Callable[[Trajectory, EpisodeOutcome], None] | None = None
+    # DISTILL / remember. Fires on every terminal run, successful or not: the
+    # third argument is the retrospective, and it is the whole point of firing
+    # on a failure — the trajectory says what was tried, the retrospective says
+    # why it stopped. The caller decides what to do with each outcome (Law 3.1
+    # only ever wanted a *successful* flow distilled into a skill).
+    on_complete: (
+        Callable[[Trajectory, EpisodeOutcome, str | None], None] | None
+    ) = None
     # Goal-completion auditor (VERIFY, terminal): given the final state and the
     # model's own summary, decide whether the goal is *observably* satisfied.
     completion_check: Callable[[WorkingState, str], CompletionVerdict] | None = None
@@ -668,6 +771,20 @@ class OodaRunner:
     # transition so a caller can checkpoint the session (resumability).
     plan: GoalPlan | None = None
     on_sub_goal_complete: Callable[[GoalPlan], None] | None = None
+    #: Identity of this run, stamped onto every traced step. Empty when the
+    #: caller did not name one — the loop never invents an id it would then be
+    #: the only holder of.
+    run_id: str = ""
+    #: Observability sink: one record per step, whatever the step's outcome.
+    #: A callable rather than a writer object so the loop stays free of file
+    #: handles (Law 6.1) and a test can assert on the records directly.
+    trace: Callable[[StepTrace], None] | None = None
+    #: Run-ceiling check, called once per step before anything is decided or
+    #: actuated; raises :class:`BudgetExceededError` when the run has spent its
+    #: allowance. A callable rather than a budget object because the counters
+    #: it reads (wall clock, tokens, cost) are the composition root's, and the
+    #: loop should not learn to keep them.
+    budget_guard: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
         # Trajectory of *successfully executed* actions in the current run.
@@ -710,6 +827,10 @@ class OodaRunner:
         self._rejected_finishes: int = 0
         # Whether a physical action ran since ``_observation`` was taken.
         self._physical_since_capture: bool = False
+        # The most recent working state the stepping loop produced. Mirrored
+        # here only so an abnormal ending can be remembered against the state
+        # the run actually reached, not against the empty one it started from.
+        self._last_state: WorkingState = WorkingState(goal="")
 
     def run(self, goal: str) -> WorkingState:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
@@ -733,13 +854,42 @@ class OodaRunner:
         self._consecutive_failures = 0
         self._rejected_finishes = 0
         self._physical_since_capture = False
+        self._last_state = state
+        # Every abnormal ending — the step budget, an exhausted recovery
+        # ladder, a human takeover — is remembered as a failed episode before
+        # the typed error propagates. A run that worked for twenty steps and
+        # then hit a wall used to leave nothing behind at all, which made it
+        # indistinguishable from a run that never started (Law 4.1).
+        try:
+            return self._step_until_finished(state, goal)
+        except (
+            MaxStepsError,
+            UnrecoverableFailureError,
+            KillSwitchTripped,
+            BudgetExceededError,
+        ) as exc:
+            self._finalize(
+                self._last_state,
+                outcome="failure",
+                retrospective=failure_retrospective(exc),
+            )
+            raise
+
+    def _step_until_finished(self, state: WorkingState, goal: str) -> WorkingState:
+        """Run the cycle to a terminal outcome (the shell's stepping loop)."""
         for _ in range(self.max_steps):
+            self._last_state = state
             # Law 5: yield control to the human the instant a kill-switch trips,
             # even mid-workflow — never start a fresh action against a takeover.
             if self.kill_switch is not None and self.kill_switch.tripped():
                 raise KillSwitchTripped(
                     f"human reclaimed control at step {state.step_index} for goal={goal!r}"
                 )
+            # Run ceilings are checked *between* steps, never mid-action: a run
+            # that stops with the cursor halfway through a drag is a worse
+            # outcome than one that overshoots its budget by a single step.
+            if self.budget_guard is not None:
+                self.budget_guard()
 
             # OBSERVE: one snapshot feeds the decision, the gates, and VERIFY.
             state = self._observe(state)
@@ -803,6 +953,7 @@ class OodaRunner:
                     update={"action": batch_action, "actions": None}
                 )
                 state, finished, stop_batch = self._execute_one(state, single, goal)
+                self._last_state = state
                 if finished or stop_batch:
                     break
             if finished:
@@ -861,14 +1012,18 @@ class OodaRunner:
         # anything validates or actuates them. ``ScreenMap`` owns the
         # direction, so the conversion cannot be applied backwards.
         screen_map = self._observation.screen_map
-        if screen_map is not None and not screen_map.is_identity:
+        if screen_map is not None:
             decision = decision.model_copy(
-                update={
-                    "action": scale_action_coordinates(
-                        decision.action, screen_map.points_per_pixel
-                    )
-                }
+                update={"action": map_action_to_screen(decision.action, screen_map)}
             )
+        # Mark selection resolves *after* the coordinate gate, never before: a
+        # mark already carries the element's rect in screen points, and scaling
+        # it a second time would send the click a third of the way up the
+        # display. ``map_action_to_screen`` leaves a ``click_mark``
+        # untouched precisely so this ordering is safe.
+        decision = decision.model_copy(
+            update={"action": resolve_mark(decision.action, self._observation.marks)}
+        )
         # Law 5.1 VALIDATE: the permission guard sees every proposed action
         # *before* it becomes physical, and can hard-stop a dangerous move.
         # Deliberately outside the recovery handler: a policy denial is the
@@ -879,6 +1034,7 @@ class OodaRunner:
         # the pre-action list, so a failure below cannot pollute it (F2).
         state = outcome.state
 
+        verdict: Evidence | None = None
         try:
             if outcome.route == "physical":
                 # The repetition guard runs inside the recovery path, not
@@ -889,22 +1045,29 @@ class OodaRunner:
                 # still guarantees termination, because a trip that keeps
                 # repeating climbs to ABORT within a handful of turns.
                 self._guard_stuck_loop(outcome.action, goal)
-                self._act_and_verify(outcome.action)
+                verdict = self._act_and_verify(outcome.action)
             elif outcome.route == "internal_wait":
                 self._sleep_for(outcome.action)
             elif outcome.route == "internal_skill":
                 # Explicit Stage 2: the provider asked for this skill by id;
                 # mount it (replacing any auto-retrieved one).
                 self._skill = self._load_skill_for(outcome.action)
-        except KillSwitchTripped:
+        except KillSwitchTripped as exc:
             # Physical drivers may also raise a trip (e.g. during a long
             # type/drag); propagate it out cleanly rather than folding it
             # into a generic failure.
+            self._trace_step(decision, outcome, verdict=None, error=str(exc))
             raise
         except Exception as exc:  # noqa: BLE001 - shell must survive provider/OS faults
             # RECOVER: classify, count, and hand the model an escalating hint.
             # The failed step is deliberately NOT added to completed_steps (F2)
             # so the next turn sees an accurate picture of what actually ran.
+            # Traced *before* the ladder gets its turn: ``_register_failure``
+            # may abort the run outright, and the step that ended it is the
+            # one a person will want to read.
+            self._trace_step(
+                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}"
+            )
             hint = self._register_failure(exc, outcome.action, goal)
             state = replace(state, last_error=hint)
             LOGGER.warning("ooda step %s failed: %s", outcome.action.type, hint)
@@ -914,7 +1077,18 @@ class OodaRunner:
         # claim the auditor rejects must leave no trace in the history (F2),
         # exactly like a failed action.
         if outcome.route == "finish":
-            return self._finish(state, outcome.action, outcome.step_label, goal)
+            state, finished, stop_batch = self._finish(
+                state, outcome.action, outcome.step_label, goal
+            )
+            # A rejected completion claim is the interesting case: the trace
+            # carries the auditor's reason, not just "the model said done".
+            self._trace_step(
+                decision,
+                outcome,
+                verdict=None,
+                error=None if finished else state.last_error,
+            )
+            return state, finished, stop_batch
 
         # The action succeeded: only now does the step enter the completed
         # history, keeping the trace honest for the next cycle (F2). The
@@ -933,6 +1107,7 @@ class OodaRunner:
             )
         if outcome.route == "physical":
             self._record_for_progress(outcome.action)
+        self._trace_step(decision, outcome, verdict=verdict, error=None)
         # A successful action clears obsolete recovery diagnostics: the
         # provider must not keep steering around a failure that already
         # recovered (M1). A stuck-loop hint is re-injected by the next
@@ -950,15 +1125,57 @@ class OodaRunner:
         )
         return state, False, False
 
+    def _trace_step(
+        self,
+        decision: AgentTurn,
+        outcome: StepOutcome,
+        *,
+        verdict: Evidence | None,
+        error: str | None,
+    ) -> None:
+        """Hand one step to the observability sink (best effort, never fatal).
+
+        Emitted for every step whatever its ending, because the step worth
+        reading is almost always the one that failed. A sink that raises is
+        swallowed with a warning: diagnostics must not be able to end a run
+        they exist to explain.
+        """
+        if self.trace is None:
+            return
+        try:
+            self.trace(
+                StepTrace(
+                    run_id=self.run_id,
+                    step=outcome.step_index,
+                    app=self.app,
+                    window=(
+                        window_summary(self._observation.window)
+                        if self._observation.window is not None
+                        else None
+                    ),
+                    thought=decision.thought,
+                    sub_goal=decision.sub_goal,
+                    action=outcome.action.model_dump(exclude_none=True),
+                    route=outcome.route,
+                    verdict=verdict.value if verdict is not None else None,
+                    error=error,
+                    screenshot_b64=self._observation.screenshot_b64,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - a trace sink must never kill a run
+            LOGGER.warning("run trace sink failed: %s", exc)
+
     # ------------------------------------------------------------------
     # ACT + VERIFY
     # ------------------------------------------------------------------
 
-    def _act_and_verify(self, action: Action) -> None:
+    def _act_and_verify(self, action: Action) -> Evidence:
         """Gate, actuate, and corroborate one physical action.
 
         Every gate runs before the host is touched, in cheapest-first order,
-        and each raises a typed error the recovery ladder understands.
+        and each raises a typed error the recovery ladder understands. The
+        returned verdict is what the witnesses concluded, for the run trace —
+        a contradiction has already raised by then.
         """
         expectation = expectation_for(action)
         self._guard_positional(action)
@@ -977,7 +1194,7 @@ class OodaRunner:
         self._last_capture_hash = None
         self._last_screenshot_b64 = None
 
-        self._verify(
+        return self._verify(
             action, expectation, before, before_ui, before_content, before_window
         )
 
@@ -1007,7 +1224,7 @@ class OodaRunner:
         before_ui: tuple[str, ...],
         before_content: tuple[str, ...],
         before_window: FocusedWindow | None,
-    ) -> None:
+    ) -> Evidence:
         """Collect independent witnesses and judge whether the action landed.
 
         The decisive design choice: a witness that cannot speak returns
@@ -1019,7 +1236,7 @@ class OodaRunner:
         pixel-only diff could judge without inventing failures.
         """
         if not expectation.is_verifiable:
-            return
+            return Evidence.INCONCLUSIVE
         if expectation.needs_settle:
             self._wait_for_settle(before_window)
 
@@ -1086,6 +1303,7 @@ class OodaRunner:
             # Not verified is not failed: say so once, at debug volume, and
             # let the model's own next observation be the arbiter.
             LOGGER.debug("ooda %s unverified (no conclusive witness): %s", action.type, detail)
+        return outcome
 
     def _pixel_evidence(
         self, before: ScreenCapture, expectation: ActionExpectation
@@ -1294,10 +1512,16 @@ class OodaRunner:
         A ``BLOCK`` means the policy forbids it outright (e.g. destructive at
         Level 0), and a ``CONFIRM`` means a guarded/supervised human must sign
         off first. Both raise before the physical layer is ever reached.
+
+        The current observation goes to the guard with the decision so the
+        policy can classify the control the action actually targets. By this
+        point the coordinate gate has already converted the model's image-space
+        coordinates into screen points, which is the space
+        :func:`target_element_label` reads its summaries in.
         """
         if self.guard is None:
             return
-        verdict = self.guard(decision)
+        verdict = self.guard(decision, self._observation)
         if verdict is PermissionDecision.BLOCK:
             raise PermissionDeniedError(
                 f"action {decision.action.type!r} for goal {decision.sub_goal!r} "
@@ -1317,16 +1541,16 @@ class OodaRunner:
             )
 
     def _validate_bounds(self, action: Action, capture: ScreenCapture) -> None:
-        """Fail-closed: reject coordinates outside the observed main display.
+        """Fail-closed: reject coordinates outside the display being observed.
 
         A model can hallucinate coordinates; the schema only enforces
-        non-negative values. The captured frame's logical size (physical px /
-        scale) is the main display's bounds — a point beyond it is rejected
-        before any physical effect instead of silently clicking somewhere the
-        agent did not intend.
+        non-negative values. The captured frame carries its display's global
+        rectangle — origin included, so the gate is about *the display the
+        agent is looking at* rather than about the primary one — and a point
+        beyond it is rejected before any physical effect instead of silently
+        clicking somewhere the agent did not intend.
         """
-        logical_w = capture.width / capture.scale
-        logical_h = capture.height / capture.scale
+        frame = capture.display_frame
         targets: list[tuple[str, int, int]] = []
         if isinstance(action, MouseClick):
             targets.append(("click", action.x, action.y))
@@ -1334,13 +1558,14 @@ class OodaRunner:
             targets.append(("drag start", action.start_x, action.start_y))
             targets.append(("drag end", action.end_x, action.end_y))
         for label, x, y in targets:
-            if not (0 <= x < logical_w and 0 <= y < logical_h):
+            if not point_in_frame(Point(float(x), float(y)), frame):
                 raise CoordinateOutOfBoundsError(
                     f"{action.type} {label} coordinate ({x},{y}) is outside the "
-                    f"observed main display {logical_w:.0f}x{logical_h:.0f} logical "
-                    "points; rejecting before actuation (fail-closed; multi-display "
-                    "targets are not yet supported). Re-derive the coordinate from "
-                    "the current screenshot."
+                    f"observed display {frame.size.width:.0f}x"
+                    f"{frame.size.height:.0f} logical points at "
+                    f"({frame.origin.x:.0f},{frame.origin.y:.0f}); rejecting before "
+                    "actuation (fail-closed). Re-derive the coordinate from the "
+                    "current screenshot."
                 )
 
     # ------------------------------------------------------------------
@@ -1469,20 +1694,24 @@ class OodaRunner:
         screen_map = previous.screen_map
         signature = previous.signature
         if self.sensor is not None:
-            captured = self._capture_frame()
+            captured = self._capture_frame(raw_ui_elements)
             if captured is not None:
                 frame, screenshot_b64, screen_map = captured
                 signature = coarse_fingerprint(frame)
                 self._physical_since_capture = False
+        # An app's AX tree describes every display it has a window on, while
+        # the frame describes exactly one. Elements the model cannot see are
+        # dropped *before* anything downstream derives from them, so the image
+        # rewrite, the mark numbering and the prompt all describe the same set.
+        # On a single-display host every element is inside the frame and this
+        # is a no-op.
+        if screen_map is not None and raw_ui_elements:
+            raw_ui_elements = summaries_within(raw_ui_elements, screen_map.frame)
         # One coordinate space for both perception sources: AX rects arrive in
         # logical points and are rewritten into the image space the model reads
         # coordinates from, so a coordinate picked from either source converts
         # back with the same map.
-        ui_elements = raw_ui_elements
-        if screen_map is not None and not screen_map.is_identity and raw_ui_elements:
-            ui_elements = summaries_to_image_space(
-                raw_ui_elements, screen_map.points_per_pixel
-            )
+        ui_elements = self._image_space(raw_ui_elements, screen_map)
 
         self._observation = Observation(
             frame=frame,
@@ -1494,6 +1723,10 @@ class OodaRunner:
             content=content,
             open_tabs=open_tabs,
             signature=signature,
+            # Marks come from the *logical* summaries: a resolved mark is a
+            # click in screen points, and the model's [N] indices line up
+            # because the image-space rewrite preserves order and count.
+            marks=parse_ax_elements_to_marks(raw_ui_elements),
         )
         active_window = window_summary(window) if window is not None else state.active_window
         return replace(
@@ -1507,8 +1740,18 @@ class OodaRunner:
             ),
         )
 
+    @staticmethod
+    def _image_space(
+        summaries: tuple[str, ...], screen_map: ScreenMap | None
+    ) -> tuple[str, ...]:
+        """AX summaries rewritten into the model's image space (pure)."""
+        if screen_map is None or screen_map.is_identity or not summaries:
+            return summaries
+        return summaries_to_image_space(summaries, screen_map)
+
     def _capture_frame(
         self,
+        raw_ui_elements: tuple[str, ...],
     ) -> tuple[ScreenCapture, str | None, ScreenMap] | None:
         """Capture one frame and derive the model's map from it.
 
@@ -1535,10 +1778,22 @@ class OodaRunner:
         screen_map = screen_map_of(logical, mapped)
         if not self.vision_enabled:
             return capture, None, screen_map
-        fingerprint = frame_fingerprint(capture)
+        # Set-of-Marks: draw the grounded elements onto the map the model sees,
+        # so a numbered line in the AX list and a highlighted region on screen
+        # are visibly the same thing. The marks are part of the cache key —
+        # identical pixels with a changed element list must be re-encoded, or
+        # the model would be handed boxes describing the previous screen.
+        marks = (
+            parse_ax_elements_to_marks(self._image_space(raw_ui_elements, screen_map))
+            if self.set_of_marks_enabled
+            else ()
+        )
+        fingerprint = f"{frame_fingerprint(capture)}|{hash(marks)}"
         if fingerprint == self._last_capture_hash and self._last_screenshot_b64 is not None:
             return capture, self._last_screenshot_b64, screen_map
-        screenshot_b64 = capture_to_base64_png(mapped)
+        screenshot_b64 = capture_to_base64_png(
+            annotate_set_of_marks(mapped, marks) if marks else mapped
+        )
         self._last_capture_hash = fingerprint
         self._last_screenshot_b64 = screenshot_b64
         return capture, screenshot_b64, screen_map
@@ -1601,7 +1856,11 @@ class OodaRunner:
         LOGGER.info("ooda finished goal=%r at step %s", goal, state.step_index)
         # DISTILL: hand the executed trajectory to the caller so a successful
         # run can become a reusable skill and every terminal run is remembered.
-        self._finalize(state, action)
+        self._finalize(
+            state,
+            outcome="success" if action.status == "success" else "failure",
+            retrospective=action.summary,
+        )
         return state, True, False
 
     def _audit_completion(self, state: WorkingState, finish: Finish) -> str | None:
@@ -1652,22 +1911,30 @@ class OodaRunner:
             "what blocked it."
         )
 
-    def _finalize(self, state: WorkingState, finish: Action) -> None:
+    def _finalize(
+        self,
+        state: WorkingState,
+        *,
+        outcome: EpisodeOutcome,
+        retrospective: str | None,
+    ) -> None:
         """Trigger the DISTILL/remember hooks on a terminal run.
 
-        Only fires when at least one action actually executed — an empty run
-        carries no trajectory to distil and no episode worth remembering.
-        Aborted runs (``max_steps``, unrecoverable failure) and kill-switch
-        takeovers never reach here: a truncated trace would teach the skill
-        store noise.
+        Every way a run can end reaches here, not just ``finish``. Aborted runs
+        used to leave nothing behind at all — a run that worked for twenty
+        steps and then exhausted its recovery ladder was as invisible to memory
+        as one that never started, so the same wall was walked into again on
+        the next attempt. Law 4.1 asks for failure retrospectives precisely
+        because that is the trace worth keeping.
+
+        Still gated on at least one executed action: a run that never touched
+        the host has no trajectory to remember, and the reason it failed is
+        already the caller's exception. What a *failure* trace must never do is
+        become a skill; that is the caller's call, and the retrospective is
+        passed so it can make it.
         """
         if self.on_complete is None or not self._executed:
             return
-        if not isinstance(finish, Finish):
-            raise RuntimeError(  # noqa: TRY004 - routing invariant, not a caller type error
-                "DISTILL requires a finish action; this is a coding error"
-            )
-        outcome: EpisodeOutcome = "success" if finish.status == "success" else "failure"
         self.on_complete(
             Trajectory(
                 app=self.app,
@@ -1676,6 +1943,7 @@ class OodaRunner:
                 step_descriptions=tuple(self._sub_goals),
             ),
             outcome,
+            retrospective,
         )
 
     @property
@@ -1807,6 +2075,45 @@ class OodaRunner:
             LOGGER.warning("skill load failed: %s", exc)
             return state
         return replace(state, skill=self._skill)
+
+
+class UnknownMarkError(RuntimeError):
+    """A ``click_mark`` named an index that is not in the current element list.
+
+    Recoverable like any other bad decision: the list is re-derived every turn
+    (elements appear, disappear and renumber as the screen changes), so the
+    honest answer is to re-read it, not to click the nearest plausible thing.
+    """
+
+    def __init__(self, *, requested: int, available: int) -> None:
+        self.requested = requested
+        self.available = available
+        listed = f"1-{available}" if available else "none are listed right now"
+        super().__init__(
+            f"click_mark referred to mark {requested}, which is not in the "
+            f"current AX element list ({listed}). The list is re-derived every "
+            "turn, so re-read it and use a number it actually shows — or click "
+            "a coordinate from the screenshot if the target is not listed"
+        )
+
+
+def failure_retrospective(exc: BaseException) -> str:
+    """A short, honest account of why a run ended without finishing (pure).
+
+    Stored on the failed episode, so a later attempt at the same goal can be
+    told what stopped the last one. Named by cause rather than by exception
+    class: "recovery exhausted (consent_missing)" tells a human what to fix,
+    while "UnrecoverableFailureError" only tells them what raised.
+    """
+    if isinstance(exc, MaxStepsError):
+        return f"run truncated by the step budget: {exc}"
+    if isinstance(exc, KillSwitchTripped):
+        return f"human reclaimed control: {exc}"
+    if isinstance(exc, BudgetExceededError):
+        return f"run stopped by its budget: {exc}"
+    if isinstance(exc, UnrecoverableFailureError):
+        return f"recovery exhausted ({exc.failure.kind.value}): {exc}"
+    return f"run ended abnormally: {exc}"
 
 
 class KillSwitchTripped(RuntimeError):

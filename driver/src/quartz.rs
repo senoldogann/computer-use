@@ -509,6 +509,10 @@ impl Backend for QuartzBackend {
             width: width as u32,
             height: height as u32,
             scale: scale.max(1.0),
+            // Global logical origin of this display: what turns a coordinate
+            // read off this frame back into a point the driver can click.
+            origin_x: bounds.origin.x,
+            origin_y: bounds.origin.y,
             bgra,
         })
     }

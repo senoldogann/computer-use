@@ -8,6 +8,7 @@ one subprocess run of the actual CLI.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -271,7 +272,7 @@ class _SensorDeadClient:
             cursor_y=0.0,
         )
 
-    def capture(self) -> None:
+    def capture(self, display_id: int = 0) -> None:
         raise DriverRpcError("screenshot", "Screen Recording consent required")
 
     def hotkey_state(self) -> bool:
@@ -421,8 +422,8 @@ class _RecordingClient:
             cursor_y=0.0,
         )
 
-    def capture(self) -> ScreenCapture:
-        self.calls.append("capture")
+    def capture(self, display_id: int = 0) -> ScreenCapture:
+        self.calls.append(f"capture:{display_id}")
         return _FAKE_FRAME
 
     def hotkey_state(self) -> bool:
@@ -591,3 +592,51 @@ def test_cli_runs_end_to_end(tmp_path) -> None:
     assert "distill     : skill" in run.stdout
     assert len(list((store_dir / "skills").glob("*.json"))) == 1
     assert len(list((store_dir / "episodes").glob("*.json"))) == 1
+
+
+def test_truncated_run_records_a_failure_episode_and_no_skill(tmp_path) -> None:
+    """A run that never finishes still leaves the trace of what it tried.
+
+    The two halves of the contract: the episode is on disk with a retrospective
+    naming why the run stopped, and the skill store stays empty — a workflow
+    that did not work must never be handed to the next run as a recipe.
+    """
+
+    def endless_provider() -> Callable[[WorkingState], AgentTurn]:
+        def provider(state: WorkingState) -> AgentTurn:
+            # Fresh coordinates each turn so the stuck-loop guard stays out of
+            # the way: this is about the step budget, not about repetition.
+            offset = 10 * (state.step_index + 1)
+            return AgentTurn(
+                thought="still looking",
+                sub_goal=f"probe {offset}",
+                action=MouseClick(type="mouse_click", x=offset, y=offset),
+            )
+
+        return provider
+
+    store_dir = tmp_path / "store"
+    config = AgentConfig(
+        goal="find something that is not there",
+        app="Safari",
+        provider=endless_provider(),
+        socket_path=str(SOCKET_PATH),
+        store_dir=store_dir,
+        autonomy_level=AutonomyLevel.FULL,
+        enable_visual_verification=False,
+        enable_vision=False,
+        max_steps=3,
+        **SIMULATED_SETTLE,
+    )
+    with pytest.raises(MaxStepsError):
+        Agent(config).run()
+
+    episode_files = sorted((store_dir / "episodes").glob("*.json"))
+    assert len(episode_files) == 1, "a truncated run must still be remembered"
+    episode = json.loads(episode_files[0].read_text())
+    assert episode["outcome"] == "failure"
+    assert "step budget" in (episode["retrospective"] or "")
+    assert len(episode["steps"]) == 3, "the work it did do is part of the trace"
+    assert not list((store_dir / "skills").glob("*.json")), (
+        "a failed run must never distill into a skill"
+    )

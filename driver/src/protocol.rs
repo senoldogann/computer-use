@@ -161,6 +161,12 @@ pub enum Response {
         /// Physical pixels per logical point (Retina == 2.0); lets the
         /// orchestrator map global logical coordinates into this frame.
         scale: f64,
+        /// Top-left of the captured display in *global* logical points. The
+        /// orchestrator actuates in that global space, so a frame from a
+        /// secondary display is only usable with this offset — without it
+        /// every coordinate read off it lands on the primary display.
+        origin_x: f64,
+        origin_y: f64,
         /// BGRA8 row-major pixels, top-down, base64-encoded. The payload can be
         /// megabytes for a real display; base64 over the local Unix socket is
         /// the pragmatic v1 framing (a future optimisation could stream via a
@@ -187,15 +193,21 @@ impl Response {
             width,
             height,
             scale,
+            origin_x,
+            origin_y,
             data_base64,
         } = self
         else {
             return serde_json::to_string(self).expect("response serialization cannot fail");
         };
-        // Reuse serde for the f64 alone so the JSON number literal is always
+        // Reuse serde for the f64s alone so each JSON number literal is always
         // valid ("2.0", never the bare "2" that Display produces).
         let scale_json = serde_json::to_string(scale).expect("f64 serialization cannot fail");
-        let mut out = String::with_capacity(data_base64.len() + 128);
+        let origin_x_json =
+            serde_json::to_string(origin_x).expect("f64 serialization cannot fail");
+        let origin_y_json =
+            serde_json::to_string(origin_y).expect("f64 serialization cannot fail");
+        let mut out = String::with_capacity(data_base64.len() + 160);
         out.push_str("{\"ok\":\"screenshot\",\"display_id\":");
         out.push_str(&display_id.to_string());
         out.push_str(",\"format\":\"");
@@ -206,6 +218,10 @@ impl Response {
         out.push_str(&height.to_string());
         out.push_str(",\"scale\":");
         out.push_str(&scale_json);
+        out.push_str(",\"origin_x\":");
+        out.push_str(&origin_x_json);
+        out.push_str(",\"origin_y\":");
+        out.push_str(&origin_y_json);
         out.push_str(",\"data_base64\":\"");
         out.push_str(data_base64);
         out.push('"');
@@ -226,6 +242,8 @@ mod tests {
             width: 2,
             height: 1,
             scale: 2.0,
+            origin_x: 1512.0,
+            origin_y: 0.0,
             data_base64: "AAEC/w==".to_string(),
         };
         assert_eq!(

@@ -39,7 +39,7 @@ def _click(x: int, y: int) -> MouseClick:
 
 
 def test_runner_fires_on_complete_with_executed_trajectory() -> None:
-    received: list[tuple[Trajectory, EpisodeOutcome]] = []
+    received: list[tuple[Trajectory, EpisodeOutcome, str | None]] = []
 
     def provider(state: WorkingState) -> AgentTurn:
         if state.step_index == 0:
@@ -52,13 +52,14 @@ def test_runner_fires_on_complete_with_executed_trajectory() -> None:
         provider=provider,
         execute_physical=lambda _a: None,
         app="Safari",
-        on_complete=lambda t, o: received.append((t, o)),
+        on_complete=lambda t, o, r: received.append((t, o, r)),
         max_steps=10,
     )
     runner.run(goal="open the menu")
     assert received, "on_complete must fire on a terminal finish"
-    trajectory, outcome = received[0]
+    trajectory, outcome, retrospective = received[0]
     assert outcome == "success"
+    assert retrospective == "done"
     # The finish action itself is excluded from the flow.
     assert [s.type for s in trajectory.steps] == ["mouse_click", "wait"]
     assert trajectory.app == "Safari"
@@ -77,7 +78,7 @@ def test_failed_finish_reports_failure_outcome() -> None:
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _a: None,
-        on_complete=lambda _t, o: received.append(o),
+        on_complete=lambda _t, o, _r: received.append(o),
         max_steps=5,
     )
     runner.run(goal="click")
@@ -101,9 +102,14 @@ def test_failed_step_never_enters_trajectory() -> None:
     assert runner.executed_trajectory == (), "failed steps must not be distilled"
 
 
-def test_aborted_run_never_fires_on_complete() -> None:
-    """A run that hits max_steps (never finishes) carries a truncated trace."""
-    calls: list[bool] = []
+def test_aborted_run_is_remembered_as_a_failure() -> None:
+    """A truncated run still raises — and still leaves a trace behind it.
+
+    The work a run did before hitting its budget is the most useful thing to
+    remember about it: without an episode, the next attempt at the same goal
+    starts with no idea that the last one got three steps in and stalled.
+    """
+    received: list[tuple[EpisodeOutcome, str | None]] = []
 
     def provider(state: WorkingState) -> AgentTurn:
         # Alternate coordinates so the stuck-loop guard never fires;
@@ -114,33 +120,63 @@ def test_aborted_run_never_fires_on_complete() -> None:
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _a: None,
-        on_complete=lambda _t, _o: calls.append(True),
+        on_complete=lambda _t, o, r: received.append((o, r)),
         max_steps=3,
     )
     # The bounded-termination contract: the truncation raises a typed error
-    # (no silent stop) AND never distills a truncated trace.
+    # (no silent stop) — and the episode is written before it propagates.
     with pytest.raises(MaxStepsError):
         runner.run(goal="spin")
-    assert calls == []
+    assert len(received) == 1
+    outcome, retrospective = received[0]
+    assert outcome == "failure"
+    assert retrospective is not None and "step budget" in retrospective
 
 
-def test_kill_switch_takeover_never_fires_on_complete() -> None:
-    """A human takeover is not a workflow outcome — nothing is distilled."""
+def test_kill_switch_takeover_is_remembered_as_a_failure() -> None:
+    """A takeover after real work is a failed episode, not a silent discard."""
+    received: list[tuple[EpisodeOutcome, str | None]] = []
+    armed: list[bool] = []
+
+    class TripsOnceAStepIsOnTheRecord:
+        """Trips only after a click has actually been recorded as executed."""
+
+        def tripped(self) -> bool:
+            return bool(armed)
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.completed_steps:
+            armed.append(True)
+        return _turn(_click(10 + state.step_index, 10))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _a: None,
+        kill_switch=TripsOnceAStepIsOnTheRecord(),  # type: ignore[arg-type]
+        on_complete=lambda _t, o, r: received.append((o, r)),
+        max_steps=5,
+    )
+    with pytest.raises(KillSwitchTripped):
+        runner.run(goal="x")
+    assert len(received) == 1
+    outcome, retrospective = received[0]
+    assert outcome == "failure"
+    assert retrospective is not None and "reclaimed control" in retrospective
+
+
+def test_a_run_that_never_acted_leaves_nothing() -> None:
+    """No executed action means no trajectory: the exception is the whole story."""
+    calls: list[bool] = []
 
     class AlwaysTripped:
         def tripped(self) -> bool:
             return True
 
-    calls: list[bool] = []
-
-    def provider(_state: WorkingState) -> AgentTurn:
-        return _turn(_click(10, 10))
-
     runner = OodaRunner(
-        provider=provider,
+        provider=lambda _s: _turn(_click(10, 10)),
         execute_physical=lambda _a: None,
         kill_switch=AlwaysTripped(),  # type: ignore[arg-type]
-        on_complete=lambda _t, _o: calls.append(True),
+        on_complete=lambda _t, _o, _r: calls.append(True),
         max_steps=5,
     )
     with pytest.raises(KillSwitchTripped):
@@ -155,7 +191,9 @@ def test_full_chain_episode_feeds_skill_dedup(tmp_path) -> None:
     store = EpisodicStore(tmp_path / "memory")
     results: list[DistillResult] = []
 
-    def on_complete(trajectory: Trajectory, outcome: EpisodeOutcome) -> None:
+    def on_complete(
+        trajectory: Trajectory, outcome: EpisodeOutcome, retrospective: str | None
+    ) -> None:
         # Distill against known history first, then remember — so the fresh
         # run is novel, and any future identical run is a duplicate.
         results.append(distill(trajectory, store.known_signatures()))
@@ -166,6 +204,7 @@ def test_full_chain_episode_feeds_skill_dedup(tmp_path) -> None:
                 steps=trajectory.steps,
                 step_descriptions=trajectory.step_descriptions,
                 outcome=outcome,
+                retrospective=retrospective,
                 episode_id=f"run-{len(store.episodes())}",
             )
         )

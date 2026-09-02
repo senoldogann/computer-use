@@ -23,7 +23,7 @@ from typing import Final
 
 from pydantic import BaseModel
 
-from computeruse.vision.coordinates import Point, Rect, Size
+from computeruse.vision.coordinates import Point, Rect, ScreenMap, Size, point_in_frame
 
 # Roles an agent can meaningfully act on (click, type, toggle). Everything
 # else (containers, static text, scroll areas) is noise for a coordinate
@@ -300,8 +300,56 @@ def summary_covering(summaries: tuple[str, ...], x: float, y: float) -> str | No
     return best
 
 
+_SUMMARY_LABEL: Final = re.compile(r'^\S+ "(.*)" at \(')
+
+
+def summary_label(summary: str) -> str | None:
+    """The element's own title from one summary line (pure).
+
+    The line reads ``Button "Empty Trash" at (100,200) 80x24``; this returns
+    ``Empty Trash``. The safety guard classifies the *control* the agent is
+    about to press, and the control's title is the only part of the line that
+    says anything about what pressing it does — the role, the rect and the
+    focus marker are noise for that question, and an element's ``value`` would
+    make a search box containing the word "delete" look destructive.
+
+    ``None`` when the line carries no title (the truncation note, or an
+    untitled element), which callers must read as "no information".
+    """
+    match = _SUMMARY_LABEL.match(summary)
+    if match is None:
+        return None
+    label = match.group(1).strip()
+    return label if label and label != "(untitled)" else None
+
+
+def summaries_within(summaries: tuple[str, ...], frame: Rect) -> tuple[str, ...]:
+    """Keep only the elements whose centre lies on a given display (pure).
+
+    AX rects are global: on a two-display desktop, an app's tree describes
+    windows the captured frame does not contain. Listing those would hand the
+    model coordinates that fall outside its own screenshot — negative once
+    rewritten into image space, and rejected by the bounds gate if it clicked
+    one. Filtering here, *before* the image-space rewrite and before marks are
+    numbered, keeps every downstream list derived from the same elements.
+
+    Lines with no coordinate fragment (the truncation note) are always kept:
+    they describe the list itself, not a place on it.
+    """
+    kept: list[str] = []
+    for line in summaries:
+        match = _SUMMARY_RECT.search(line)
+        if match is None:
+            kept.append(line)
+            continue
+        centre_x, centre_y, _width, _height = (int(group) for group in match.groups())
+        if point_in_frame(Point(float(centre_x), float(centre_y)), frame):
+            kept.append(line)
+    return tuple(kept)
+
+
 def summaries_to_image_space(
-    summaries: tuple[str, ...], points_per_pixel: float
+    summaries: tuple[str, ...], screen_map: ScreenMap
 ) -> tuple[str, ...]:
     """Rewrite element summaries from logical points into image-map space (pure).
 
@@ -320,19 +368,23 @@ def summaries_to_image_space(
     pixels. :class:`~computeruse.vision.coordinates.ScreenMap` now owns both
     directions so the mistake cannot recur.
 
+    The map also carries the captured display's global origin, so an element
+    on a secondary display is placed relative to the frame the model is
+    actually looking at rather than to the desktop's corner.
+
     Only the ``at (x,y) WxH`` fragment is rewritten (rounded to integers);
     titles, values, and focus markers pass through untouched. Lines without a
     coordinate fragment (e.g. the truncation note) are unchanged.
     """
-    if points_per_pixel <= 0:
-        raise ValueError(f"points per pixel must be positive, got {points_per_pixel}")
-    if points_per_pixel == 1.0 or not summaries:
+    if screen_map.is_identity or not summaries:
         return summaries
+    points_per_pixel = screen_map.points_per_pixel
 
     def rescale(match: re.Match[str]) -> str:
         x, y, width, height = (int(g) for g in match.groups())
+        centre = screen_map.to_image(Point(float(x), float(y)))
         return (
-            f"at ({round(x / points_per_pixel)},{round(y / points_per_pixel)}) "
+            f"at ({round(centre.x)},{round(centre.y)}) "
             f"{round(width / points_per_pixel)}x{round(height / points_per_pixel)}"
         )
 

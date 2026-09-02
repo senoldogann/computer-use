@@ -182,6 +182,13 @@ class ScreenMap:
     logical: Size
     #: Screenshot-map size in image pixels — the space the model reports in.
     image: Size
+    #: Top-left of the captured display in *global* logical points. Zero for a
+    #: single-display host. Actuation is global, so a screenshot of a secondary
+    #: display describes a region that starts partway across that space: the
+    #: image's (0,0) is the display's corner, not the desktop's. Owning the
+    #: offset here means the same single conversion carries it, and no caller
+    #: can apply the scale and forget the shift.
+    origin: Point = Point(0.0, 0.0)
 
     def __post_init__(self) -> None:
         if self.logical.width <= 0 or self.logical.height <= 0:
@@ -196,15 +203,29 @@ class ScreenMap:
 
     @property
     def is_identity(self) -> bool:
-        """True when image space and screen space coincide (no conversion)."""
-        return self.image.width == self.logical.width and self.image.height == self.logical.height
+        """True when image space and screen space coincide (no conversion).
+
+        A display at a non-zero global origin is never the identity, however
+        its scale works out: its image coordinates still have to be shifted.
+        """
+        return (
+            self.image.width == self.logical.width
+            and self.image.height == self.logical.height
+            and self.origin.x == 0.0
+            and self.origin.y == 0.0
+        )
+
+    @property
+    def frame(self) -> Rect:
+        """The captured display's rectangle in global logical points."""
+        return Rect(origin=self.origin, size=self.logical)
 
     def to_screen(self, point: Point) -> Point:
-        """Map a model-reported image-space point to logical screen points."""
+        """Map a model-reported image-space point to global screen points."""
         factor = self.points_per_pixel
-        return Point(point.x * factor, point.y * factor)
+        return Point(point.x * factor + self.origin.x, point.y * factor + self.origin.y)
 
     def to_image(self, point: Point) -> Point:
-        """Map a logical screen point (e.g. an AX rect) into image space."""
+        """Map a global screen point (e.g. an AX rect) into image space."""
         factor = self.points_per_pixel
-        return Point(point.x / factor, point.y / factor)
+        return Point((point.x - self.origin.x) / factor, (point.y - self.origin.y) / factor)

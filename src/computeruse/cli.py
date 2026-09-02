@@ -34,6 +34,12 @@ from pathlib import Path
 from typing import cast
 
 from computeruse.agent import Agent, AgentConfig
+from computeruse.orchestrator.budget import (
+    BudgetExceededError,
+    RunBudget,
+    RunUsage,
+    budget_verdict,
+)
 from computeruse.orchestrator.client import ActuationClient, DriverRpcError
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import (
@@ -45,7 +51,15 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
-from computeruse.providers.openai import DEFAULT_MODEL, OpenAIError, openai_model
+from computeruse.providers.openai import (
+    DEFAULT_MODEL,
+    ModelCallStats,
+    OpenAIError,
+    TokenPrice,
+    call_cost_usd,
+    openai_model,
+    price_for,
+)
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionConfirmationRequired,
@@ -128,6 +142,57 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Decompose the goal into ordered sub-goals and advance through "
         "them (a finish marks the current sub-goal done); checkpoints are "
         "written to --store/checkpoints for resumability.",
+    )
+    parser.add_argument(
+        "--display",
+        type=int,
+        default=0,
+        help="Which display to observe and act on (0 = main display). The "
+        "coordinate bounds gate is evaluated against this display's own "
+        "rectangle, so a click can never land on a different screen.",
+    )
+    parser.add_argument(
+        "--marks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Outline the accessibility elements on the screenshot the model "
+        "sees (Set-of-Marks), so a numbered element in the AX list and a "
+        "region on screen are visibly the same thing. Selecting a target by "
+        "mark works either way; this only controls the drawing.",
+    )
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=None,
+        help="Wall-clock ceiling for the run. Checked between steps; when it "
+        "is passed the run stops cleanly with its artifacts already written.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Total model-token ceiling for the run (prompt + completion, "
+        "summed across every call). Checked between steps.",
+    )
+    parser.add_argument(
+        "--max-cost",
+        type=float,
+        default=None,
+        help="Model-spend ceiling for the run, in USD, computed from published "
+        "list prices. Only available for a priced --model openai[:id]; a "
+        "custom transport has no known price, so use --max-tokens there.",
+    )
+    parser.add_argument(
+        "--trace-dir",
+        default=None,
+        help="Write one JSON object per step (decision, action, verification "
+        "verdict, error) to <trace-dir>/<run_id>/steps.jsonl. Off by default.",
+    )
+    parser.add_argument(
+        "--trace-screenshots",
+        action="store_true",
+        help="With --trace-dir, also save the exact frame the model decided "
+        "from for each step, as <trace-dir>/<run_id>/step-NNN.png.",
     )
     return parser.parse_args(argv)
 
@@ -374,6 +439,30 @@ def resolve_verify(args: argparse.Namespace) -> bool:
     return bool(args.real and args.model is not None)
 
 
+def resolve_cost_price(args: argparse.Namespace) -> TokenPrice | None:
+    """The published price to bill this run against, when --max-cost is set.
+
+    Returns ``None`` when no cost ceiling was asked for. Raises
+    :class:`~computeruse.providers.openai.OpenAIError` when a ceiling *was*
+    asked for against a transport whose price nobody published — a budget
+    enforced against a made-up number is worse than no budget at all.
+    """
+    if args.max_cost is None:
+        return None
+    model_spec: str | None = args.model
+    if model_spec is None:
+        raise OpenAIError(
+            "--max-cost needs a model to price; pass --model openai[:model_id]"
+        )
+    if model_spec != OPENAI_PREFIX and not model_spec.startswith(f"{OPENAI_PREFIX}:"):
+        raise OpenAIError(
+            f"--max-cost cannot price the custom transport {model_spec!r}; "
+            "use --max-tokens instead"
+        )
+    model_id = model_spec.split(":", 1)[1].strip() if ":" in model_spec else ""
+    return price_for(model_id or DEFAULT_MODEL)
+
+
 def build_config(
     args: argparse.Namespace,
     *,
@@ -381,6 +470,7 @@ def build_config(
     activate_named_app: bool,
     app_inferred: bool = False,
     stats_sink: Callable[[object], None] | None = None,
+    budget_guard: Callable[[], None] | None = None,
 ) -> AgentConfig:
     """Compose the CLI's args into the single immutable config the agent runs.
 
@@ -421,6 +511,8 @@ def build_config(
         confirm_handler=confirm_handler,
         enable_visual_verification=resolve_verify(args),
         enable_vision=getattr(args, "vision", True),
+        enable_set_of_marks=getattr(args, "marks", True),
+        display_id=getattr(args, "display", 0),
         # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
         # on a *real* backend is activated (the simulated backend never touches
         # the host — Law 1). An auto-discovered app is never activated:
@@ -434,6 +526,9 @@ def build_config(
         completion_check=completion_check,
         max_steps=args.max_steps,
         enable_planning=getattr(args, "plan", False),
+        trace_dir=Path(args.trace_dir) if args.trace_dir is not None else None,
+        trace_screenshots=getattr(args, "trace_screenshots", False),
+        budget_guard=budget_guard,
     )
 
 
@@ -583,11 +678,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_tokens: dict[str, int] = {"total": 0}
         run_calls = 0
 
+        run_cost: dict[str, float] = {"usd": 0.0}
+        # Resolved once, before the run: a cost ceiling against a model whose
+        # price is unknown must fail at startup with an actionable message, not
+        # twenty steps in when the guard first tries to evaluate it.
+        price = resolve_cost_price(args)
+
         def stats_sink(call: object) -> None:
             nonlocal run_calls
             run_calls += 1
-            tokens = getattr(call, "total_tokens", 0)
-            run_tokens["total"] += tokens if isinstance(tokens, int) else 0
+            if isinstance(call, ModelCallStats):
+                run_tokens["total"] += call.total_tokens
+                if price is not None:
+                    run_cost["usd"] += call_cost_usd(price, call)
             elapsed = time.monotonic() - run_started_at
             print(
                 f"st : tok_total={run_tokens['total']} elapsed={elapsed:.1f}s calls={run_calls}",
@@ -595,17 +698,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 flush=True,
             )
 
+        budget = RunBudget(
+            deadline_seconds=args.deadline_seconds,
+            max_tokens=args.max_tokens,
+            max_cost_usd=args.max_cost,
+        )
+
+        def budget_guard() -> None:
+            reason = budget_verdict(
+                budget,
+                RunUsage(
+                    elapsed_seconds=time.monotonic() - run_started_at,
+                    total_tokens=run_tokens["total"],
+                    cost_usd=run_cost["usd"],
+                ),
+            )
+            if reason is not None:
+                raise BudgetExceededError(reason)
+
         config = build_config(
             args,
             goal=args.goal,
             activate_named_app=args.real and (named_app or app_inferred_from_goal),
             app_inferred=app_inferred_from_goal and not named_app,
             stats_sink=stats_sink,
+            budget_guard=None if budget.is_unset else budget_guard,
         )
         result = Agent(config).run()
 
         print(f"goal        : {config.goal}")
+        print(f"run_id      : {result.run_id}")
         print(f"app         : {result.app}")
+        if config.trace_dir is not None:
+            print(f"trace       : {config.trace_dir / result.run_id}")
         if config.activate_app_on_start:
             print(f"activated   : {config.app}")
         print(f"steps       : {len(result.state.completed_steps)}")
@@ -654,6 +779,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # obstacle. Report the classified failure rather than a traceback —
         # the kind names what to fix (consent, a wrong app, a dead driver).
         print(f"unrecoverable failure ({exc.failure.kind.value}): {exc}", file=sys.stderr)
+        return 1
+    except BudgetExceededError as exc:
+        # A ceiling the operator set, not a failure of the agent: the run
+        # stopped between steps with its episode and trace already written.
+        print(f"budget stop: {exc}", file=sys.stderr)
         return 1
     except MaxStepsError as exc:
         # The loop hit its step budget without a finish; the user sees why

@@ -121,6 +121,7 @@ To eliminate model hallucinations and ensure weak models always output valid com
 ### Supported Action Types:
 1. `mouse_move`: `{"type": "mouse_move", "x": int, "y": int, "duration_ms": int}` (Moves mouse via Bezier trajectory; `duration_ms` is a floor — the driver scales it with distance so long sweeps stay human-paced).
 2. `mouse_click`: `{"type": "mouse_click", "x": int, "y": int, "button": "left"|"right"|"middle", "click_count": 1|2}`.
+2b. `click_mark`: `{"type": "click_mark", "mark": int, "button": "left"|"right"|"middle", "click_count": 1|2}` (Preferred for anything the AX list names: `mark` is the `[N]` shown beside the element, and the orchestrator resolves it to that element's exact centre in logical points — no image-space rounding. `mouse_click` remains the fallback for targets AX does not list.)
 3. `mouse_drag`: `{"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int}` (Same Bezier kinematics as `mouse_move`).
 4. `mouse_scroll`: `{"type": "mouse_scroll", "dx": int, "dy": int}` (Scrolls **at the current cursor position** — emit a `mouse_move` first when the target matters).
 5. `type_text`: `{"type": "type_text", "text": str, "wpm": int}` (Types text with human-like inter-key delays).
@@ -161,8 +162,11 @@ not?).
 [4. DECIDE]    ──► LLM generates structured Thought + Sub-goal + Action (or a small ordered batch).
        │
 [5. VALIDATE]  ──► Four gates, all before any physical effect: the Permission Guard (Autonomy
-                   Level + destructive-action check), the coordinate gate (image space → screen
-                   points via the snapshot's ScreenMap), the fail-closed display-bounds check, and
+                   Level + destructive-action check, classified from the accessibility title of
+                   the control under the pointer — not from how the model described the click),
+                   the coordinate gate (image space → screen
+                   points via the snapshot's ScreenMap, display origin included), the fail-closed
+                   bounds check against the observed display's own rectangle, and
                    the positional gate — one live window read that catches both focus drift (the
                    target app no longer owns the screen) and decision staleness (the host moved on
                    during the model's turn).
@@ -198,13 +202,21 @@ not?).
        │
 [10. (post-run) DISTILL] ──► After the run completes, analyze the trajectory and synthesize a new
                              reusable Skill if novel. A run ended by max_steps, an unrecoverable
-                             failure, or a kill-switch takeover NEVER distills.
+                             failure, or a kill-switch takeover NEVER distills — but it IS recorded
+                             as a failed episode carrying a retrospective naming why it stopped, so
+                             the work it did before the wall is not thrown away (Law 4.1).
 ```
 
 **Coordinate-space invariant.** There is exactly one conversion between the
 model's image space and the driver's logical screen points, and `ScreenMap`
 owns both directions: `to_image` for everything perception hands the model (AX
-rects included), `to_screen` for every coordinate the model hands back. A
+rects included), `to_screen` for every coordinate the model hands back. The map
+carries the captured display's global origin too, so the conversion is complete
+on a secondary display (`--display N`): the screenshot's (0,0) is that
+display's corner, actuation is global, and no caller can apply the scale and
+forget the shift. The fail-closed bounds gate is evaluated against that
+display's own rectangle, and AX elements on other displays are dropped before
+the model ever sees them. A
 screenshot whose ScreenMap cannot be computed is never shown to the model — a
 frame with an unknown coordinate space produces confidently wrong clicks, which
 is strictly worse than telling the model it is blind.
@@ -243,6 +255,9 @@ computeruse/
 │   │   ├── failures.py        # Failure taxonomy + the bounded recovery ladder (pure)
 │   │   ├── schemas.py         # Pydantic action contracts (discriminated unions, strict typing)
 │   │   ├── prompts.py         # Scaffolding prompts & error-correction injectors
+│   │   ├── untrusted.py       # Screen text as data: <observed_data> framing + escaping
+│   │   ├── trace.py           # Per-step run trace (JSONL + optional step PNGs)
+│   │   ├── budget.py          # Wall-clock / token / cost ceilings for one run
 │   │   ├── planner.py         # Hierarchical goal decomposition + session checkpoints
 │   │   └── client.py          # Typed JSON-RPC client for the Rust driver (Unix socket)
 │   ├── providers/
@@ -252,7 +267,7 @@ computeruse/
 │   │   ├── coordinates.py     # Retina-to-virtual coordinate transformation
 │   │   ├── capture.py         # Display capture (verification only)
 │   │   ├── diff.py            # Pre/post action visual diffing
-│   │   ├── som.py             # Set-of-Marks overlay annotator (unit-tested; not yet wired into OODA)
+│   │   ├── som.py             # Set-of-Marks: AX boxes drawn on the OBSERVE frame + numbered marks
 │   │   └── focus.py           # Focused-app discovery + activation
 │   ├── skills/
 │   │   ├── registry.py        # Summary-index & lazy-loading engine (two-stage retrieval)

@@ -106,11 +106,42 @@ uv run python -m computeruse --goal "..." --model my_module:my_model
 # ... or bring your own state->AgentTurn provider:
 uv run python -m computeruse --goal "..." --provider my_provider:make_provider
 
+# Record what happened: one JSON object per step (decision, action, verification
+# verdict, error) under <trace-dir>/<run_id>/steps.jsonl, plus the frame the
+# model decided from for each step.
+uv run python -m computeruse --goal "..." --model openai --real \
+    --trace-dir ./traces --trace-screenshots
+
+# Work on a display other than the main one. The capture carries that display's
+# global origin, so coordinates read off its screenshot convert back into the
+# space the driver clicks in, and the bounds gate judges them against that
+# display's own rectangle.
+uv run python -m computeruse --goal "..." --real --display 1
+
+# Set-of-Marks is on by default: the AX elements are outlined on the screenshot
+# and numbered [N] in the element list, and the model selects a target with
+# click_mark N (resolved to that element's exact centre). Pass --no-marks to
+# stop drawing the boxes; selecting by mark works either way.
+
+# Ceilings for an unattended run. Checked between steps, so an action in flight
+# always completes; the failure episode and the trace are written before the
+# run stops. --max-cost uses published list prices and only works for a priced
+# --model openai[:id] (a custom transport has no known price — use --max-tokens).
+uv run python -m computeruse --goal "..." --model openai --real \
+    --deadline-seconds 600 --max-tokens 200000 --max-cost 1.50
+
 # Python type-checks (strict) and tests
 uv sync --extra dev
 uv run pyright src/computeruse
-uv run pytest
+uv run pytest                              # requires the built driver (see above)
+uv run pytest --allow-missing-driver       # deliberately skip the driver-backed suite
 ```
+
+Every smoke test drives the real driver over its socket, so `pytest` **fails
+with a usage error** when `driver/target/debug/actuation-driver` is missing
+rather than skipping: a suite that silently skips itself reports success while
+proving nothing. `--allow-missing-driver` is the explicit opt-out, and in CI
+(`CI` set) a run that skips more than 10% of its collected tests fails anyway.
 
 The CLI spawns the driver itself (removing stale sockets), wires the autonomy
 guard, a Ctrl-C kill-switch, visual verification (opt-in — the simulated
