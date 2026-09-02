@@ -181,9 +181,14 @@ COMPLETION_AUDIT_CONTRACT: Final[str] = (
     "  goal is NOT satisfied.\n"
     "- A goal with SEVERAL parts needs evidence for EACH of them, not just the last one. When a\n"
     "  task reads a value in one place and uses it in another, the number now on screen proves the\n"
-    "  arithmetic, NOT that the value was read correctly. If the observed state does not support a\n"
-    "  part of the goal, say which part and answer false — the agent can go back and re-read it.\n"
-    "  Do not let a correct-looking final result stand in for an unchecked input.\n"
+    "  arithmetic, NOT that the value was read correctly. If nothing supports a part of the goal,\n"
+    "  say which part and answer false — the agent can go back and re-read it. Do not let a\n"
+    "  correct-looking final result stand in for an unchecked input.\n"
+    "- Earlier observed text (when provided) is evidence too, and it is how a multi-application\n"
+    "  goal is proved at all: a calculator covers the page whose number it used, so the two facts\n"
+    "  can never be on screen together. That list is read from the machine, not written by the\n"
+    "  agent, so trust it exactly as much as the current screen. The FINAL state must still be\n"
+    "  visible now — use the earlier text only for the parts that have moved out of view.\n"
     "- Accept an unverifiable claim ONLY when the goal has no checkable end state at all (it asked\n"
     "  the agent to read something out to the user, say). A goal whose evidence simply is not on\n"
     "  screen right now is NOT in that category: it is unverified, so answer false.\n"
@@ -639,6 +644,13 @@ def completion_prompt(state: WorkingState, claim: str, *, app: str) -> str:
     if state.ui_elements:
         lines.append("AX UI elements currently on screen:")
         lines.extend(f"- {element}" for element in state.ui_elements)
+    if state.observed_trail:
+        lines.append(
+            "Text observed on screen EARLIER in this run (read from the machine, "
+            "not the agent's account of it) — use it for parts of the goal whose "
+            "evidence is no longer on screen:"
+        )
+        lines.extend(f"- {entry}" for entry in state.observed_trail)
     if state.screenshot_b64:
         lines.append("A screenshot of the current screen is attached — judge from it.")
     lines.append("")

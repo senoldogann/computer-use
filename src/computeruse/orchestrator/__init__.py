@@ -45,7 +45,7 @@ from computeruse.orchestrator.prompts import (
     state_context,
 )
 from computeruse.orchestrator.schemas import AgentTurn
-from computeruse.security.autonomy import (
+from computeruse.security.permissions import (
     PermissionConfirmationRequired,
     PermissionDeniedError,
 )

@@ -3,9 +3,6 @@
 from computeruse.security.autonomy import (
     AutonomyLevel,
     AutonomyPolicy,
-    PermissionConfirmationRequired,
-    PermissionDecision,
-    PermissionDeniedError,
     Risk,
     classify_risk,
     decide_permission,
@@ -15,6 +12,11 @@ from computeruse.security.killswitch import (
     KillSwitch,
     MouseShakeMonitor,
     is_mouse_shake,
+)
+from computeruse.security.permissions import (
+    PermissionConfirmationRequired,
+    PermissionDecision,
+    PermissionDeniedError,
 )
 
 __all__ = [

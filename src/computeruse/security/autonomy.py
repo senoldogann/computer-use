@@ -21,6 +21,7 @@ non-:data:`~PermissionDecision.ALLOW` result raises a typed error there.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -32,6 +33,11 @@ from computeruse.orchestrator.schemas import (
     PressHotkey,
     TypeText,
     Wait,
+)
+from computeruse.security.permissions import (
+    PermissionConfirmationRequired,
+    PermissionDecision,
+    PermissionDeniedError,
 )
 
 
@@ -50,14 +56,6 @@ class Risk(Enum):
     NONE = "none"         # Ordinary navigation / benign.
     ROUTINE = "routine"   # Common but can change state (clicks in dialogs).
     DESTRUCTIVE = "destructive"  # Could delete, pay, install, or dispatch.
-
-
-class PermissionDecision(Enum):
-    """The guard's answer to "may this action run right now?"."""
-
-    ALLOW = "allow"
-    CONFIRM = "confirm"    # Human must approve first (Law 5.1: Pa).
-    BLOCK = "block"        # Denied outright, even at higher autonomy (safety).
 
 
 # Type-text commands that are clearly destructive only when they appear as
@@ -241,8 +239,6 @@ class AutonomyPolicy:
 
         # Normalize punctuation before tokenizing so `delete-file`, `delete_file`,
         # and `delete.` are treated as the same intent marker.
-        import re
-
         normalized = re.sub(r"[^\w\-]+", " ", subject, flags=re.UNICODE)
         words = set(normalized.replace("-", " ").replace("_", " ").split())
         # Tokenise on whitespace so `rm` matches the *word* `rm`, never the
@@ -300,19 +296,16 @@ def decide_permission(level: AutonomyLevel, risk: Risk) -> PermissionDecision:
     return PermissionDecision.ALLOW
 
 
-class PermissionDeniedError(PermissionError):
-    """An action was blocked by the autonomy guard (Law 5).
-
-    Raised by ``OodaRunner`` at the VALIDATE step when the guard returns
-    ``BLOCK``. Distinct from a generic failure so callers can tell "the model
-    did the wrong thing" from "the security policy stopped a dangerous move".
-    """
-
-
-class PermissionConfirmationRequired(PermissionError):
-    """A guarded/destructive action needs human approval before it can run.
-
-    At autonomy levels 1-3 a destructive (or supervised) action must not touch
-    the physical host until a human confirms. This indicates *paused waiting
-    for input*, not a policy violation.
-    """
+#: Re-exported from :mod:`computeruse.security.permissions` so importing them
+#: from here keeps working; the definitions live in that leaf module to keep
+#: this one free to depend on the orchestrator's action schemas.
+__all__ = [
+    "AutonomyLevel",
+    "AutonomyPolicy",
+    "PermissionConfirmationRequired",
+    "PermissionDecision",
+    "PermissionDeniedError",
+    "Risk",
+    "classify_risk",
+    "decide_permission",
+]

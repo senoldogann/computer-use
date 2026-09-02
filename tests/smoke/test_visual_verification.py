@@ -42,9 +42,11 @@ from computeruse.orchestrator.failures import (
     recovery_hint,
 )
 from computeruse.orchestrator.loop import (
+    TRAIL_MAX_CHARS,
     AxProbeResult,
     OodaRunner,
     WorkingState,
+    _extend_trail,
     target_point_of,
     verification_region,
 )
@@ -1004,3 +1006,48 @@ def test_a_silent_region_is_not_a_denial_when_the_screen_moved() -> None:
     final = runner.run(goal="press a key")
     assert final.last_error is None
     assert "step_0:mouse_click" in final.completed_steps
+
+
+# --- evidence that has left the screen ---------------------------------------
+
+
+def test_trail_keeps_one_entry_per_window() -> None:
+    """Revisiting an app replaces its entry instead of appending a duplicate.
+
+    The agent switches back and forth between two applications, so an
+    append-only trail would fill with the same two windows and push out the
+    very evidence it exists to preserve.
+    """
+    chrome = FocusedWindow(pid=1, app_name="Chrome", window_title="Issues · repo")
+    calc = FocusedWindow(pid=2, app_name="Calculator", window_title="Calculator")
+
+    trail = _extend_trail((), chrome, ("StaticText=46 Open",), 6)
+    trail = _extend_trail(trail, calc, ("StaticText=46",), 6)
+    trail = _extend_trail(trail, chrome, ("StaticText=46 Open", "Link=Issues"), 6)
+
+    assert len(trail) == 2
+    # Order still reads as the order things were first seen.
+    assert trail[0].startswith("Issues · repo: ")
+    assert trail[1].startswith("Calculator: ")
+    # The newest reading of a window wins.
+    assert "Link=Issues" in trail[0]
+
+
+def test_trail_is_bounded_and_ignores_empty_observations() -> None:
+    trail: tuple[str, ...] = ()
+    for index in range(10):
+        window = FocusedWindow(pid=index, app_name=f"App{index}", window_title=f"W{index}")
+        trail = _extend_trail(trail, window, (f"StaticText={index}",), 6)
+    assert len(trail) == 6
+    assert trail[-1].startswith("W9: ")
+    # No window, or nothing observed, adds nothing.
+    assert _extend_trail(trail, None, ("x",), 6) == trail
+    assert _extend_trail(trail, FocusedWindow(pid=1, app_name="A"), (), 6) == trail
+
+
+def test_trail_entry_is_length_capped() -> None:
+    """A whole article must not crowd out the audit prompt."""
+    window = FocusedWindow(pid=1, app_name="Reader", window_title="Long")
+    trail = _extend_trail((), window, ("StaticText=" + "x" * 5000,), 6)
+    assert len(trail) == 1
+    assert len(trail[0]) <= len("Long: ") + TRAIL_MAX_CHARS
