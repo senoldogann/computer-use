@@ -13,6 +13,7 @@ import json
 import socket as socket_mod
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -21,12 +22,33 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DRIVER_BIN = REPO_ROOT / "driver" / "target" / "debug" / "actuation-driver"
 SOCKET_PATH = REPO_ROOT / "target" / "driver-test.sock"
 
+#: Registered in the repository-root ``conftest.py`` (pytest only honours
+#: ``pytest_addoption`` in the initial conftests). ``getoption`` raises on an
+#: unknown name, so a rename there fails loudly here instead of silently
+#: re-enabling the skip.
+ALLOW_MISSING_DRIVER = "--allow-missing-driver"
+
+DRIVER_MISSING_MESSAGE = (
+    f"the actuation driver is not built ({DRIVER_BIN} does not exist). "
+    "Every smoke test drives it over a Unix socket, so without it this suite "
+    "proves nothing. Run `cargo build` in driver/, or pass "
+    f"{ALLOW_MISSING_DRIVER} to deliberately skip instead."
+)
+
 
 @pytest.fixture(scope="session", autouse=True)
-def driver() -> subprocess.Popen[str]:
-    """Spawn one real driver for the whole smoke-test session (or skip)."""
+def driver(request: pytest.FixtureRequest) -> Iterator[subprocess.Popen[str]]:
+    """Spawn one real driver for the whole smoke-test session.
+
+    A missing binary ends the session with a usage error rather than skipping.
+    Skipping looked harmless and was not: one absent build artifact turned the
+    whole suite into 331 green skips, so a run that verified nothing was
+    indistinguishable from a run that verified everything.
+    """
     if not DRIVER_BIN.exists():
-        pytest.skip("actuation-driver not built; run `cargo build` in driver/")
+        if request.config.getoption(ALLOW_MISSING_DRIVER):
+            pytest.skip(DRIVER_MISSING_MESSAGE)
+        pytest.exit(reason=DRIVER_MISSING_MESSAGE, returncode=pytest.ExitCode.USAGE_ERROR)
     SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
     if SOCKET_PATH.exists():
         SOCKET_PATH.unlink()

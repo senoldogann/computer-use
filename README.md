@@ -109,8 +109,15 @@ uv run python -m computeruse --goal "..." --provider my_provider:make_provider
 # Python type-checks (strict) and tests
 uv sync --extra dev
 uv run pyright src/computeruse
-uv run pytest
+uv run pytest                              # requires the built driver (see above)
+uv run pytest --allow-missing-driver       # deliberately skip the driver-backed suite
 ```
+
+Every smoke test drives the real driver over its socket, so `pytest` **fails
+with a usage error** when `driver/target/debug/actuation-driver` is missing
+rather than skipping: a suite that silently skips itself reports success while
+proving nothing. `--allow-missing-driver` is the explicit opt-out, and in CI
+(`CI` set) a run that skips more than 10% of its collected tests fails anyway.
 
 The CLI spawns the driver itself (removing stale sockets), wires the autonomy
 guard, a Ctrl-C kill-switch, visual verification (opt-in — the simulated
