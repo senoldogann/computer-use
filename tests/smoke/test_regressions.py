@@ -12,9 +12,16 @@ import time
 import pytest
 
 from computeruse.orchestrator.client import ActuationClient
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.loop import (
+    MaxStepsError,
+    OodaRunner,
+    UnrecoverableFailureError,
+    WorkingState,
+)
+from computeruse.orchestrator.prompts import InvalidDecisionError
 from computeruse.orchestrator.schemas import (
     AgentTurn,
+    Finish,
     MouseClick,
     MouseMove,
     PressHotkey,
@@ -205,3 +212,53 @@ def test_timeout_drops_the_socket_instead_of_desyncing_it() -> None:
     finally:
         server.close()
         client.close()
+
+
+def test_a_malformed_model_turn_does_not_kill_the_run() -> None:
+    """One unusable reply must cost a step, not the whole run.
+
+    Observed live: on step 20 of a 30-step goal the model returned no parseable
+    JSON, the error escaped the loop, and the process died with a traceback —
+    discarding twenty steps of correct work. A model that returns nothing
+    usable is a failure like any other and climbs the same finite ladder.
+    """
+    turns: list[int] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        turns.append(state.step_index)
+        if len(turns) == 1:
+            raise InvalidDecisionError(
+                cause="no JSON object found in the reply",
+                hint="reply with one JSON object",
+            )
+        return AgentTurn(
+            thought="recovered",
+            sub_goal="finish",
+            action=Finish(type="finish", status="success", summary="done"),
+        )
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _action: None,
+        max_steps=5,
+    )
+    final = runner.run(goal="survive a bad turn")
+    assert len(turns) == 2
+    # The bad turn is visible to the model as a recoverable error, and the run
+    # still finishes.
+    assert "step_1:finish" in final.completed_steps or final.completed_steps
+
+
+def test_repeated_malformed_turns_still_terminate() -> None:
+    """The ladder must stay finite: never a run that loops on a broken model."""
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        raise InvalidDecisionError(cause="garbage", hint="reply with JSON")
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _action: None,
+        max_steps=50,
+    )
+    with pytest.raises((UnrecoverableFailureError, MaxStepsError)):
+        runner.run(goal="never gets a decision")

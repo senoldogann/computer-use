@@ -42,13 +42,16 @@ from computeruse.orchestrator.failures import (
     recovery_hint,
 )
 from computeruse.orchestrator.loop import (
+    TRAIL_MAX_CHARS,
     AxProbeResult,
     OodaRunner,
     WorkingState,
+    _extend_trail,
     target_point_of,
     verification_region,
 )
 from computeruse.orchestrator.schemas import (
+    Action,
     ActivateApp,
     AgentTurn,
     ClipboardPaste,
@@ -968,3 +971,83 @@ def test_diagnosis_distinguishes_a_miss_from_an_idempotent_hit() -> None:
     assert "already in the state you want" in hit
     # The advice must not contradict itself.
     assert "re-derive" not in hit
+
+
+def test_a_silent_region_is_not_a_denial_when_the_screen_moved() -> None:
+    """The effect of an action is very often outside the box around the cursor.
+
+    Pressing a calculator key updates the display at the top of the window;
+    following a link repaints the page below the toolbar. Measured on
+    Calculator, the 48-point region reported "unchanged" for every one of three
+    correct button presses — and as a CONTRADICTED vote it was half of the pair
+    needed to call an action failed. Only a screen that is still *everywhere*
+    is evidence of a miss.
+    """
+    screen = FakeScreen()
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(MouseClick(type="mouse_click", x=5, y=5))
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    def execute(_action: Action) -> None:
+        # The action's effect lands in the far corner, outside the 48-point box
+        # around the click — exactly like a calculator display or a page body.
+        screen.paint(Rect(Point(50, 32), Size(10, 4)))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=execute,
+        sensor=screen.sensor,
+        verify_enabled=True,
+        ax_probe=None,  # pixels are the only witness, so its verdict decides
+        max_steps=5,
+    )
+    final = runner.run(goal="press a key")
+    assert final.last_error is None
+    assert "step_0:mouse_click" in final.completed_steps
+
+
+# --- evidence that has left the screen ---------------------------------------
+
+
+def test_trail_keeps_one_entry_per_window() -> None:
+    """Revisiting an app replaces its entry instead of appending a duplicate.
+
+    The agent switches back and forth between two applications, so an
+    append-only trail would fill with the same two windows and push out the
+    very evidence it exists to preserve.
+    """
+    chrome = FocusedWindow(pid=1, app_name="Chrome", window_title="Issues · repo")
+    calc = FocusedWindow(pid=2, app_name="Calculator", window_title="Calculator")
+
+    trail = _extend_trail((), chrome, ("StaticText=46 Open",), 6)
+    trail = _extend_trail(trail, calc, ("StaticText=46",), 6)
+    trail = _extend_trail(trail, chrome, ("StaticText=46 Open", "Link=Issues"), 6)
+
+    assert len(trail) == 2
+    # Order still reads as the order things were first seen.
+    assert trail[0].startswith("Issues · repo: ")
+    assert trail[1].startswith("Calculator: ")
+    # The newest reading of a window wins.
+    assert "Link=Issues" in trail[0]
+
+
+def test_trail_is_bounded_and_ignores_empty_observations() -> None:
+    trail: tuple[str, ...] = ()
+    for index in range(10):
+        window = FocusedWindow(pid=index, app_name=f"App{index}", window_title=f"W{index}")
+        trail = _extend_trail(trail, window, (f"StaticText={index}",), 6)
+    assert len(trail) == 6
+    assert trail[-1].startswith("W9: ")
+    # No window, or nothing observed, adds nothing.
+    assert _extend_trail(trail, None, ("x",), 6) == trail
+    assert _extend_trail(trail, FocusedWindow(pid=1, app_name="A"), (), 6) == trail
+
+
+def test_trail_entry_is_length_capped() -> None:
+    """A whole article must not crowd out the audit prompt."""
+    window = FocusedWindow(pid=1, app_name="Reader", window_title="Long")
+    trail = _extend_trail((), window, ("StaticText=" + "x" * 5000,), 6)
+    assert len(trail) == 1
+    assert len(trail[0]) <= len("Long: ") + TRAIL_MAX_CHARS

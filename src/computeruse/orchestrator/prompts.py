@@ -167,8 +167,17 @@ COMPLETION_AUDIT_CONTRACT: Final[str] = (
     "Decide one thing: does the current state show that the goal is complete?\n"
     "\n"
     "Rules:\n"
-    "- Judge the OBSERVED STATE, not the agent's story. Whether its reasoning sounds plausible is\n"
-    "  irrelevant; whether the machine is in the goal state is everything.\n"
+    "- Judge the observed state against the GOAL — never against the agent's claim. The claim is\n"
+    "  shown only so you know what is being asserted; agreeing that the screen matches the claim\n"
+    "  is NOT verification, it is a tautology. A claim of \"the result is 102789\" beside a display\n"
+    "  reading 102789 tells you nothing about whether 102789 was the right answer.\n"
+    "- If the goal states a computation, a comparison or any other relationship, CHECK IT against\n"
+    "  the numbers you can observe. Do the arithmetic yourself. A goal of \"multiply that count by\n"
+    "  three\" is satisfied only when the displayed value really is three times the count — a\n"
+    "  wrong answer displayed confidently is the single most common way an agent fails.\n"
+    "- Leftover state counts against the claim: a field or display still carrying digits from\n"
+    "  earlier work has not been cleared, and a value built on top of it is wrong even if the\n"
+    "  agent believes otherwise.\n"
     "- The screenshot AND the AX element list are both observed state, and they are complementary.\n"
     "  The AX list is authoritative for things a picture reports poorly — the exact text in a field,\n"
     "  which control has focus, the title of a window. The screenshot is authoritative for layout and\n"
@@ -179,8 +188,19 @@ COMPLETION_AUDIT_CONTRACT: Final[str] = (
     "- The agent having performed reasonable actions is NOT evidence. The resulting state is.\n"
     "- If the state shows work in progress, a loading indicator, an error, or an unrelated view, the\n"
     "  goal is NOT satisfied.\n"
-    "- If the goal is inherently unverifiable from the machine state (e.g. it asked you to read\n"
-    "  something out) and nothing contradicts the claim, accept it.\n"
+    "- A goal with SEVERAL parts needs evidence for EACH of them, not just the last one. When a\n"
+    "  task reads a value in one place and uses it in another, the number now on screen proves the\n"
+    "  arithmetic, NOT that the value was read correctly. If nothing supports a part of the goal,\n"
+    "  say which part and answer false — the agent can go back and re-read it. Do not let a\n"
+    "  correct-looking final result stand in for an unchecked input.\n"
+    "- Earlier observed text (when provided) is evidence too, and it is how a multi-application\n"
+    "  goal is proved at all: a calculator covers the page whose number it used, so the two facts\n"
+    "  can never be on screen together. That list is read from the machine, not written by the\n"
+    "  agent, so trust it exactly as much as the current screen. The FINAL state must still be\n"
+    "  visible now — use the earlier text only for the parts that have moved out of view.\n"
+    "- Accept an unverifiable claim ONLY when the goal has no checkable end state at all (it asked\n"
+    "  the agent to read something out to the user, say). A goal whose evidence simply is not on\n"
+    "  screen right now is NOT in that category: it is unverified, so answer false.\n"
     "- Be strict but not pedantic: cosmetic differences from the goal's wording do not make a\n"
     "  completed task incomplete.\n"
     "\n"
@@ -633,6 +653,13 @@ def completion_prompt(state: WorkingState, claim: str, *, app: str) -> str:
     if state.ui_elements:
         lines.append("AX UI elements currently on screen:")
         lines.extend(f"- {element}" for element in state.ui_elements)
+    if state.observed_trail:
+        lines.append(
+            "Text observed on screen EARLIER in this run (read from the machine, "
+            "not the agent's account of it) — use it for parts of the goal whose "
+            "evidence is no longer on screen:"
+        )
+        lines.extend(f"- {entry}" for entry in state.observed_trail)
     if state.screenshot_b64:
         lines.append("A screenshot of the current screen is attached — judge from it.")
     lines.append("")

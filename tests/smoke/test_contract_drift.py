@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -121,3 +124,47 @@ def test_panel_brand_is_left_aligned_without_traffic_light_lane() -> None:
     for button in ["CloseButton", "MiniaturizeButton", "ZoomButton"]:
         assert button in menu_rs, f"menu.rs must hide the {button}"
     assert "setHidden: true" in menu_rs, "the hidden traffic lights must be hidden"
+
+def test_every_module_imports_first(tmp_path: Path) -> None:
+    """No module may require another to be imported before it.
+
+    `security.autonomy` classifies actions, so it imports the orchestrator's
+    schemas; the orchestrator's loop enforces the resulting verdict, so it
+    imported `security.autonomy` back. The cycle was invisible because every
+    entry point happened to reach the orchestrator first — but
+    `import computeruse.security.autonomy` on its own raised ImportError, and
+    so did anything a consumer imported before touching the orchestrator.
+
+    A fresh interpreter per module is the only honest check: within one
+    process the first successful import hides every ordering problem behind it.
+    """
+    modules = [
+        "computeruse",
+        "computeruse.agent",
+        "computeruse.cli",
+        "computeruse.memory",
+        "computeruse.orchestrator",
+        "computeruse.orchestrator.evidence",
+        "computeruse.orchestrator.failures",
+        "computeruse.orchestrator.loop",
+        "computeruse.orchestrator.planner",
+        "computeruse.orchestrator.prompts",
+        "computeruse.security",
+        "computeruse.security.autonomy",
+        "computeruse.security.killswitch",
+        "computeruse.security.permissions",
+        "computeruse.skills.registry",
+        "computeruse.vision",
+        "computeruse.vision.ax",
+    ]
+    failures: list[str] = []
+    for module in modules:
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {module}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            failures.append(f"{module}: {result.stderr.strip().splitlines()[-1]}")
+    assert not failures, "modules that cannot be imported first:\n" + "\n".join(failures)

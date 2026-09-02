@@ -75,12 +75,12 @@ from computeruse.orchestrator.schemas import (
     MouseScroll,
     Wait,
 )
-from computeruse.security.autonomy import (
+from computeruse.security.killswitch import KillSwitch
+from computeruse.security.permissions import (
     PermissionConfirmationRequired,
     PermissionDecision,
     PermissionDeniedError,
 )
-from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
@@ -223,6 +223,14 @@ class WorkingState:
     skill: SkillDefinition | None = None
     # Multimodal visual perception: base64-encoded PNG of current display
     screenshot_b64: str | None = None
+    #: Machine-observed facts from earlier in this run, oldest first — one
+    #: entry per window the agent has actually been looking at, carrying that
+    #: window's visible text at the time. This is *observed state*, not the
+    #: model's account of it, which is why the completion auditor may read it:
+    #: a goal spanning two applications has evidence that cannot all be on
+    #: screen at once (a calculator covers the page whose number it used), and
+    #: without a record of what the machine showed, such a goal is unprovable.
+    observed_trail: tuple[str, ...] = ()
     # Hierarchical strategic plan (Phase 3): the decomposed sub-goal roadmap
     # the provider sees every turn. None when planning is disabled or the
     # goal needs no decomposition. Typed, never ``object`` (Law 6.2).
@@ -428,6 +436,43 @@ def verification_region(target: Point, *, size: float = 48.0) -> Rect:
         raise ValueError(f"region size must be positive, got {size}")
     half = size / 2.0
     return Rect(Point(target.x - half, target.y - half), Size(size, size))
+
+
+#: How many distinct windows of observed evidence to carry. Enough to span a
+#: two- or three-application task, small enough that the audit prompt stays a
+#: second opinion rather than a transcript.
+TRAIL_MAX_ENTRIES: Final[int] = 6
+#: Characters of visible text kept per window. A count, a title or a status
+#: line fits comfortably; a whole article does not, and should not.
+TRAIL_MAX_CHARS: Final[int] = 600
+
+
+def _extend_trail(
+    trail: tuple[str, ...],
+    window: FocusedWindow | None,
+    content: tuple[str, ...],
+    max_entries: int,
+) -> tuple[str, ...]:
+    """Append this observation's evidence, one entry per window (pure).
+
+    Keyed by window so revisiting an app *replaces* its entry rather than
+    appending a near-duplicate: the agent switches back and forth, and a trail
+    full of the same two windows would push out the very evidence it exists to
+    preserve. The newest observation of a window wins, and the window keeps its
+    original position so the order still reads as the order things were seen.
+    """
+    if window is None or not content:
+        return trail
+    title = window.window_title or window.app_name
+    if not title:
+        return trail
+    text = " | ".join(content)[:TRAIL_MAX_CHARS]
+    entry = f"{title}: {text}"
+    prefix = f"{title}: "
+    replaced = tuple(entry if line.startswith(prefix) else line for line in trail)
+    if replaced != trail or any(line.startswith(prefix) for line in trail):
+        return replaced
+    return (*trail, entry)[-max_entries:]
 
 
 def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
@@ -713,7 +758,22 @@ class OodaRunner:
             # The provider decides against exactly this snapshot; remember the
             # window it describes so ACT can detect the host moving underneath.
             self._decision_window = self._decision_window_of(self._observation)
-            decision = self.provider(state)
+            try:
+                decision = self.provider(state)
+            except KillSwitchTripped:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a bad turn is recoverable
+                # A model that returns nothing usable is a failure like any
+                # other, not the end of the run. The scaffolding already
+                # retries with corrective hints; when even those are exhausted
+                # the ladder gets its turn — RETRY, then ALTERNATE, then
+                # REPLAN, then ABORT. Observed before this: one malformed reply
+                # on step 20 of a 30-step run killed the process with a
+                # traceback, discarding twenty steps of correct work.
+                hint = self._register_failure(exc, None, goal)
+                state = replace(state, last_error=hint)
+                LOGGER.warning("ooda provider turn failed: %s", hint)
+                continue
             if decision.thought:
                 LOGGER.info("ooda thought: %s", decision.thought)
             if decision.sub_goal:
@@ -1060,7 +1120,20 @@ class OodaRunner:
             # a change, but not one this region diff can quantify.
             return Evidence.CONFIRMED
         verification = verify_capture_region(before, after, verification_region(target))
-        return Evidence.CONFIRMED if verification.changed else Evidence.CONTRADICTED
+        if verification.changed:
+            return Evidence.CONFIRMED
+        # A silent region is not a denial. The box is 48 points around the
+        # cursor, but an action's visible effect very often lands somewhere
+        # else entirely: pressing a calculator key updates the display at the
+        # top of the window, following a link repaints the page below the
+        # toolbar. Measured on Calculator, this region reported "unchanged" for
+        # every one of three correct button presses — and as a CONTRADICTED
+        # vote it was one half of the pair needed to call an action failed.
+        # Before claiming nothing happened, look at the whole frame; only when
+        # the screen is still everywhere is silence real evidence of a miss.
+        if coarse_fingerprint(before) != coarse_fingerprint(after):
+            return Evidence.INCONCLUSIVE
+        return Evidence.CONTRADICTED
 
     def _probe_app_identity(self) -> tuple[str | None, str]:
         """The frontmost app's localized name and its bundle id (best effort).
@@ -1274,8 +1347,13 @@ class OodaRunner:
     # RECOVER
     # ------------------------------------------------------------------
 
-    def _register_failure(self, exc: Exception, action: Action, goal: str) -> str:
+    def _register_failure(self, exc: Exception, action: Action | None, goal: str) -> str:
         """Classify a failure, advance its ladder rung, and build the hint.
+
+        ``action`` is ``None`` when the failure happened before there was one —
+        a model turn that produced nothing usable. The failure is otherwise
+        handled identically, so a bad turn climbs the same finite ladder as a
+        bad click instead of escaping the loop.
 
         Raises :class:`UnrecoverableFailureError` when the ladder is exhausted
         — the guarantee that one obstacle can never consume a whole run.
@@ -1424,6 +1502,9 @@ class OodaRunner:
             ui_elements=ui_elements,
             open_tabs=open_tabs,
             screenshot_b64=screenshot_b64 if self.vision_enabled else None,
+            observed_trail=_extend_trail(
+                state.observed_trail, window, content, TRAIL_MAX_ENTRIES
+            ),
         )
 
     def _capture_frame(

@@ -20,8 +20,10 @@ import pytest
 from computeruse.agent import Agent, AgentConfig
 from computeruse.orchestrator.loop import WorkingState
 from computeruse.orchestrator.prompts import (
+    COMPLETION_AUDIT_CONTRACT,
     InvalidDecisionError,
     _call_model,
+    completion_prompt,
     decision_prompt,
     parse_decision,
     scaffolded_provider,
@@ -399,3 +401,35 @@ def test_completion_auditor_reads_the_attached_screenshot() -> None:
     )
     assert verdict.satisfied is False
     assert seen[0][1] == "PNGDATA"
+
+
+def test_audit_contract_forbids_agreeing_with_the_claim() -> None:
+    """The auditor must check the goal, not echo the agent.
+
+    Observed live: the agent computed 102789 where 46 x 3 = 138, and the audit
+    passed because the display "matched the claimed computed result" — a
+    tautology. The claim is in the prompt only so the auditor knows what is
+    asserted; the verdict must come from the goal.
+    """
+    contract = COMPLETION_AUDIT_CONTRACT.lower()
+    assert "never against the agent's claim" in contract
+    assert "tautology" in contract
+    # A stated computation must actually be checked, not assumed.
+    assert "do the arithmetic yourself" in contract
+    assert "leftover state" in contract
+
+
+def test_audit_prompt_carries_observed_trail_but_not_agent_reasoning() -> None:
+    """Earlier evidence is machine-observed; the agent's story stays out."""
+    state = WorkingState(
+        goal="read the count, then triple it",
+        active_window="Calculator",
+        observed_trail=("Issues · repo: StaticText=46 Open",),
+        completed_steps=("step_0:mouse_click",),
+        last_error="something the actor believed",
+    )
+    prompt = completion_prompt(state, claim="the display shows 138", app="Calculator")
+    assert "StaticText=46 Open" in prompt
+    # The acting model's own history and beliefs must not contaminate the read.
+    assert "step_0:mouse_click" not in prompt
+    assert "something the actor believed" not in prompt
