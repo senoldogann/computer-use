@@ -6,13 +6,21 @@ vision model. The badges are *plain colored squares* — the model matches the
 highlighted region to the AX summary list; no digits are drawn (the legacy
 "numbered badges" wording was wrong — L8).
 
-Status: this module is currently exercised by its unit tests only; wiring it
-into the OODA OBSERVE pipeline (annotating the screenshot the provider sees)
-is an explicit next step, not yet implemented — the module's docstring must
-not overclaim.
+The OBSERVE step annotates the screenshot map with these boxes before encoding
+it, and the AX list the model reads is numbered with the same indices — so a
+highlighted region on screen and a line in the list are the same mark, and the
+model can select a target by its number (``click_mark``) instead of estimating
+a coordinate.
+
+No digits are drawn into the image, deliberately. The frame reaches the model
+at OpenAI ``detail: "low"`` — the whole screenshot is about 85 tokens — where a
+glyph a few pixels tall is not resolvable at all. The number lives in the text
+list, which is exact and free; the drawing's job is to show *which* regions are
+grounded, and a coloured box survives that resolution where a numeral does not.
 
 Benefits:
-- Eliminates coordinate hallucinations on high-resolution Retina displays.
+- A mark resolves to the element's own centre in logical points, so a click by
+  mark skips image-space rounding entirely (~3.3 points per image pixel).
 - Lets weak and strong models refer to visually grounded element regions.
 - Pure pixel transformations with zero external heavy dependencies.
 """
@@ -59,11 +67,16 @@ def parse_ax_elements_to_marks(ui_elements: tuple[str, ...]) -> tuple[MarkElemen
             w = float(match.group(3))
             h = float(match.group(4))
             role = summary.split()[0] if summary else "Element"
+            # ``element_summary`` reports each element at its CENTRE (a click
+            # at an element's corner sits on its boundary, where any rounding
+            # lands outside it), so the box has to be rebuilt around that
+            # point. Reading it as an origin drew every mark half an element
+            # down and to the right of the thing it was marking.
             marks.append(
                 MarkElement(
                     index=i,
                     label=summary,
-                    rect=Rect(Point(x, y), Size(w, h)),
+                    rect=Rect(Point(x - w / 2, y - h / 2), Size(w, h)),
                     role=role,
                 )
             )

@@ -124,6 +124,10 @@ class AgentConfig:
     # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
     # entirely — a run pays nothing for a diagnostic nobody asked for.
     trace_dir: Path | None = None
+    # Whether the OBSERVE screenshot is annotated with the AX element boxes
+    # (Set-of-Marks). ``click_mark`` itself does not depend on this — it reads
+    # the element list, which exists with vision off entirely.
+    enable_set_of_marks: bool = True
     # Whether each traced step also saves the exact frame the model decided
     # from. Off by default: a thirty-step run is thirty PNGs, which is the
     # right trade only when someone is actually looking at them.
@@ -469,6 +473,7 @@ class Agent:
                 ),
                 verify_enabled=self._config.enable_visual_verification,
                 vision_enabled=self._config.enable_vision,
+                set_of_marks_enabled=self._config.enable_set_of_marks,
                 window_probe=window_probe,
                 ax_probe=ax_probe,
                 # ADR-2 semantic postcondition: the focused field's AXValue

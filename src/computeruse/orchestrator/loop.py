@@ -68,6 +68,7 @@ from computeruse.orchestrator.schemas import (
     Action,
     ActivateApp,
     AgentTurn,
+    ClickMark,
     Finish,
     LoadSkill,
     MouseClick,
@@ -110,6 +111,11 @@ from computeruse.vision.coordinates import (
     Size,
 )
 from computeruse.vision.focus import FocusedWindow, window_summary
+from computeruse.vision.som import (
+    MarkElement,
+    annotate_set_of_marks,
+    parse_ax_elements_to_marks,
+)
 
 if TYPE_CHECKING:
     # Type-only import: memory.schemas imports orchestrator.schemas, whose
@@ -361,6 +367,36 @@ def scale_action_coordinates(action: Action, factor: float) -> Action:
     return action
 
 
+def resolve_mark(action: Action, marks: tuple[MarkElement, ...]) -> Action:
+    """Turn a mark selection into a click on that element's centre (pure).
+
+    The point of the mark channel: the returned click is already in logical
+    screen points, taken from the accessibility rect itself, so it never passes
+    through the image-space conversion the model's own coordinates need. On a
+    Retina display that conversion is ~3.3 points per image pixel, which is
+    most of a link's height — the single largest source of near-misses.
+
+    Non-mark actions pass through untouched. An unknown mark raises rather
+    than clicking somewhere plausible: the model picked a number that does not
+    name anything, and guessing which element it meant is how an agent clicks
+    the wrong thing confidently.
+    """
+    if not isinstance(action, ClickMark):
+        return action
+    for mark in marks:
+        if mark.index == action.mark:
+            centre_x = mark.rect.origin.x + mark.rect.size.width / 2
+            centre_y = mark.rect.origin.y + mark.rect.size.height / 2
+            return MouseClick(
+                type="mouse_click",
+                x=max(0, round(centre_x)),
+                y=max(0, round(centre_y)),
+                button=action.button,
+                click_count=action.click_count,
+            )
+    raise UnknownMarkError(requested=action.mark, available=len(marks))
+
+
 def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REPEAT_TOLERANCE_PX) -> bool:
     """True when two actions are the *same intent* within a coordinate tolerance.
 
@@ -584,6 +620,11 @@ class Observation:
     open_tabs: tuple[str, ...]
     #: Change-tolerant layout signature used for progress and staleness.
     signature: str
+    #: The AX elements as numbered marks, in *logical screen points*, indexed
+    #: exactly as the model sees them listed. This is what a ``click_mark``
+    #: resolves against, so a selected target lands on the element's own centre
+    #: rather than on a coordinate estimated from a 3x-downscaled image.
+    marks: tuple[MarkElement, ...] = ()
 
     @property
     def app_name(self) -> str | None:
@@ -679,6 +720,11 @@ class OodaRunner:
     # Whether ``sensor`` is used for the multimodal OBSERVE screenshot that
     # the provider sees each turn. Off = no screenshot is attached.
     vision_enabled: bool = False
+    # Whether the OBSERVE screenshot is annotated with the AX element boxes
+    # (Set-of-Marks). Independent of ``click_mark``, which works off the
+    # element list and stays available with vision off entirely — this only
+    # controls what is drawn onto the picture.
+    set_of_marks_enabled: bool = True
     window_probe: Callable[[], FocusedWindow] | None = None
     ax_probe: Callable[[], AxProbeResult] | None = None
     # Semantic postcondition probe for typed/pasted text: returns the focused
@@ -970,6 +1016,14 @@ class OodaRunner:
                     )
                 }
             )
+        # Mark selection resolves *after* the coordinate gate, never before: a
+        # mark already carries the element's rect in screen points, and scaling
+        # it a second time would send the click a third of the way up the
+        # display. ``scale_action_coordinates`` leaves a ``click_mark``
+        # untouched precisely so this ordering is safe.
+        decision = decision.model_copy(
+            update={"action": resolve_mark(decision.action, self._observation.marks)}
+        )
         # Law 5.1 VALIDATE: the permission guard sees every proposed action
         # *before* it becomes physical, and can hard-stop a dangerous move.
         # Deliberately outside the recovery handler: a policy denial is the
@@ -1639,7 +1693,7 @@ class OodaRunner:
         screen_map = previous.screen_map
         signature = previous.signature
         if self.sensor is not None:
-            captured = self._capture_frame()
+            captured = self._capture_frame(raw_ui_elements)
             if captured is not None:
                 frame, screenshot_b64, screen_map = captured
                 signature = coarse_fingerprint(frame)
@@ -1648,11 +1702,7 @@ class OodaRunner:
         # logical points and are rewritten into the image space the model reads
         # coordinates from, so a coordinate picked from either source converts
         # back with the same map.
-        ui_elements = raw_ui_elements
-        if screen_map is not None and not screen_map.is_identity and raw_ui_elements:
-            ui_elements = summaries_to_image_space(
-                raw_ui_elements, screen_map.points_per_pixel
-            )
+        ui_elements = self._image_space(raw_ui_elements, screen_map)
 
         self._observation = Observation(
             frame=frame,
@@ -1664,6 +1714,10 @@ class OodaRunner:
             content=content,
             open_tabs=open_tabs,
             signature=signature,
+            # Marks come from the *logical* summaries: a resolved mark is a
+            # click in screen points, and the model's [N] indices line up
+            # because the image-space rewrite preserves order and count.
+            marks=parse_ax_elements_to_marks(raw_ui_elements),
         )
         active_window = window_summary(window) if window is not None else state.active_window
         return replace(
@@ -1677,8 +1731,18 @@ class OodaRunner:
             ),
         )
 
+    @staticmethod
+    def _image_space(
+        summaries: tuple[str, ...], screen_map: ScreenMap | None
+    ) -> tuple[str, ...]:
+        """AX summaries rewritten into the model's image space (pure)."""
+        if screen_map is None or screen_map.is_identity or not summaries:
+            return summaries
+        return summaries_to_image_space(summaries, screen_map.points_per_pixel)
+
     def _capture_frame(
         self,
+        raw_ui_elements: tuple[str, ...],
     ) -> tuple[ScreenCapture, str | None, ScreenMap] | None:
         """Capture one frame and derive the model's map from it.
 
@@ -1705,10 +1769,22 @@ class OodaRunner:
         screen_map = screen_map_of(logical, mapped)
         if not self.vision_enabled:
             return capture, None, screen_map
-        fingerprint = frame_fingerprint(capture)
+        # Set-of-Marks: draw the grounded elements onto the map the model sees,
+        # so a numbered line in the AX list and a highlighted region on screen
+        # are visibly the same thing. The marks are part of the cache key —
+        # identical pixels with a changed element list must be re-encoded, or
+        # the model would be handed boxes describing the previous screen.
+        marks = (
+            parse_ax_elements_to_marks(self._image_space(raw_ui_elements, screen_map))
+            if self.set_of_marks_enabled
+            else ()
+        )
+        fingerprint = f"{frame_fingerprint(capture)}|{hash(marks)}"
         if fingerprint == self._last_capture_hash and self._last_screenshot_b64 is not None:
             return capture, self._last_screenshot_b64, screen_map
-        screenshot_b64 = capture_to_base64_png(mapped)
+        screenshot_b64 = capture_to_base64_png(
+            annotate_set_of_marks(mapped, marks) if marks else mapped
+        )
         self._last_capture_hash = fingerprint
         self._last_screenshot_b64 = screenshot_b64
         return capture, screenshot_b64, screen_map
@@ -1990,6 +2066,26 @@ class OodaRunner:
             LOGGER.warning("skill load failed: %s", exc)
             return state
         return replace(state, skill=self._skill)
+
+
+class UnknownMarkError(RuntimeError):
+    """A ``click_mark`` named an index that is not in the current element list.
+
+    Recoverable like any other bad decision: the list is re-derived every turn
+    (elements appear, disappear and renumber as the screen changes), so the
+    honest answer is to re-read it, not to click the nearest plausible thing.
+    """
+
+    def __init__(self, *, requested: int, available: int) -> None:
+        self.requested = requested
+        self.available = available
+        listed = f"1-{available}" if available else "none are listed right now"
+        super().__init__(
+            f"click_mark referred to mark {requested}, which is not in the "
+            f"current AX element list ({listed}). The list is re-derived every "
+            "turn, so re-read it and use a number it actually shows — or click "
+            "a coordinate from the screenshot if the target is not listed"
+        )
 
 
 def failure_retrospective(exc: BaseException) -> str:

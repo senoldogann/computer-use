@@ -37,6 +37,23 @@ class MouseClick(BaseModel):
     click_count: Literal[1, 2] = 1
 
 
+class ClickMark(BaseModel):
+    """Click a numbered element from the AX list, by its mark (ADR-2).
+
+    The reliable way to hit a target the accessibility tree already knows
+    about. A coordinate the model reads off the screenshot is a guess through
+    a lossy channel — the map is roughly 3.3 logical points per image pixel, so
+    a 12-point-tall link is under four pixels — while a mark resolves to that
+    element's own centre in logical points, exactly. ``mouse_click`` remains
+    for everything the AX list does not cover.
+    """
+
+    type: Literal["click_mark"]
+    mark: int = Field(ge=1, description="Index shown as [N] in the AX element list.")
+    button: Literal["left", "right", "middle"] = "left"
+    click_count: Literal[1, 2] = 1
+
+
 class MouseDrag(BaseModel):
     type: Literal["mouse_drag"]
     start_x: int = Field(ge=0)
@@ -96,6 +113,7 @@ class Finish(BaseModel):
 Action = (
     MouseMove
     | MouseClick
+    | ClickMark
     | MouseDrag
     | MouseScroll
     | TypeText

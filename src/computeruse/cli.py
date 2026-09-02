@@ -144,6 +144,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "written to --store/checkpoints for resumability.",
     )
     parser.add_argument(
+        "--marks",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Outline the accessibility elements on the screenshot the model "
+        "sees (Set-of-Marks), so a numbered element in the AX list and a "
+        "region on screen are visibly the same thing. Selecting a target by "
+        "mark works either way; this only controls the drawing.",
+    )
+    parser.add_argument(
         "--deadline-seconds",
         type=float,
         default=None,
@@ -494,6 +503,7 @@ def build_config(
         confirm_handler=confirm_handler,
         enable_visual_verification=resolve_verify(args),
         enable_vision=getattr(args, "vision", True),
+        enable_set_of_marks=getattr(args, "marks", True),
         # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
         # on a *real* backend is activated (the simulated backend never touches
         # the host — Law 1). An auto-discovered app is never activated:

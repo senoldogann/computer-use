@@ -112,6 +112,11 @@ uv run python -m computeruse --goal "..." --provider my_provider:make_provider
 uv run python -m computeruse --goal "..." --model openai --real \
     --trace-dir ./traces --trace-screenshots
 
+# Set-of-Marks is on by default: the AX elements are outlined on the screenshot
+# and numbered [N] in the element list, and the model selects a target with
+# click_mark N (resolved to that element's exact centre). Pass --no-marks to
+# stop drawing the boxes; selecting by mark works either way.
+
 # Ceilings for an unattended run. Checked between steps, so an action in flight
 # always completes; the failure episode and the trace are written before the
 # run stops. --max-cost uses published list prices and only works for a priced

@@ -121,6 +121,7 @@ To eliminate model hallucinations and ensure weak models always output valid com
 ### Supported Action Types:
 1. `mouse_move`: `{"type": "mouse_move", "x": int, "y": int, "duration_ms": int}` (Moves mouse via Bezier trajectory; `duration_ms` is a floor — the driver scales it with distance so long sweeps stay human-paced).
 2. `mouse_click`: `{"type": "mouse_click", "x": int, "y": int, "button": "left"|"right"|"middle", "click_count": 1|2}`.
+2b. `click_mark`: `{"type": "click_mark", "mark": int, "button": "left"|"right"|"middle", "click_count": 1|2}` (Preferred for anything the AX list names: `mark` is the `[N]` shown beside the element, and the orchestrator resolves it to that element's exact centre in logical points — no image-space rounding. `mouse_click` remains the fallback for targets AX does not list.)
 3. `mouse_drag`: `{"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int}` (Same Bezier kinematics as `mouse_move`).
 4. `mouse_scroll`: `{"type": "mouse_scroll", "dx": int, "dy": int}` (Scrolls **at the current cursor position** — emit a `mouse_move` first when the target matters).
 5. `type_text`: `{"type": "type_text", "text": str, "wpm": int}` (Types text with human-like inter-key delays).
@@ -259,7 +260,7 @@ computeruse/
 │   │   ├── coordinates.py     # Retina-to-virtual coordinate transformation
 │   │   ├── capture.py         # Display capture (verification only)
 │   │   ├── diff.py            # Pre/post action visual diffing
-│   │   ├── som.py             # Set-of-Marks overlay annotator (unit-tested; not yet wired into OODA)
+│   │   ├── som.py             # Set-of-Marks: AX boxes drawn on the OBSERVE frame + numbered marks
 │   │   └── focus.py           # Focused-app discovery + activation
 │   ├── skills/
 │   │   ├── registry.py        # Summary-index & lazy-loading engine (two-stage retrieval)

@@ -78,7 +78,8 @@ ACTION_CONTRACT: Final[str] = (
     "  BATCHING RULES: batch only actions that are safe to execute SEQUENTIALLY from the CURRENT screen without re-observation — e.g. Cmd+L, then paste a URL, then Return; or two clicks on already-visible elements. NEVER batch an action whose target depends on a screen change caused by an earlier action in the same batch (e.g. do not click a search result in the same batch as the Return that submits the search). If any doubt, emit a single action. `finish` must be the LAST action of a batch.\n"
     "\n"
     "2. SUPPORTED ACTIONS:\n"
-    '- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2}\n'
+    '- click_mark: {"type": "click_mark", "mark": int, "button": "left|right|middle", "click_count": 1|2} — PREFERRED for anything in the AX list: give the [N] shown beside the element and the system clicks its exact centre for you\n'
+    '- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2} — the fallback for targets the AX list does not name\n'
     '- mouse_move: {"type": "mouse_move", "x": int, "y": int, "duration_ms": int (default 180)} — ONLY when hover, tooltip, or drag preparation is explicitly needed\n'
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
@@ -105,14 +106,18 @@ ACTION_CONTRACT: Final[str] = (
     "   - Coordinate space: the screenshot is a SCALED-DOWN MAP of the screen (max 512px on its\n"
     "     longest side). Report x,y EXACTLY as they appear in that image. The system converts them\n"
     "     to real screen points for you — never apply any scale math yourself.\n"
-    "   - AX UI element coordinates are listed in the SAME image space, so both sources are directly\n"
-    "     comparable. PREFER the AX list whenever it names your target: it is exact, while the\n"
-    "     screenshot is downscaled ~3x, where body text is a few pixels tall and a link is easy to\n"
-    "     misplace by a whole row. It covers page content (links, headings, cells) as well as native\n"
-    "     chrome. Use the screenshot for what AX does not list, and for layout and reading.\n"
-    "   - Each AX element is listed at its CENTER point. Click that point EXACTLY as given — do not\n"
-    "     add half the width or height, and do not adjust it. The listed size is for judging what an\n"
-    "     element is, not for offsetting the click.\n"
+    "   - MARKS ARE THE RELIABLE PATH. Every AX element is listed with a number, [1], [2], ..., and\n"
+    "     the same elements are outlined on the screenshot. When your target is one of them, emit\n"
+    "     click_mark with that number: the system clicks the element's exact centre, with no scaling\n"
+    "     and no rounding. Estimating x,y for a listed element is strictly worse — the screenshot is\n"
+    "     downscaled ~3x, where body text is a few pixels tall and a link is easy to misplace by a\n"
+    "     whole row.\n"
+    "   - The AX list covers page content (links, headings, cells) as well as native chrome. Use the\n"
+    "     screenshot for what it does not list, and for layout and reading.\n"
+    "   - AX UI element coordinates are listed in the SAME image space as the screenshot, so the two\n"
+    "     sources are directly comparable. Each element is listed at its CENTER point: if you do aim\n"
+    "     with mouse_click, click that point EXACTLY as given — do not add half the width or height.\n"
+    "     The listed size is for judging what an element is, not for offsetting the click.\n"
     "   - When you aim from the screenshot instead, click the CENTER of the target.\n"
     "\n"
     "5. SAFE BROWSER NAVIGATION & TEXT INPUT:\n"
@@ -272,9 +277,15 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # three pixels tall.
         observed.append(
             ObservedSection(
-                "AX UI elements (exact CENTER coordinates from the accessibility "
-                "tree — click these points as given, do not offset them):",
-                state.ui_elements,
+                "AX UI elements — the [N] is the element's MARK: emit "
+                'click_mark with that number to click it exactly. These same '
+                "elements are outlined on the screenshot. Coordinates are "
+                "CENTER points in image space, for when you aim manually "
+                "instead:",
+                tuple(
+                    f"[{index}] {element}"
+                    for index, element in enumerate(state.ui_elements, 1)
+                ),
             )
         )
     if state.open_tabs:
