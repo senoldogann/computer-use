@@ -69,6 +69,7 @@ from computeruse.vision.ax import (
     open_tabs_from_tree,
 )
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
+from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.coordinates import Point, Rect, Size
 from computeruse.vision.focus import FocusedWindow
 
@@ -195,15 +196,25 @@ def guarded(
     return guard
 
 
-def _display_viewport(client: ActuationClient, display_id: int) -> Rect | None:
-    """The observed display's rect in global logical points (best effort).
+def _display_viewport(
+    client: ActuationClient, display_id: int, window_pid: int | None = None
+) -> Rect | None:
+    """The observed screen's rect in global logical points (best effort).
+
+    Follows whatever the sensor photographs: the display normally, the target
+    window in background mode. If it did not, the filter would discard the very
+    elements the model is meant to act on.
 
     Returns ``None`` when the screen cannot be captured — Screen Recording
     consent may be absent, and a missing viewport must widen perception back to
     "everything" rather than narrow it to nothing.
     """
     try:
-        capture = client.capture(display_id)
+        capture = (
+            client.capture(display_id)
+            if window_pid is None
+            else client.capture(display_id, window_pid=window_pid)
+        )
     except Exception as exc:  # noqa: BLE001 - perception degrades, never blocks
         LOGGER.debug("viewport probe failed; AX filtering stays off: %s", exc)
         return None
@@ -407,7 +418,46 @@ class Agent:
             # a Retina frame per probe is the most expensive thing the loop can
             # do. Everything outside it is unreachable — not a target and not
             # evidence — so perception spends its budget inside it.
-            viewport = _display_viewport(client, self._config.display_id)
+            def target_pid() -> int | None:
+                """The app this run works in, which in background mode is not
+                the frontmost one.
+
+                Resolved fresh rather than cached: an app can be launched or
+                relaunched mid-run, and a stale pid would silently point
+                perception at a process that no longer exists.
+                """
+                if not self._config.background_actuation or self._config.app is None:
+                    return _current_pid()
+                try:
+                    return client.app_pid(self._config.app) or _current_pid()
+                except Exception as exc:  # noqa: BLE001 - fall back to frontmost
+                    LOGGER.debug("target pid lookup failed: %s", exc)
+                    return _current_pid()
+
+            def sense() -> ScreenCapture:
+                """The frame the model reasons about and verification diffs.
+
+                In background mode this is the *target window*, not the
+                display. Photographing the display there would hand the model a
+                picture of whatever the user has in front while it acts on
+                something else entirely — the one blind spot that made the mode
+                weak in practice, since AX told the truth and the picture did
+                not. The frame carries the window's own origin, so coordinates
+                convert off it with the machinery already in place.
+                """
+                pid = target_pid() if self._config.background_actuation else None
+                # Passed only when it is asked for, so a sensor that predates
+                # window capture — another client, an older driver — keeps its
+                # exact previous call.
+                if pid is None:
+                    return client.capture(self._config.display_id)
+                return client.capture(self._config.display_id, window_pid=pid)
+
+            viewport = _display_viewport(
+                client,
+                self._config.display_id,
+                target_pid() if self._config.background_actuation else None,
+            )
 
             def quiet_press(point: Point) -> bool:
                 """Press the element under a point inside the target app.
@@ -418,13 +468,13 @@ class Agent:
                 three system-wide presses all reported success, Chrome absorbed
                 them, and the calculator never moved.
                 """
-                current_pid = _current_pid()
+                current_pid = target_pid()
                 if current_pid is None:
                     return False
                 return client.ax_press(current_pid, point.x, point.y)
 
             def ax_probe() -> AxProbeResult:
-                current_pid = _current_pid()
+                current_pid = target_pid()
                 if current_pid is None:
                     return AxProbeResult()
                 tree = client.ax_snapshot(
@@ -528,7 +578,7 @@ class Agent:
                 # One capture source, two consumers: ORIENT verification and
                 # the multimodal OBSERVE screenshot are the same frame stream.
                 sensor=(
-                    (lambda: client.capture(self._config.display_id))
+                    sense
                     if (self._config.enable_visual_verification or self._config.enable_vision)
                     else None
                 ),

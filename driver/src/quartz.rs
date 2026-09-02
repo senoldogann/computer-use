@@ -451,6 +451,10 @@ impl Backend for QuartzBackend {
         self.hotkey(&[Modifier::Command], "v")
     }
 
+    fn app_pid(&self, app: &str) -> Result<Option<i32>, BackendError> {
+        Ok(pid_of_running_app(app))
+    }
+
     fn ax_press(&self, pid: u32, point: Point) -> Result<bool, BackendError> {
         crate::ax::press_element_at(pid, point.x as f64, point.y as f64)
     }
@@ -471,7 +475,7 @@ impl Backend for QuartzBackend {
         Ok(crate::ax::window_owner_names())
     }
 
-    fn capture(&self, display_id: u32) -> Result<CaptureFrame, BackendError> {
+    fn capture(&self, display_id: u32, window_pid: Option<u32>) -> Result<CaptureFrame, BackendError> {
         use core_graphics::access::ScreenCaptureAccess;
         use core_graphics::display::CGDisplay;
 
@@ -487,6 +491,9 @@ impl Backend for QuartzBackend {
                  restart the driver."
                     .to_string(),
             ));
+        }
+        if let Some(pid) = window_pid {
+            return capture_window(pid);
         }
         // 0 is the protocol's sentinel for "the main display".
         let display = if display_id == 0 {
@@ -524,6 +531,50 @@ impl Backend for QuartzBackend {
     fn is_real(&self) -> bool {
         true
     }
+}
+
+/// Photograph one application's frontmost window, occluded or not.
+///
+/// `kCGWindowImageBoundsIgnoreFraming` keeps the frame to the window's own
+/// content rect, so the returned origin and the pixels agree — anything else
+/// would offset every coordinate the model reads off it by the shadow's width.
+fn capture_window(pid: u32) -> Result<CaptureFrame, BackendError> {
+    use core_graphics::window::{
+        create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowListOptionIncludingWindow,
+    };
+
+    let (window_id, bounds) = crate::ax::window_for_pid(pid as i32).ok_or_else(|| {
+        BackendError(format!(
+            "no on-screen window belongs to pid {pid}; the app may be hidden, \
+             minimised, or have no ordinary window"
+        ))
+    })?;
+    let image = create_image(
+        bounds,
+        kCGWindowListOptionIncludingWindow,
+        window_id,
+        kCGWindowImageBoundsIgnoreFraming,
+    )
+    .ok_or_else(|| BackendError(format!("failed to capture window {window_id} of pid {pid}")))?;
+    let width = image.width();
+    let height = image.height();
+    let bgra = image_to_bgra(&image, width, height)?;
+    // Backing scale from the window's own logical height, the same derivation
+    // the display path uses.
+    let scale = if bounds.size.height > 0.0 {
+        height as f64 / bounds.size.height
+    } else {
+        1.0
+    };
+    Ok(CaptureFrame {
+        display_id: 0,
+        width: width as u32,
+        height: height as u32,
+        scale: scale.max(1.0),
+        origin_x: bounds.origin.x,
+        origin_y: bounds.origin.y,
+        bgra,
+    })
 }
 
 /// Convert a CGImage into a top-down BGRA8 buffer.
@@ -716,6 +767,45 @@ mod keycode_tests {
     }
 }
 
+/// Does a running app answer to the name a caller typed (pure)?
+///
+/// Exact match on either identity, plus the bundle id's last component. macOS
+/// translates display names, so on a Turkish desktop Calculator.app is "Hesap
+/// Makinesi" while its bundle stays `com.apple.calculator` — a caller asking
+/// for "Calculator" matches neither identity exactly. Without the suffix rule
+/// the lookup fails and perception silently falls back to the frontmost app:
+/// a run aimed at Calculator photographed Chrome, found no calculator in it,
+/// and gave up in one step.
+fn matches_app(localized_name: &str, bundle_id: &str, wanted: &str) -> bool {
+    if localized_name == wanted || bundle_id == wanted {
+        return true;
+    }
+    bundle_id
+        .rsplit('.')
+        .next()
+        .is_some_and(|last| !last.is_empty() && last == wanted)
+}
+
+/// The pid of a running app, matched by localized name or bundle id.
+///
+/// Background mode needs the *target* app's pid, and the only pid the loop
+/// otherwise knows is the frontmost one — which in this mode is by definition
+/// the wrong app. Without this, perception followed whatever the user had in
+/// front: a run aimed at Calculator photographed Chrome, found no calculator
+/// in it, and correctly reported it could not proceed.
+pub fn pid_of_running_app(wanted: &str) -> Option<i32> {
+    let wanted = wanted.to_lowercase();
+    let workspace = NSWorkspace::sharedWorkspace();
+    for app in workspace.runningApplications().iter() {
+        let name = app.localizedName().map(|n| n.to_string()).unwrap_or_default().to_lowercase();
+        let bundle = app.bundleIdentifier().map(|b| b.to_string()).unwrap_or_default().to_lowercase();
+        if matches_app(&name, &bundle, &wanted) {
+            return Some(app.processIdentifier());
+        }
+    }
+    None
+}
+
 /// Bring an already-running app to the front by localized name or bundle id.
 ///
 /// The escape hatch for apps `open -a` cannot name. Matching is
@@ -737,7 +827,7 @@ fn activate_running_app(wanted: &str) -> bool {
             .map(|b| b.to_string())
             .unwrap_or_default()
             .to_lowercase();
-        if name == wanted || bundle == wanted {
+        if matches_app(&name, &bundle, &wanted) {
             // ActivateAllWindows so a multi-window app comes forward whole;
             // activating only the key window leaves the rest behind the
             // previous app, and the agent's next coordinate read would be of
@@ -746,6 +836,28 @@ fn activate_running_app(wanted: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod app_match_tests {
+    use super::matches_app;
+
+    #[test]
+    fn a_translated_name_is_still_findable_by_its_bundle_suffix() {
+        // The case that broke background mode on a Turkish desktop.
+        assert!(matches_app("hesap makinesi", "com.apple.calculator", "calculator"));
+        assert!(matches_app("hesap makinesi", "com.apple.calculator", "hesap makinesi"));
+        assert!(matches_app("hesap makinesi", "com.apple.calculator", "com.apple.calculator"));
+    }
+
+    #[test]
+    fn unrelated_apps_do_not_match() {
+        assert!(!matches_app("google chrome", "com.google.chrome", "calculator"));
+        // A bare suffix must not match a different app's suffix.
+        assert!(!matches_app("safari", "com.apple.safari", "calculator"));
+        // An empty last component cannot match anything.
+        assert!(!matches_app("odd", "trailing.", ""));
+    }
 }
 
 /// Human-like inter-key delay in ms from a target WPM (Law 1 cadence).

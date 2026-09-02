@@ -234,7 +234,7 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
             };
         }
         Request::Screenshot(params) => {
-            return match backend.capture(params.display_id) {
+            return match backend.capture(params.display_id, params.pid) {
                 Ok(frame) => Response::Screenshot {
                         display_id: frame.display_id,
                         format: "bgra8",
@@ -273,6 +273,12 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                 }
             };
             backend.click(point(params.x, params.y), button, params.click_count)
+        }
+        Request::AppPid(params) => {
+            return match backend.app_pid(&params.app) {
+                Ok(pid) => Response::AppPid { pid },
+                Err(error) => Response::Error { message: error.0 },
+            };
         }
         Request::AxPress(params) => {
             return match backend.ax_press(params.pid, point(params.x, params.y)) {

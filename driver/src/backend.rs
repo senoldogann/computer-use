@@ -200,7 +200,15 @@ pub trait Backend: Send + Sync {
     /// actions visually (ADR-2: pixels as *verifier*, not generator).
     /// ``display_id == 0`` means the main display. Diffing two frames is the
     /// orchestrator's job; this method only returns the raw snapshot.
-    fn capture(&self, display_id: u32) -> Result<CaptureFrame, BackendError>;
+    /// Photograph the display, or one application's frontmost window when
+    /// ``window_pid`` is given.
+    ///
+    /// The window variant is what lets an agent work in an application the
+    /// user has left behind another one: a display capture would show it the
+    /// foreground, so it would reason about one window while acting on
+    /// another. The returned frame's origin is the window's own, which is what
+    /// turns a coordinate read off it back into a point the driver can click.
+    fn capture(&self, display_id: u32, window_pid: Option<u32>) -> Result<CaptureFrame, BackendError>;
 
     /// Returns the app's accessibility tree root (ADR-2 primary source): the
     /// element that *generates* candidate coordinates, which pixels later
@@ -220,6 +228,9 @@ pub trait Backend: Send + Sync {
     /// supports it — a `false` here is an ordinary answer, and the caller
     /// falls back to a synthetic click.
     fn ax_press(&self, pid: u32, point: Point) -> Result<bool, BackendError>;
+
+    /// The pid of a running application, by the name the user would type.
+    fn app_pid(&self, app: &str) -> Result<Option<i32>, BackendError>;
 
     /// Returns the frontmost app, its focused window, and the cursor — the
     /// OBSERVE step's window/cursor half (and the pid that feeds
@@ -578,6 +589,11 @@ impl Backend for SimulatedBackend {
         Ok(())
     }
 
+    fn app_pid(&self, app: &str) -> Result<Option<i32>, BackendError> {
+        // The fixture app answers with the same pid its AX tree uses.
+        Ok((app == self.state().frontmost_app).then_some(4242))
+    }
+
     fn ax_press(&self, _pid: u32, point: Point) -> Result<bool, BackendError> {
         // The fixture models the same consequence a real press has — focus
         // moves to whatever sits under the point — so the closed loop can be
@@ -632,7 +648,7 @@ impl Backend for SimulatedBackend {
         Ok(vec!["Safari".to_string(), "Google Chrome".to_string()])
     }
 
-    fn capture(&self, display_id: u32) -> Result<CaptureFrame, BackendError> {
+    fn capture(&self, display_id: u32, _window_pid: Option<u32>) -> Result<CaptureFrame, BackendError> {
         // Deterministic checkerboard on a frame that actually *contains* this
         // backend's own AX fixture. The frame used to be 64x36 at scale 2.0 —
         // a 32x18 logical "display" holding a Safari window at (100,60) 800x600.
@@ -737,11 +753,11 @@ mod tests {
         // witnesses read: AX focus and pixels. Without them the closed
         // OBSERVE -> ACT -> VERIFY loop could not be exercised offline at all.
         let backend = SimulatedBackend::default();
-        let before = backend.capture(0).expect("sim capture works");
+        let before = backend.capture(0, None).expect("sim capture works");
         backend
             .click(crate::bezier::point(254, 80), Button::Left, 1)
             .expect("sim click works");
-        let after = backend.capture(0).expect("sim capture works");
+        let after = backend.capture(0, None).expect("sim capture works");
         assert_ne!(before.bgra, after.bgra, "a click must change the frame");
 
         let root = backend.ax_snapshot(4242, 8, 4096).expect("sim ax works");
@@ -789,8 +805,8 @@ mod tests {
     #[test]
     fn simulated_capture_is_deterministic_and_sized() {
         let backend = SimulatedBackend::default();
-        let a = backend.capture(0).expect("sim capture works");
-        let b = backend.capture(0).expect("sim capture works");
+        let a = backend.capture(0, None).expect("sim capture works");
+        let b = backend.capture(0, None).expect("sim capture works");
         // Same frame every time — the OBSERVE step can rely on stability.
         assert_eq!(a.bgra, b.bgra);
         assert_eq!(a.bgra.len(), (a.width * a.height * 4) as usize);

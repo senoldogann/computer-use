@@ -31,10 +31,11 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_graphics::event::CGEvent;
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use core_graphics::geometry::{CGPoint, CGSize};
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_graphics::window::{
-    copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
-    kCGWindowListOptionOnScreenOnly, kCGWindowOwnerName, kCGWindowOwnerPID,
+    copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
+    kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowNumber,
+    kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 
 use objc2_app_kit::NSRunningApplication;
@@ -351,6 +352,52 @@ fn focused_application_via_ax(cursor_x: f64, cursor_y: f64) -> Result<FocusedWin
         cursor_x,
         cursor_y,
     })
+}
+
+/// The frontmost normal window belonging to a process: its id and global
+/// logical bounds.
+///
+/// Lets the sensor photograph one application's window instead of the display.
+/// Without it, an agent working in a background app is shown a picture of
+/// whatever the user has in front — it reasons about the wrong window while
+/// acting on the right one.
+///
+/// The window list is returned front-to-back, so the first layer-0 window
+/// owned by the pid is the one the app itself considers frontmost.
+pub fn window_for_pid(pid: i32) -> Option<(u32, CGRect)> {
+    let windows = copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    )?;
+    let (layer_key, pid_key, number_key, bounds_key) = unsafe {
+        (
+            CFString::wrap_under_get_rule(kCGWindowLayer),
+            CFString::wrap_under_get_rule(kCGWindowOwnerPID),
+            CFString::wrap_under_get_rule(kCGWindowNumber),
+            CFString::wrap_under_get_rule(kCGWindowBounds),
+        )
+    };
+    for window in windows.iter() {
+        let window = unsafe {
+            CFDictionary::<CFString, CFType>::wrap_under_get_rule(*window as CFDictionaryRef)
+        };
+        // Layer 0 is an ordinary application window; menus and the Dock are not.
+        if window.find(&layer_key)?.downcast::<CFNumber>()?.to_i32()? != 0 {
+            continue;
+        }
+        if window.find(&pid_key)?.downcast::<CFNumber>()?.to_i32()? != pid {
+            continue;
+        }
+        let number = window.find(&number_key)?.downcast::<CFNumber>()?.to_i32()? as u32;
+        let bounds_dict = window.find(&bounds_key)?;
+        let bounds = unsafe {
+            CGRect::from_dict_representation(&CFDictionary::wrap_under_get_rule(
+                bounds_dict.as_CFTypeRef() as CFDictionaryRef,
+            ))
+        }?;
+        return Some((number, bounds));
+    }
+    None
 }
 
 /// Frontmost normal-window owner via ``CGWindowListCopyWindowInfo``.
