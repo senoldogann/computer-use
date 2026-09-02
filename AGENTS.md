@@ -171,12 +171,20 @@ not?).
                    with the kill switch polled before, during and after.
        │
 [7. VERIFY]    ──► Every action declares an expected postcondition, and independent witnesses
-                   report on it: the AX surface, the focused field's AXValue, the frontmost app,
-                   and (with --verify) a pixel diff. Rules: one CONFIRMED witness outweighs silent
-                   ones; a witness that cannot speak is INCONCLUSIVE and NEVER fails an action; a
+                   report on it: the AX surface (its element list AND a digest of its visible
+                   text — one verdict, since both read one snapshot), the element under the click
+                   holding focus, the focused field's AXValue, the frontmost app, and (with
+                   --verify) a pixel diff. Rules: one CONFIRMED witness outweighs silent ones; a
+                   witness that cannot speak is INCONCLUSIVE and NEVER fails an action; a
                    *direct* denial (the text is not in the field, the wrong app is frontmost) is
                    conclusive alone, while two *circumstantial* witnesses ("nothing changed") must
                    agree before an action is called a miss.
+                   Change detection alone cannot judge an action that correctly changed nothing,
+                   so two witnesses exist for that: focus landing on the clicked element vouches
+                   for an idempotent click, and the text digest catches effects too small for a
+                   pixel threshold and invisible to the element list. When all witnesses are
+                   silent but an element covers the click point, the model is told the coordinate
+                   was right and to check whether the goal is already met — not to re-aim.
        │
 [8. RECOVER]   ──► A failure is classified (FailureKind), counted per signature, and answered with
                    escalating guidance: RETRY → ALTERNATE (change the method) → REPLAN (abandon the
