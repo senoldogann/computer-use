@@ -69,6 +69,7 @@ from computeruse.vision.ax import (
     open_tabs_from_tree,
 )
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
+from computeruse.vision.coordinates import Point, Rect, Size
 from computeruse.vision.focus import FocusedWindow
 
 
@@ -186,6 +187,25 @@ def guarded(
         )
 
     return guard
+
+
+def _display_viewport(client: ActuationClient, display_id: int) -> Rect | None:
+    """The observed display's rect in global logical points (best effort).
+
+    Returns ``None`` when the screen cannot be captured — Screen Recording
+    consent may be absent, and a missing viewport must widen perception back to
+    "everything" rather than narrow it to nothing.
+    """
+    try:
+        capture = client.capture(display_id)
+    except Exception as exc:  # noqa: BLE001 - perception degrades, never blocks
+        LOGGER.debug("viewport probe failed; AX filtering stays off: %s", exc)
+        return None
+    scale = capture.scale or 1.0
+    return Rect(
+        Point(capture.origin_x, capture.origin_y),
+        Size(capture.width / scale, capture.height / scale),
+    )
 
 
 class Agent:
@@ -368,6 +388,13 @@ class Agent:
                     return None
                 return cached_pid
 
+            # The observed display's rect in global logical points, resolved
+            # once: display geometry does not change mid-run, and re-capturing
+            # a Retina frame per probe is the most expensive thing the loop can
+            # do. Everything outside it is unreachable — not a target and not
+            # evidence — so perception spends its budget inside it.
+            viewport = _display_viewport(client, self._config.display_id)
+
             def ax_probe() -> AxProbeResult:
                 current_pid = _current_pid()
                 if current_pid is None:
@@ -380,6 +407,7 @@ class Agent:
                 summaries = interactive_summaries(
                     tree,
                     max_count=AX_MAX_ELEMENTS,
+                    viewport=viewport,
                 )
                 if len(summaries) >= AX_MAX_ELEMENTS:
                     # The DFS budget was exhausted: page content deeper in the
@@ -396,7 +424,7 @@ class Agent:
                 return AxProbeResult(
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),
-                    content=content_digest(tree),
+                    content=content_digest(tree, viewport),
                 )
 
             def focused_text_value_probe() -> str | None:
