@@ -237,6 +237,33 @@ def interactive_summaries(
     return tuple(summaries)
 
 
+_SUMMARY_RECT: Final = re.compile(r"at \((\d+),(\d+)\) (\d+)x(\d+)")
+
+
+def summary_covering(summaries: tuple[str, ...], x: float, y: float) -> str | None:
+    """The most specific summarised element whose rect contains a point (pure).
+
+    "Most specific" means smallest by area: a button and the toolbar holding it
+    both contain the same point, and only the button says anything useful about
+    what a click at that point hit. Returns ``None`` when no summary covers the
+    point — which callers must read as "no information", never as "nothing is
+    there": the summary list is budget-capped and may simply not include it.
+    """
+    best: str | None = None
+    best_area = float("inf")
+    for line in summaries:
+        match = _SUMMARY_RECT.search(line)
+        if match is None:
+            continue
+        left, top, width, height = (int(group) for group in match.groups())
+        if not (left <= x < left + width and top <= y < top + height):
+            continue
+        area = float(width * height)
+        if area < best_area:
+            best, best_area = line, area
+    return best
+
+
 def summaries_to_image_space(
     summaries: tuple[str, ...], points_per_pixel: float
 ) -> tuple[str, ...]:

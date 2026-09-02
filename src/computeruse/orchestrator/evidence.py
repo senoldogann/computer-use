@@ -48,6 +48,7 @@ from computeruse.orchestrator.schemas import (
     PressHotkey,
     TypeText,
 )
+from computeruse.vision.ax import summary_covering
 from computeruse.vision.coordinates import Point
 
 #: Hotkeys whose effect is a page-wide transition rather than a local change.
@@ -84,6 +85,12 @@ class ActionExpectation:
     region_point: Point | None
     #: Whether the host's UI state (AX focus/values/titles) should differ.
     expects_ui_change: bool
+    #: Screen point whose element should hold keyboard focus afterwards. This
+    #: is the witness that makes an *idempotent* action verifiable: clicking an
+    #: already-selected tab, an already-checked box, or a button that is
+    #: already focused changes nothing, and change-detection alone cannot tell
+    #: that apart from a miss.
+    focus_target: Point | None
     #: Text that must appear in the focused field afterwards, if any.
     expected_text: str | None
     #: Application that must own the frontmost window afterwards, if any.
@@ -97,6 +104,7 @@ class ActionExpectation:
         return (
             self.pixel != "none"
             or self.expects_ui_change
+            or self.focus_target is not None
             or self.expected_text is not None
             or self.expected_app is not None
         )
@@ -116,6 +124,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="region",
             region_point=Point(action.x, action.y),
             expects_ui_change=True,
+            focus_target=Point(action.x, action.y),
             expected_text=None,
             expected_app=None,
             needs_settle=True,
@@ -125,6 +134,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="region",
             region_point=Point(action.end_x, action.end_y),
             expects_ui_change=True,
+            focus_target=None,
             expected_text=None,
             expected_app=None,
             needs_settle=True,
@@ -137,6 +147,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="frame",
             region_point=None,
             expects_ui_change=True,
+            focus_target=None,
             expected_text=None,
             expected_app=None,
             needs_settle=True,
@@ -147,6 +158,7 @@ def expectation_for(action: Action) -> ActionExpectation:
                 pixel="frame",
                 region_point=None,
                 expects_ui_change=True,
+                focus_target=None,
                 expected_text=None,
                 expected_app=None,
                 needs_settle=True,
@@ -160,6 +172,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="none",
             region_point=None,
             expects_ui_change=False,
+            focus_target=None,
             expected_text=action.text or None,
             expected_app=None,
             needs_settle=True,
@@ -169,6 +182,7 @@ def expectation_for(action: Action) -> ActionExpectation:
             pixel="none",
             region_point=None,
             expects_ui_change=False,
+            focus_target=None,
             expected_text=None,
             expected_app=action.app,
             needs_settle=True,
@@ -180,6 +194,7 @@ _NO_EXPECTATION = ActionExpectation(
     pixel="none",
     region_point=None,
     expects_ui_change=False,
+    focus_target=None,
     expected_text=None,
     expected_app=None,
     needs_settle=False,
@@ -236,6 +251,30 @@ def ui_state_evidence(before: tuple[str, ...], after: tuple[str, ...]) -> Eviden
     if not before and not after:
         return Evidence.INCONCLUSIVE
     return Evidence.CONFIRMED if before != after else Evidence.CONTRADICTED
+
+
+def target_focus_evidence(target: Point | None, summaries: tuple[str, ...]) -> Evidence:
+    """Does the element you aimed at now hold keyboard focus (pure)?
+
+    The witness that makes *idempotent* actions verifiable. Clicking a control
+    that is already in its target state — an already-focused button, a selected
+    tab, a checked box — changes nothing observable, and every change-detecting
+    witness therefore reports a miss. Observed in a real run: the model clicked
+    the right button, the click landed, and it was told twice that it had
+    failed; it then abandoned a correct approach for a worse one.
+
+    Positive-only by construction. Focus landing on the element under the
+    click is proof the click reached it; focus *not* landing there proves
+    nothing, because plenty of controls (links, many buttons) never take focus
+    at all. So this returns CONFIRMED or INCONCLUSIVE, never CONTRADICTED —
+    it can rescue an action from a false failure but can never cause one.
+    """
+    if target is None or not summaries:
+        return Evidence.INCONCLUSIVE
+    line = summary_covering(summaries, target.x, target.y)
+    if line is None:
+        return Evidence.INCONCLUSIVE
+    return Evidence.CONFIRMED if line.endswith("(focused)") else Evidence.INCONCLUSIVE
 
 
 def text_evidence(expected: str, observed: str | None) -> Evidence:

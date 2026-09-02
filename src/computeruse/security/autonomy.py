@@ -27,8 +27,11 @@ from enum import Enum
 from computeruse.orchestrator.schemas import (
     AgentTurn,
     ClipboardPaste,
+    Finish,
+    LoadSkill,
     PressHotkey,
     TypeText,
+    Wait,
 )
 
 
@@ -215,7 +218,21 @@ class AutonomyPolicy:
     typed_commands: frozenset[str] = _TYPED_COMMANDS
 
     def classify(self, turn: AgentTurn) -> Risk:
-        """Classify a single model decision into a risk level (pure)."""
+        """Classify a single model decision into a risk level (pure).
+
+        Orchestrator-internal actions are always :attr:`Risk.NONE`. ``finish``,
+        ``wait`` and ``load_skill`` never reach the physical layer — they cannot
+        delete, pay, send or install anything — so the permission gate has
+        nothing to stand between. Classifying them by their *prose* was a
+        category error with a real cost: a model ending a run with the sub-goal
+        "Confirm the URL has been placed in the address bar" matched the
+        dialog-button marker "confirm", and a completed run stopped dead
+        waiting for a human to approve the word "confirm" (observed in a live
+        run). The markers describe UI controls the agent might press, not the
+        English the model narrates in.
+        """
+        if isinstance(turn.action, (Finish, Wait, LoadSkill)):
+            return Risk.NONE
         subject = turn.sub_goal.lower()
         if isinstance(turn.action, PressHotkey):
             subject = f"{subject} {turn.action.key}".lower()

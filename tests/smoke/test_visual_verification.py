@@ -27,6 +27,7 @@ from computeruse.orchestrator.evidence import (
     app_evidence,
     combine,
     expectation_for,
+    target_focus_evidence,
     text_evidence,
     ui_state_evidence,
 )
@@ -808,3 +809,59 @@ def test_focus_guard_is_inert_for_an_unpinned_run() -> None:
     )
     runner.run(goal="click wherever")
     assert dispatched == ["mouse_click"]
+
+
+def test_idempotent_click_is_confirmed_by_target_focus() -> None:
+    """Clicking a control already in its target state must not read as a miss.
+
+    Observed in a real model run: the agent clicked the right button, the click
+    landed, nothing changed because the button was already focused — and both
+    change-detecting witnesses reported a failure. The agent was told twice it
+    had missed and abandoned a correct approach. The element under the click
+    holding focus is direct proof the click reached it.
+    """
+    screen = FakeScreen()
+    summaries = ('Button "Reload" at (20,10) 20x12 (focused)',)
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(MouseClick(type="mouse_click", x=30, y=16))
+        return _turn(Finish(type="finish", status="success", summary="reloaded"))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _action: None,
+        sensor=screen.sensor,  # pixels never move
+        verify_enabled=True,
+        ax_probe=lambda: AxProbeResult(summaries=summaries),  # surface never moves
+        max_steps=5,
+    )
+    final = runner.run(goal="reload the page")
+    assert final.last_error is None
+    assert "step_0:mouse_click" in final.completed_steps
+
+
+def test_target_focus_witness_can_never_cause_a_failure() -> None:
+    """Focus not landing proves nothing — many controls never take focus."""
+    unfocused = ('Button "Reload" at (232,68) 44x24',)
+    assert target_focus_evidence(Point(254, 80), unfocused) is Evidence.INCONCLUSIVE
+    # A point no summary covers is silence, not a denial: the summary list is
+    # budget-capped and may simply not include the element.
+    assert target_focus_evidence(Point(9, 9), unfocused) is Evidence.INCONCLUSIVE
+    assert target_focus_evidence(None, unfocused) is Evidence.INCONCLUSIVE
+    focused = ('Button "Reload" at (232,68) 44x24 (focused)',)
+    assert target_focus_evidence(Point(254, 80), focused) is Evidence.CONFIRMED
+
+
+def test_summary_lookup_prefers_the_most_specific_element() -> None:
+    """A button inside a toolbar must win: only the button explains the click."""
+    from computeruse.vision.ax import summary_covering
+
+    summaries = (
+        'Toolbar "" at (100,60) 800x40',
+        'Button "Reload" at (232,68) 44x24 (focused)',
+    )
+    covering = summary_covering(summaries, 254, 80)
+    assert covering is not None and "Reload" in covering
+    assert summary_covering(summaries, 120, 65) is not None
+    assert summary_covering(summaries, 5000, 5000) is None

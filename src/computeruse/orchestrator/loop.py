@@ -49,6 +49,7 @@ from computeruse.orchestrator.evidence import (
     app_evidence,
     combine,
     expectation_for,
+    target_focus_evidence,
     text_evidence,
     ui_state_evidence,
     verification_diagnostic,
@@ -961,10 +962,22 @@ class OodaRunner:
             verdict = text_evidence(expectation.expected_text, self._probe_text_value())
             reports.append(("focused_field", verdict))
             direct.append(verdict)
-        if expectation.expects_ui_change and self.ax_probe is not None:
-            verdict = ui_state_evidence(before_ui, self._probe_ui_elements())
-            reports.append(("ax_state", verdict))
-            circumstantial.append(verdict)
+        if (expectation.expects_ui_change or expectation.focus_target is not None) and (
+            self.ax_probe is not None
+        ):
+            # One AX probe serves both witnesses: whether the surface moved at
+            # all (circumstantial) and whether the element under the click now
+            # holds focus (direct, and the only witness that can vouch for an
+            # action which correctly changed nothing).
+            after_ui = self._probe_ui_elements()
+            if expectation.focus_target is not None:
+                verdict = target_focus_evidence(expectation.focus_target, after_ui)
+                reports.append(("target_focus", verdict))
+                direct.append(verdict)
+            if expectation.expects_ui_change:
+                verdict = ui_state_evidence(before_ui, after_ui)
+                reports.append(("ax_state", verdict))
+                circumstantial.append(verdict)
         if expectation.pixel != "none" and self.verify_enabled and before is not None:
             verdict = self._pixel_evidence(before, expectation)
             reports.append(("pixels", verdict))
