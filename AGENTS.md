@@ -243,6 +243,7 @@ computeruse/
 │   │   ├── failures.py        # Failure taxonomy + the bounded recovery ladder (pure)
 │   │   ├── schemas.py         # Pydantic action contracts (discriminated unions, strict typing)
 │   │   ├── prompts.py         # Scaffolding prompts & error-correction injectors
+│   │   ├── untrusted.py       # Screen text as data: <observed_data> framing + escaping
 │   │   ├── planner.py         # Hierarchical goal decomposition + session checkpoints
 │   │   └── client.py          # Typed JSON-RPC client for the Rust driver (Unix socket)
 │   ├── providers/
