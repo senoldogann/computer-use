@@ -112,6 +112,12 @@ uv run python -m computeruse --goal "..." --provider my_provider:make_provider
 uv run python -m computeruse --goal "..." --model openai --real \
     --trace-dir ./traces --trace-screenshots
 
+# Work on a display other than the main one. The capture carries that display's
+# global origin, so coordinates read off its screenshot convert back into the
+# space the driver clicks in, and the bounds gate judges them against that
+# display's own rectangle.
+uv run python -m computeruse --goal "..." --real --display 1
+
 # Set-of-Marks is on by default: the AX elements are outlined on the screenshot
 # and numbered [N] in the element list, and the model selects a target with
 # click_mark N (resolved to that element's exact centre). Pass --no-marks to

@@ -272,7 +272,7 @@ class _SensorDeadClient:
             cursor_y=0.0,
         )
 
-    def capture(self) -> None:
+    def capture(self, display_id: int = 0) -> None:
         raise DriverRpcError("screenshot", "Screen Recording consent required")
 
     def hotkey_state(self) -> bool:
@@ -422,8 +422,8 @@ class _RecordingClient:
             cursor_y=0.0,
         )
 
-    def capture(self) -> ScreenCapture:
-        self.calls.append("capture")
+    def capture(self, display_id: int = 0) -> ScreenCapture:
+        self.calls.append(f"capture:{display_id}")
         return _FAKE_FRAME
 
     def hotkey_state(self) -> bool:

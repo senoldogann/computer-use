@@ -89,6 +89,7 @@ from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.vision.ax import (
     summaries_to_image_space,
+    summaries_within,
     summary_covering,
     summary_label,
 )
@@ -109,6 +110,7 @@ from computeruse.vision.coordinates import (
     Rect,
     ScreenMap,
     Size,
+    point_in_frame,
 )
 from computeruse.vision.focus import FocusedWindow, window_summary
 from computeruse.vision.som import (
@@ -331,37 +333,39 @@ def same_physical_action(left: Action, right: Action) -> bool:
     return left.model_dump(exclude_none=True) == right.model_dump(exclude_none=True)
 
 
-def scale_action_coordinates(action: Action, factor: float) -> Action:
-    """Map a model-emitted coordinate action from image space to screen points.
+def map_action_to_screen(action: Action, screen_map: ScreenMap) -> Action:
+    """Map a model-emitted coordinate action into global screen points.
 
     The VLM perceives the screenshot as a scaled-down map (max 512px, see
-    :func:`computeruse.vision.capture.downscale_to_max_side`), so every
-    coordinate it reports is in *image* pixels while the driver clicks in
-    *logical screen points*. This pure gate converts one space to the other
-    with the single deterministic factor computed at capture time — the model
-    never does scale math, and a coordinate picked from either the screenshot
-    or the (equally image-space) AX summaries lands exactly where the model
-    pointed. Non-coordinate actions pass through unchanged (pure).
+    :func:`computeruse.vision.capture.downscale_to_max_side`) of *one* display,
+    so every coordinate it reports is in image pixels measured from that
+    display's corner — while the driver clicks in global logical points
+    measured from the desktop's. :class:`ScreenMap` owns both halves of that
+    conversion (the scale and the display's origin), so this gate cannot apply
+    one and forget the other: a bare factor was enough while everything ran on
+    the primary display and silently wrong the moment it did not.
+
+    Non-coordinate actions pass through unchanged (pure).
     """
-    if factor <= 0:
-        raise ValueError(f"coordinate scale factor must be positive, got {factor}")
-    if factor == 1.0:
+    if screen_map.is_identity:
         return action
 
-    def scaled(value: int) -> int:
-        return round(value * factor)
+    def mapped(x: int, y: int) -> tuple[int, int]:
+        point = screen_map.to_screen(Point(float(x), float(y)))
+        return round(point.x), round(point.y)
 
-    if isinstance(action, MouseClick):
-        return action.model_copy(update={"x": scaled(action.x), "y": scaled(action.y)})
-    if isinstance(action, MouseMove):
-        return action.model_copy(update={"x": scaled(action.x), "y": scaled(action.y)})
+    if isinstance(action, (MouseClick, MouseMove)):
+        x, y = mapped(action.x, action.y)
+        return action.model_copy(update={"x": x, "y": y})
     if isinstance(action, MouseDrag):
+        start_x, start_y = mapped(action.start_x, action.start_y)
+        end_x, end_y = mapped(action.end_x, action.end_y)
         return action.model_copy(
             update={
-                "start_x": scaled(action.start_x),
-                "start_y": scaled(action.start_y),
-                "end_x": scaled(action.end_x),
-                "end_y": scaled(action.end_y),
+                "start_x": start_x,
+                "start_y": start_y,
+                "end_x": end_x,
+                "end_y": end_y,
             }
         )
     return action
@@ -1008,18 +1012,14 @@ class OodaRunner:
         # anything validates or actuates them. ``ScreenMap`` owns the
         # direction, so the conversion cannot be applied backwards.
         screen_map = self._observation.screen_map
-        if screen_map is not None and not screen_map.is_identity:
+        if screen_map is not None:
             decision = decision.model_copy(
-                update={
-                    "action": scale_action_coordinates(
-                        decision.action, screen_map.points_per_pixel
-                    )
-                }
+                update={"action": map_action_to_screen(decision.action, screen_map)}
             )
         # Mark selection resolves *after* the coordinate gate, never before: a
         # mark already carries the element's rect in screen points, and scaling
         # it a second time would send the click a third of the way up the
-        # display. ``scale_action_coordinates`` leaves a ``click_mark``
+        # display. ``map_action_to_screen`` leaves a ``click_mark``
         # untouched precisely so this ordering is safe.
         decision = decision.model_copy(
             update={"action": resolve_mark(decision.action, self._observation.marks)}
@@ -1541,16 +1541,16 @@ class OodaRunner:
             )
 
     def _validate_bounds(self, action: Action, capture: ScreenCapture) -> None:
-        """Fail-closed: reject coordinates outside the observed main display.
+        """Fail-closed: reject coordinates outside the display being observed.
 
         A model can hallucinate coordinates; the schema only enforces
-        non-negative values. The captured frame's logical size (physical px /
-        scale) is the main display's bounds — a point beyond it is rejected
-        before any physical effect instead of silently clicking somewhere the
-        agent did not intend.
+        non-negative values. The captured frame carries its display's global
+        rectangle — origin included, so the gate is about *the display the
+        agent is looking at* rather than about the primary one — and a point
+        beyond it is rejected before any physical effect instead of silently
+        clicking somewhere the agent did not intend.
         """
-        logical_w = capture.width / capture.scale
-        logical_h = capture.height / capture.scale
+        frame = capture.display_frame
         targets: list[tuple[str, int, int]] = []
         if isinstance(action, MouseClick):
             targets.append(("click", action.x, action.y))
@@ -1558,13 +1558,14 @@ class OodaRunner:
             targets.append(("drag start", action.start_x, action.start_y))
             targets.append(("drag end", action.end_x, action.end_y))
         for label, x, y in targets:
-            if not (0 <= x < logical_w and 0 <= y < logical_h):
+            if not point_in_frame(Point(float(x), float(y)), frame):
                 raise CoordinateOutOfBoundsError(
                     f"{action.type} {label} coordinate ({x},{y}) is outside the "
-                    f"observed main display {logical_w:.0f}x{logical_h:.0f} logical "
-                    "points; rejecting before actuation (fail-closed; multi-display "
-                    "targets are not yet supported). Re-derive the coordinate from "
-                    "the current screenshot."
+                    f"observed display {frame.size.width:.0f}x"
+                    f"{frame.size.height:.0f} logical points at "
+                    f"({frame.origin.x:.0f},{frame.origin.y:.0f}); rejecting before "
+                    "actuation (fail-closed). Re-derive the coordinate from the "
+                    "current screenshot."
                 )
 
     # ------------------------------------------------------------------
@@ -1698,6 +1699,14 @@ class OodaRunner:
                 frame, screenshot_b64, screen_map = captured
                 signature = coarse_fingerprint(frame)
                 self._physical_since_capture = False
+        # An app's AX tree describes every display it has a window on, while
+        # the frame describes exactly one. Elements the model cannot see are
+        # dropped *before* anything downstream derives from them, so the image
+        # rewrite, the mark numbering and the prompt all describe the same set.
+        # On a single-display host every element is inside the frame and this
+        # is a no-op.
+        if screen_map is not None and raw_ui_elements:
+            raw_ui_elements = summaries_within(raw_ui_elements, screen_map.frame)
         # One coordinate space for both perception sources: AX rects arrive in
         # logical points and are rewritten into the image space the model reads
         # coordinates from, so a coordinate picked from either source converts
@@ -1738,7 +1747,7 @@ class OodaRunner:
         """AX summaries rewritten into the model's image space (pure)."""
         if screen_map is None or screen_map.is_identity or not summaries:
             return summaries
-        return summaries_to_image_space(summaries, screen_map.points_per_pixel)
+        return summaries_to_image_space(summaries, screen_map)
 
     def _capture_frame(
         self,

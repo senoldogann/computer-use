@@ -124,6 +124,11 @@ class AgentConfig:
     # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
     # entirely — a run pays nothing for a diagnostic nobody asked for.
     trace_dir: Path | None = None
+    # Which display the run observes and acts on. 0 is the main display; a
+    # secondary display's id comes from the host. The capture carries that
+    # display's global origin, so coordinates read off its screenshot convert
+    # back into the global space the driver actuates in.
+    display_id: int = 0
     # Whether the OBSERVE screenshot is annotated with the AX element boxes
     # (Set-of-Marks). ``click_mark`` itself does not depend on this — it reads
     # the element list, which exists with vision off entirely.
@@ -303,7 +308,7 @@ class Agent:
             # error instead of a page of repeated failures (Law 6.3).
             if self._config.enable_visual_verification or self._config.enable_vision:
                 try:
-                    client.capture()
+                    client.capture(self._config.display_id)
                 except Exception as exc:
                     if self._config.enable_visual_verification:
                         raise RuntimeError(
@@ -467,7 +472,7 @@ class Agent:
                 # One capture source, two consumers: ORIENT verification and
                 # the multimodal OBSERVE screenshot are the same frame stream.
                 sensor=(
-                    client.capture
+                    (lambda: client.capture(self._config.display_id))
                     if (self._config.enable_visual_verification or self._config.enable_vision)
                     else None
                 ),

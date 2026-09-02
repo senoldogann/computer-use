@@ -144,6 +144,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "written to --store/checkpoints for resumability.",
     )
     parser.add_argument(
+        "--display",
+        type=int,
+        default=0,
+        help="Which display to observe and act on (0 = main display). The "
+        "coordinate bounds gate is evaluated against this display's own "
+        "rectangle, so a click can never land on a different screen.",
+    )
+    parser.add_argument(
         "--marks",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -504,6 +512,7 @@ def build_config(
         enable_visual_verification=resolve_verify(args),
         enable_vision=getattr(args, "vision", True),
         enable_set_of_marks=getattr(args, "marks", True),
+        display_id=getattr(args, "display", 0),
         # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
         # on a *real* backend is activated (the simulated backend never touches
         # the host — Law 1). An auto-discovered app is never activated:

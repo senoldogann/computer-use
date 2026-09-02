@@ -21,9 +21,9 @@ from computeruse.orchestrator.loop import (
     WorkingState,
     decide_step,
     equivalent_action,
+    map_action_to_screen,
     repetition_diagnostic,
     same_physical_action,
-    scale_action_coordinates,
 )
 from computeruse.orchestrator.schemas import (
     AgentTurn,
@@ -32,7 +32,7 @@ from computeruse.orchestrator.schemas import (
     MouseMove,
     Wait,
 )
-from computeruse.vision import ScreenCapture
+from computeruse.vision import Point, ScreenCapture, ScreenMap, Size
 from computeruse.vision.focus import FocusedWindow
 
 
@@ -158,20 +158,53 @@ def test_equivalent_action_tolerates_small_coordinate_jitter() -> None:
     )
 
 
-def test_scale_action_coordinates_maps_image_pixels_to_screen_points() -> None:
+def test_map_action_to_screen_converts_image_picks_to_screen_points() -> None:
     """The coordinate gate converts image-space picks into real screen points."""
-    click = scale_action_coordinates(_click(50, 25), 2.0)
+    doubling = ScreenMap(logical=Size(1024.0, 600.0), image=Size(512.0, 300.0))
+    click = map_action_to_screen(_click(50, 25), doubling)
+    assert isinstance(click, MouseClick)
     assert (click.x, click.y) == (100, 50)
-    move = scale_action_coordinates(MouseMove(type="mouse_move", x=10, y=20), 2.0)
+    move = map_action_to_screen(MouseMove(type="mouse_move", x=10, y=20), doubling)
+    assert isinstance(move, MouseMove)
     assert (move.x, move.y) == (20, 40)
-    # Factor 1.0 is a passthrough (small display, no map): identity, not a copy.
+    # An identity map is a passthrough (small display, no scaling and no
+    # offset): the same object, not a copy.
+    identity = ScreenMap(logical=Size(512.0, 300.0), image=Size(512.0, 300.0))
     click1 = _click(1, 2)
-    assert scale_action_coordinates(click1, 1.0) is click1
+    assert map_action_to_screen(click1, identity) is click1
     # Non-coordinate actions pass through untouched.
     from computeruse.orchestrator.schemas import PressHotkey
 
     hotkey = PressHotkey(type="press_hotkey", key="return")
-    assert scale_action_coordinates(hotkey, 2.0) is hotkey
+    assert map_action_to_screen(hotkey, doubling) is hotkey
+
+
+def test_map_action_to_screen_carries_the_display_offset() -> None:
+    """A pick on a secondary display lands on that display, not the primary one.
+
+    Actuation coordinates are global. A screenshot of a display whose corner
+    sits at x=1512 shows its own (0,0) as the desktop's (1512,0), so a click at
+    image x=10 belongs at 1512+20 — applying only the scale would put it on the
+    primary display's left edge.
+    """
+    secondary = ScreenMap(
+        logical=Size(1024.0, 600.0),
+        image=Size(512.0, 300.0),
+        origin=Point(1512.0, 0.0),
+    )
+    click = map_action_to_screen(_click(10, 20), secondary)
+    assert isinstance(click, MouseClick)
+    assert (click.x, click.y) == (1532, 40)
+    # A same-size map is still not an identity while the display is offset.
+    offset_only = ScreenMap(
+        logical=Size(512.0, 300.0),
+        image=Size(512.0, 300.0),
+        origin=Point(1512.0, 0.0),
+    )
+    assert not offset_only.is_identity
+    shifted = map_action_to_screen(_click(5, 6), offset_only)
+    assert isinstance(shifted, MouseClick)
+    assert (shifted.x, shifted.y) == (1517, 6)
 
 
 def test_runner_coordinate_gate_lands_model_picks_on_screen_points() -> None:

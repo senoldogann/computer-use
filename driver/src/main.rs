@@ -241,6 +241,8 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                         width: frame.width,
                         height: frame.height,
                         scale: frame.scale,
+                        origin_x: frame.origin_x,
+                        origin_y: frame.origin_y,
                         data_base64: base64::engine::general_purpose::STANDARD
                             .encode(&frame.bgra),
                 },

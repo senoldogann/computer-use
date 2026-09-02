@@ -165,7 +165,8 @@ not?).
                    Level + destructive-action check, classified from the accessibility title of
                    the control under the pointer — not from how the model described the click),
                    the coordinate gate (image space → screen
-                   points via the snapshot's ScreenMap), the fail-closed display-bounds check, and
+                   points via the snapshot's ScreenMap, display origin included), the fail-closed
+                   bounds check against the observed display's own rectangle, and
                    the positional gate — one live window read that catches both focus drift (the
                    target app no longer owns the screen) and decision staleness (the host moved on
                    during the model's turn).
@@ -209,7 +210,13 @@ not?).
 **Coordinate-space invariant.** There is exactly one conversion between the
 model's image space and the driver's logical screen points, and `ScreenMap`
 owns both directions: `to_image` for everything perception hands the model (AX
-rects included), `to_screen` for every coordinate the model hands back. A
+rects included), `to_screen` for every coordinate the model hands back. The map
+carries the captured display's global origin too, so the conversion is complete
+on a secondary display (`--display N`): the screenshot's (0,0) is that
+display's corner, actuation is global, and no caller can apply the scale and
+forget the shift. The fail-closed bounds gate is evaluated against that
+display's own rectangle, and AX elements on other displays are dropped before
+the model ever sees them. A
 screenshot whose ScreenMap cannot be computed is never shown to the model — a
 frame with an unknown coordinate space produces confidently wrong clicks, which
 is strictly worse than telling the model it is blind.

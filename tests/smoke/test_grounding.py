@@ -178,19 +178,33 @@ def test_summaries_to_image_space_divides_by_points_per_pixel() -> None:
     screenshot, and the actuation gate then scaled it a second time into a
     point the bounds check rejected. AX grounding was silently dead.
     """
+    from computeruse.vision import Point, ScreenMap, Size
+
+    halving = ScreenMap(logical=Size(1024.0, 600.0), image=Size(512.0, 300.0))
     scaled = summaries_to_image_space(
         (
             'Button "Reload" at (254,80) 44x24 value="x" (focused)',
             "(AX grounding truncated — rely on the screenshot map for coordinates)",
         ),
-        2.0,
+        halving,
     )
     assert scaled[0] == 'Button "Reload" at (127,40) 22x12 value="x" (focused)'
     # Lines without a coordinate fragment pass through untouched.
     assert scaled[1] == "(AX grounding truncated — rely on the screenshot map for coordinates)"
-    # Factor 1.0 (no map / small display) is an identity passthrough.
-    assert summaries_to_image_space(('Button "OK" at (2,4) 3x4',), 1.0) == (
+    # An identity map (no scaling, no display offset) is a passthrough.
+    identity = ScreenMap(logical=Size(512.0, 300.0), image=Size(512.0, 300.0))
+    assert summaries_to_image_space(('Button "OK" at (2,4) 3x4',), identity) == (
         'Button "OK" at (2,4) 3x4',
+    )
+    # A secondary display: the element is placed relative to the frame the
+    # model is looking at, not to the desktop's corner.
+    offset = ScreenMap(
+        logical=Size(1024.0, 600.0),
+        image=Size(512.0, 300.0),
+        origin=Point(1024.0, 0.0),
+    )
+    assert summaries_to_image_space(('Button "Far" at (1278,80) 44x24',), offset) == (
+        'Button "Far" at (127,40) 22x12',
     )
 
 
@@ -201,23 +215,29 @@ def test_summaries_round_trip_through_the_actuation_gate() -> None:
     reads off an AX line, the coordinate gate must convert back to where the
     element actually is. Off-by-a-factor bugs die here rather than on a host.
     """
-    from computeruse.orchestrator.loop import scale_action_coordinates
+    from computeruse.orchestrator.loop import map_action_to_screen
     from computeruse.orchestrator.schemas import MouseClick
     from computeruse.vision import Point, ScreenMap, Size
 
-    screen_map = ScreenMap(logical=Size(1512.0, 982.0), image=Size(512.0, 333.0))
-    element_point = Point(600.0, 400.0)
-    line = f'Button "Go" at ({element_point.x:.0f},{element_point.y:.0f}) 44x24'
-    (in_image,) = summaries_to_image_space((line,), screen_map.points_per_pixel)
-    model_x, model_y = (int(v) for v in in_image.split("at (")[1].split(")")[0].split(","))
-    actuated = scale_action_coordinates(
-        MouseClick(type="mouse_click", x=model_x, y=model_y),
-        screen_map.points_per_pixel,
-    )
-    assert isinstance(actuated, MouseClick)
-    # One image pixel is ~3 screen points, so a round trip lands within that.
-    assert abs(actuated.x - element_point.x) <= screen_map.points_per_pixel
-    assert abs(actuated.y - element_point.y) <= screen_map.points_per_pixel
+    for origin in (Point(0.0, 0.0), Point(1512.0, 0.0)):
+        # The round trip must hold on a secondary display too: both directions
+        # carry the same origin, so an offset cancels out exactly.
+        screen_map = ScreenMap(
+            logical=Size(1512.0, 982.0), image=Size(512.0, 333.0), origin=origin
+        )
+        element_point = Point(600.0 + origin.x, 400.0 + origin.y)
+        line = f'Button "Go" at ({element_point.x:.0f},{element_point.y:.0f}) 44x24'
+        (in_image,) = summaries_to_image_space((line,), screen_map)
+        model_x, model_y = (
+            int(v) for v in in_image.split("at (")[1].split(")")[0].split(",")
+        )
+        actuated = map_action_to_screen(
+            MouseClick(type="mouse_click", x=model_x, y=model_y), screen_map
+        )
+        assert isinstance(actuated, MouseClick)
+        # One image pixel is ~3 screen points, so a round trip lands within that.
+        assert abs(actuated.x - element_point.x) <= screen_map.points_per_pixel
+        assert abs(actuated.y - element_point.y) <= screen_map.points_per_pixel
 
 
 def test_summaries_include_deep_focused_element() -> None:

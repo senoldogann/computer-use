@@ -40,8 +40,33 @@ class ScreenCapture(BaseModel):
     width: int
     height: int
     scale: float
+    #: Top-left of the captured display in *global* logical points. Zero for
+    #: the primary display, and for a driver too old to report it — which is
+    #: also the only correct default: a single-display host has no offset, and
+    #: a multi-display one needs a driver that can tell us about it.
+    origin_x: float = 0.0
+    origin_y: float = 0.0
     pixel_format: Literal["bgra8"] = "bgra8"
     data: bytes
+
+    @property
+    def origin(self) -> Point:
+        """This display's top-left corner in global logical points."""
+        return Point(self.origin_x, self.origin_y)
+
+    @property
+    def logical_size(self) -> Size:
+        """The display's size in logical points (physical pixels / scale)."""
+        return Size(self.width / self.scale, self.height / self.scale)
+
+    @property
+    def display_frame(self) -> Rect:
+        """The display's rectangle in global logical points.
+
+        This — not "0,0 to width,height" — is the region a coordinate must fall
+        inside to be on the captured display.
+        """
+        return Rect(origin=self.origin, size=self.logical_size)
 
     @classmethod
     def from_response(cls, raw: Mapping[str, object]) -> ScreenCapture:
@@ -64,6 +89,11 @@ class ScreenCapture(BaseModel):
                 width=_require_int(raw, "width"),
                 height=_require_int(raw, "height"),
                 scale=_require_float(raw, "scale"),
+                # Optional on the wire: a driver that predates multi-display
+                # support reports no origin, and 0,0 is exactly right for the
+                # single-display host such a driver can serve.
+                origin_x=_optional_float(raw, "origin_x"),
+                origin_y=_optional_float(raw, "origin_y"),
                 pixel_format=fmt,
                 data=base64.b64decode(encoded),
             )
@@ -90,6 +120,16 @@ def _require_int(raw: Mapping[str, object], key: str) -> int:
 
 def _require_float(raw: Mapping[str, object], key: str) -> float:
     value = raw[key]
+    if not isinstance(value, (int, float)):
+        raise TypeError(f"{key} must be a number, got {type(value).__name__}")
+    return float(value)
+
+
+def _optional_float(raw: Mapping[str, object], key: str) -> float:
+    """A numeric field that older drivers omit entirely (defaults to 0.0)."""
+    value = raw.get(key)
+    if value is None:
+        return 0.0
     if not isinstance(value, (int, float)):
         raise TypeError(f"{key} must be a number, got {type(value).__name__}")
     return float(value)
@@ -144,6 +184,8 @@ def crop_capture(capture: ScreenCapture, rect: Rect) -> ScreenCapture:
             width=0,
             height=0,
             scale=capture.scale,
+            origin_x=capture.origin_x,
+            origin_y=capture.origin_y,
             data=b"",
         )
     region_w = x1 - x0
@@ -160,6 +202,8 @@ def crop_capture(capture: ScreenCapture, rect: Rect) -> ScreenCapture:
         width=region_w,
         height=region_h,
         scale=capture.scale,
+        origin_x=capture.origin_x,
+        origin_y=capture.origin_y,
         data=bytes(out),
     )
 
@@ -175,8 +219,9 @@ def verify_capture_region(
     loop carries: did the target region change between the pre- and post-action
     captures? The caller keeps only this aggregated :class:`Verification` in
     working state, never the raw bitmaps (Law 4: minimal working context).
-    Coordinates in ``region`` (logical points) are scaled by ``before.scale``
-    to align with the physical pixel grid (e.g. Retina 2.0).
+    Coordinates in ``region`` are *global* logical points; they are localised
+    to the captured display and scaled by ``before.scale`` to align with the
+    physical pixel grid (e.g. Retina 2.0).
     """
     if before.display_id != after.display_id:
         raise ValueError(
@@ -185,9 +230,15 @@ def verify_capture_region(
         )
     if (before.width, before.height, before.scale) != (after.width, after.height, after.scale):
         raise ValueError("cannot verify captures with different geometry or scale")
+    # ``region`` is in GLOBAL logical points (that is the space actions are
+    # actuated in), while the frame's pixel grid starts at the display's own
+    # corner. Subtract the display origin before scaling, or a region on a
+    # secondary display crops somewhere else entirely.
     scale = before.scale
+    local_x = region.origin.x - before.origin_x
+    local_y = region.origin.y - before.origin_y
     scaled_region = Rect(
-        origin=Point(region.origin.x * scale, region.origin.y * scale),
+        origin=Point(local_x * scale, local_y * scale),
         size=Size(region.size.width * scale, region.size.height * scale),
     )
     # Crop the raw BGRA bytes *first* so the luminance decode only ever sees
@@ -253,6 +304,11 @@ def downscale_to_max_side(capture: ScreenCapture, max_side: int = SCREENSHOT_MAP
         width=dst_w,
         height=dst_h,
         scale=1.0,
+        # A resampled frame still describes the same display: dropping the
+        # origin here would quietly reset every derived map to the primary
+        # display, which is exactly the bug the origin exists to prevent.
+        origin_x=capture.origin_x,
+        origin_y=capture.origin_y,
         data=bytes(out),
     )
 
@@ -326,6 +382,11 @@ def _downscale_integer(capture: ScreenCapture, factor: int) -> ScreenCapture:
         width=dst_w,
         height=dst_h,
         scale=1.0,
+        # A resampled frame still describes the same display: dropping the
+        # origin here would quietly reset every derived map to the primary
+        # display, which is exactly the bug the origin exists to prevent.
+        origin_x=capture.origin_x,
+        origin_y=capture.origin_y,
         data=bytes(out),
     )
 
@@ -373,6 +434,11 @@ def _downscale_general(capture: ScreenCapture, scale: float) -> ScreenCapture:
         width=dst_w,
         height=dst_h,
         scale=1.0,
+        # A resampled frame still describes the same display: dropping the
+        # origin here would quietly reset every derived map to the primary
+        # display, which is exactly the bug the origin exists to prevent.
+        origin_x=capture.origin_x,
+        origin_y=capture.origin_y,
         data=bytes(out),
     )
 
@@ -507,9 +573,12 @@ def screen_map_of(logical: ScreenCapture, mapped: ScreenCapture) -> ScreenMap:
     ``logical`` is the frame at logical-point resolution (what the driver
     actuates in) and ``mapped`` is the downscaled screenshot the model sees.
     Constructing the map from the two captures — rather than passing a bare
-    float around — makes the conversion direction impossible to get backwards.
+    float around — makes the conversion direction impossible to get backwards,
+    and carries the captured display's global origin so a frame from a
+    secondary display converts back into the space the driver clicks in.
     """
     return ScreenMap(
         logical=Size(float(logical.width), float(logical.height)),
         image=Size(float(mapped.width), float(mapped.height)),
+        origin=logical.origin,
     )

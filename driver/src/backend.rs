@@ -57,6 +57,14 @@ pub struct CaptureFrame {
     /// Physical pixels per logical point for this display (Retina == 2.0).
     /// Needed to translate global logical coordinates into pixel offsets.
     pub scale: f64,
+    /// Top-left corner of this display in the *global* logical point space
+    /// (the primary display sits at 0,0; a second display to its right sits
+    /// at its width). Actuation coordinates are global, so without this a
+    /// frame captured from a secondary display has no way back to the space
+    /// the driver clicks in — every coordinate read off it would land on the
+    /// primary display instead.
+    pub origin_x: f64,
+    pub origin_y: f64,
     /// BGRA8, row-major, top-down; length must equal ``width * height * 4``.
     pub bgra: Vec<u8>,
 }
@@ -646,6 +654,9 @@ impl Backend for SimulatedBackend {
             width: WIDTH,
             height: HEIGHT,
             scale: 1.0,
+            // The simulated host is a single display at the global origin.
+            origin_x: 0.0,
+            origin_y: 0.0,
             bgra,
         })
     }
