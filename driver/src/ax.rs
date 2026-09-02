@@ -643,6 +643,69 @@ pub fn press_element_at(pid: u32, x: f64, y: f64) -> Result<bool, BackendError> 
     Ok(performed == AX_ERROR_SUCCESS)
 }
 
+/// Put text into the element at a point, without focus and without the cursor.
+///
+/// The companion to :func:`press_element_at`, and the reason background mode is
+/// more than a click-only mode: typing goes through the global event stream, so
+/// it lands wherever the user is looking. Setting the value on the element
+/// itself does not.
+///
+/// The element is focused first — inside its own application, which does not
+/// bring that application forward. Many text fields refuse a value while
+/// unfocused, and the ones that accept it often ignore the change until they
+/// are; asking for both is what makes the write stick.
+///
+/// Returns whether the value was accepted. `false` is an ordinary answer: not
+/// every element is writable, and the caller falls back to synthetic typing.
+/// `true` is not proof the app *reacted* — a field can hold new text and never
+/// fire the change its page listens for — which is why the orchestrator still
+/// verifies against the screen.
+pub fn set_element_value(pid: u32, x: f64, y: f64, text: &str) -> Result<bool, BackendError> {
+    if !trusted() {
+        return Err(BackendError(
+            "Accessibility consent required to write into an element. Grant it \
+             in System Settings > Privacy & Security > Accessibility, then \
+             restart the driver."
+                .to_string(),
+        ));
+    }
+    let app = unsafe { AXUIElementCreateApplication(pid as i32) };
+    if app.is_null() {
+        return Err(BackendError(format!(
+            "AXUIElementCreateApplication failed for pid {pid}"
+        )));
+    }
+    let app = unsafe { CFType::wrap_under_create_rule(app) };
+    let mut element: CFTypeRef = std::ptr::null();
+    let hit = unsafe {
+        AXUIElementCopyElementAtPosition(app.as_CFTypeRef(), x as f32, y as f32, &mut element)
+    };
+    if hit != AX_ERROR_SUCCESS || element.is_null() {
+        return Ok(false);
+    }
+    let element = unsafe { CFType::wrap_under_create_rule(element) };
+    // Focus within the application first. This moves the app's own keyboard
+    // focus; it does not raise the window or disturb the user's foreground.
+    let focused_key = CFString::from_static_string("AXFocused");
+    unsafe {
+        AXUIElementSetAttributeValue(
+            element.as_CFTypeRef(),
+            focused_key.as_concrete_TypeRef() as CFTypeRef,
+            CFBoolean::true_value().as_CFTypeRef(),
+        );
+    }
+    let value_key = CFString::from_static_string("AXValue");
+    let value = CFString::new(text);
+    let wrote = unsafe {
+        AXUIElementSetAttributeValue(
+            element.as_CFTypeRef(),
+            value_key.as_concrete_TypeRef() as CFTypeRef,
+            value.as_concrete_TypeRef() as CFTypeRef,
+        )
+    };
+    Ok(wrote == AX_ERROR_SUCCESS)
+}
+
 /// The `CFBundleIdentifier` of a running process, or "" when it has none.
 ///
 /// The app's locale-independent identity. `app_name` is whatever the system

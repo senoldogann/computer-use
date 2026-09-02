@@ -63,6 +63,7 @@ from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
 from computeruse.skills.registry import SkillRegistry
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
+from computeruse.vision import AXElement
 from computeruse.vision.ax import (
     content_digest,
     interactive_summaries,
@@ -194,6 +195,19 @@ def guarded(
         )
 
     return guard
+
+
+def _focused_element(root: AXElement) -> AXElement | None:
+    """The element the application has focused, if any (pure).
+
+    Depth-first: a focused leaf is what actually receives keystrokes, and a
+    container may be marked focused on the way down to it.
+    """
+    for child in root.children:
+        found = _focused_element(child)
+        if found is not None:
+            return found
+    return root if root.focused and root.width > 0 and root.height > 0 else None
 
 
 def _display_viewport(
@@ -434,6 +448,33 @@ class Agent:
                     LOGGER.debug("target pid lookup failed: %s", exc)
                     return _current_pid()
 
+            def quiet_type(text: str) -> bool:
+                """Put text into whichever element the target app has focused.
+
+                Typing has no coordinates — it goes wherever focus is — so the
+                quiet path needs to find that element itself. The AX tree marks
+                it, and its centre is the point the driver writes to.
+                """
+                pid = target_pid()
+                if pid is None:
+                    return False
+                try:
+                    tree = client.ax_snapshot(
+                        pid=pid, max_depth=AX_MAX_DEPTH, max_nodes=AX_MAX_NODES
+                    )
+                except Exception as exc:  # noqa: BLE001 - fall back to the keyboard
+                    LOGGER.debug("focused-element lookup failed: %s", exc)
+                    return False
+                focused = _focused_element(tree)
+                if focused is None:
+                    return False
+                return client.ax_set_value(
+                    pid,
+                    focused.x + focused.width / 2,
+                    focused.y + focused.height / 2,
+                    text,
+                )
+
             def sense() -> ScreenCapture:
                 """The frame the model reasons about and verification diffs.
 
@@ -604,6 +645,7 @@ class Agent:
                 app_is_pinned=self._config.app is not None,
                 on_complete=on_complete,
                 quiet_press=quiet_press if self._config.background_actuation else None,
+                quiet_type=quiet_type if self._config.background_actuation else None,
                 completion_check=self._config.completion_check,
                 knowledge=knowledge,
                 settle_max_polls=self._config.settle_max_polls,

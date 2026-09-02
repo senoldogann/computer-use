@@ -451,6 +451,10 @@ impl Backend for QuartzBackend {
         self.hotkey(&[Modifier::Command], "v")
     }
 
+    fn ax_set_value(&self, pid: u32, point: Point, text: &str) -> Result<bool, BackendError> {
+        crate::ax::set_element_value(pid, point.x as f64, point.y as f64, text)
+    }
+
     fn app_pid(&self, app: &str) -> Result<Option<i32>, BackendError> {
         Ok(pid_of_running_app(app))
     }

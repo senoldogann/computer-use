@@ -280,6 +280,16 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                 Err(error) => Response::Error { message: error.0 },
             };
         }
+        Request::AxSetValue(params) => {
+            return match backend.ax_set_value(
+                params.pid,
+                point(params.x, params.y),
+                &params.text,
+            ) {
+                Ok(wrote) => Response::AxSetValue { wrote },
+                Err(error) => Response::Error { message: error.0 },
+            };
+        }
         Request::AxPress(params) => {
             return match backend.ax_press(params.pid, point(params.x, params.y)) {
                 Ok(pressed) => Response::AxPress { pressed },
