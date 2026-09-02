@@ -1,21 +1,34 @@
-"""OODA execution loop — the orchestration spine.
+"""The autonomy cycle — the orchestration spine.
 
-The loop follows Law 6's split *honestly*:
+One pass is ``OBSERVE -> UNDERSTAND -> PLAN -> VALIDATE -> ACT -> VERIFY ->
+RECOVER``, and the module keeps Law 6's split honestly:
 
 * ``decide_step`` is the pure core. It consumes an immutable
-  :class:`WorkingState` and a :class:`AgentTurn` decision, and returns a
-  routed :class:`StepOutcome` — but it never performs I/O. Routing (is this a
-  physical action for the driver, an internal ``wait``, a ``finish``, or an
-  invalid ``load_skill`` reaching the driver?) is a pure classification.
-  The ORIENT pure helpers (``target_point_of``, ``verification_region``,
-  ``visual_failure_diagnostics``) decide *what* and *where* to verify.
+  :class:`WorkingState` and an :class:`AgentTurn` decision and returns a routed
+  :class:`StepOutcome`, without performing any I/O. Routing (physical action,
+  internal ``wait``, ``finish``, or ``load_skill``) is a pure classification.
+  The pure verification helpers live in
+  :mod:`computeruse.orchestrator.evidence` (what should become observably
+  true) and :mod:`computeruse.orchestrator.failures` (what to do when it did
+  not).
 
-* :class:`OodaRunner` is the imperative shell. It owns the side effects:
-  asking a provider for the next decision, sleeping for internal ``wait``s,
-  dispatching physical actions to the driver, OBSERVING the screen before and
-  after a verifiable action (``sensor``), and folding a failure back into
-  state so the provider can steer around it (Law 2 self-correction — the
-  driver may ACK a click that landed on nothing; only the pixels know).
+* :class:`OodaRunner` is the imperative shell. It owns the side effects: taking
+  one :class:`Observation` per cycle, asking a provider for the next decision,
+  gating that decision (permissions, coordinate space, display bounds, focus
+  drift, staleness), dispatching to the driver, polling the witnesses that say
+  whether the action landed, and folding a classified failure back into state
+  so the provider can steer around it.
+
+Two invariants carry most of the reliability:
+
+* **One coordinate space.** :class:`~computeruse.vision.coordinates.ScreenMap`
+  owns both directions between the model's screenshot map and logical screen
+  points. Perception converts *into* image space once; actuation converts
+  *out of* it once. Nothing else does coordinate arithmetic.
+* **No verdict without evidence.** An action is declared failed only when a
+  witness directly denies it, or two independent witnesses agree nothing
+  happened. Silence is reported as silence — the loop never invents a failure
+  it cannot substantiate, and never accepts a success it cannot observe.
 
 The provider is a callable returning :class:`AgentTurn` rather than a hard-coded
 LLM, so weak and strong models — or a deterministic fake in tests — all flow
@@ -26,22 +39,39 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
+from computeruse.orchestrator.evidence import (
+    ActionExpectation,
+    CompletionVerdict,
+    Evidence,
+    app_evidence,
+    combine,
+    expectation_for,
+    text_evidence,
+    ui_state_evidence,
+    verification_diagnostic,
+)
+from computeruse.orchestrator.failures import (
+    MAX_CONSECUTIVE_FAILURES,
+    RecoveryAction,
+    UnrecoverableFailureError,
+    classify_failure,
+    recovery_for,
+    recovery_hint,
+)
 from computeruse.orchestrator.planner import GoalPlan, advance_plan
 from computeruse.orchestrator.schemas import (
     Action,
     ActivateApp,
     AgentTurn,
-    ClipboardPaste,
     Finish,
     LoadSkill,
     MouseClick,
     MouseDrag,
+    MouseMove,
     MouseScroll,
-    PressHotkey,
-    TypeText,
     Wait,
 )
 from computeruse.security.autonomy import (
@@ -53,14 +83,25 @@ from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
-from computeruse.vision.capture import ScreenCapture, verify_capture_region
+from computeruse.vision.ax import summaries_to_image_space
+from computeruse.vision.capture import (
+    SCREENSHOT_MAP_MAX_SIDE,
+    ScreenCapture,
+    capture_to_base64_png,
+    coarse_fingerprint,
+    downscale_to_max_side,
+    frame_fingerprint,
+    screen_map_of,
+    to_logical_resolution,
+    verify_capture_region,
+)
 from computeruse.vision.coordinates import (
     CoordinateOutOfBoundsError,
     Point,
     Rect,
+    ScreenMap,
     Size,
 )
-from computeruse.vision.diff import ChangeKind, ChangeVerdict
 from computeruse.vision.focus import FocusedWindow, window_summary
 
 if TYPE_CHECKING:
@@ -87,12 +128,27 @@ _PHYSICAL_ACTIONS: Final[frozenset[str]] = frozenset(
 )
 _INTERNAL_ACTIONS: Final[frozenset[str]] = frozenset({"wait", "load_skill", "finish"})
 
-# Stuck-loop guard thresholds (Law 2): after 3 consecutive identical physical
-# actions the provider receives a corrective hint; the action that would be
-# the 5th repeat is never executed — the loop always terminates even against
-# a degenerate model.
+# Stuck-loop guard thresholds (Law 2): after 3 consecutive equivalent
+# physical actions (same intent within STUCK_REPEAT_TOLERANCE_PX) with no
+# screen progress the provider receives a corrective hint; the action that
+# would exceed REPEAT_ABORT_AFTER is never executed — the loop always
+# terminates even against a degenerate model.
 REPEAT_WARN_AFTER: Final[int] = 2
 REPEAT_ABORT_AFTER: Final[int] = 3
+
+# Post-action settle budget. The host needs time to render before the
+# after-observation is meaningful: capturing immediately reads a half-drawn
+# frame and reports "nothing changed" for an action that landed perfectly.
+# Polling the window title (see ``_wait_for_settle``) returns early on a fast
+# app, so the full budget is only ever paid when nothing observable moves.
+SETTLE_MAX_POLLS: Final[int] = 8
+SETTLE_INTERVAL_S: Final[float] = 0.1
+
+# How many times a claimed completion may be rejected by the auditor before
+# the loop accepts the model's own verdict. Without a cap, an auditor and an
+# actor that permanently disagree would trade turns until the step budget
+# ran out — a stalemate is a worse outcome than an honestly-reported finish.
+MAX_FINISH_REJECTIONS: Final[int] = 2
 
 # Physical actions whose identical repetition signals a stuck loop. mouse_move
 # is deliberately excluded: re-positioning the cursor to the same point is a
@@ -105,6 +161,14 @@ _REPETITION_SENSITIVE: Final[frozenset[str]] = frozenset(
 # an app-token hit scores +2, a tag hit +1). Below 2 the match is a single
 # weak tag coincidence and must not steer the run.
 SKILL_MOUNT_MIN_SCORE: Final[int] = 2
+
+# Two pointer actions count as "the same" (stuck-loop guard) when their
+# coordinates are within this many screen points of each other. A lost model
+# stuck on one target jitters its click coordinates by a few pixels each
+# repeat (observed in the field: 2-60px drift) — byte-identical comparison
+# never caught it. 32 points is roughly one UI row: two clicks this close are
+# the same intent, while genuinely different targets (tested) stay distinct.
+STUCK_REPEAT_TOLERANCE_PX: Final[int] = 32
 
 
 @dataclass(frozen=True)
@@ -225,9 +289,85 @@ def same_physical_action(left: Action, right: Action) -> bool:
 
     ``model_dump`` of the typed Pydantic action is the stable comparison key:
     two clicks are "the same" only when their coordinates, button, and click
-    count all match — a click 2px away is a different action (pure).
+    count all match — a click 2px away is a different action (pure). The
+    stuck-loop guard uses :func:`equivalent_action` on top of this so small
+    coordinate jitter cannot defeat it.
     """
     return left.model_dump(exclude_none=True) == right.model_dump(exclude_none=True)
+
+
+def scale_action_coordinates(action: Action, factor: float) -> Action:
+    """Map a model-emitted coordinate action from image space to screen points.
+
+    The VLM perceives the screenshot as a scaled-down map (max 512px, see
+    :func:`computeruse.vision.capture.downscale_to_max_side`), so every
+    coordinate it reports is in *image* pixels while the driver clicks in
+    *logical screen points*. This pure gate converts one space to the other
+    with the single deterministic factor computed at capture time — the model
+    never does scale math, and a coordinate picked from either the screenshot
+    or the (equally image-space) AX summaries lands exactly where the model
+    pointed. Non-coordinate actions pass through unchanged (pure).
+    """
+    if factor <= 0:
+        raise ValueError(f"coordinate scale factor must be positive, got {factor}")
+    if factor == 1.0:
+        return action
+
+    def scaled(value: int) -> int:
+        return round(value * factor)
+
+    if isinstance(action, MouseClick):
+        return action.model_copy(update={"x": scaled(action.x), "y": scaled(action.y)})
+    if isinstance(action, MouseMove):
+        return action.model_copy(update={"x": scaled(action.x), "y": scaled(action.y)})
+    if isinstance(action, MouseDrag):
+        return action.model_copy(
+            update={
+                "start_x": scaled(action.start_x),
+                "start_y": scaled(action.start_y),
+                "end_x": scaled(action.end_x),
+                "end_y": scaled(action.end_y),
+            }
+        )
+    return action
+
+
+def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REPEAT_TOLERANCE_PX) -> bool:
+    """True when two actions are the *same intent* within a coordinate tolerance.
+
+    A lost model repeats a click at the same spot with small coordinate
+    jitter, which defeats :func:`same_physical_action`'s byte-identical
+    comparison and lets it click forever with zero progress (observed: 8
+    identical-intent clicks that never tripped the guard). Pointer actions
+    are equivalent when their type and non-coordinate parameters match and
+    every coordinate is within ``tolerance`` screen points — one UI row, so
+    two clicks that close are the same target. Non-pointer actions keep the
+    exact payload comparison (pure).
+    """
+    if left.type != right.type:
+        return False
+    if isinstance(left, MouseClick) and isinstance(right, MouseClick):
+        return (
+            abs(left.x - right.x) <= tolerance
+            and abs(left.y - right.y) <= tolerance
+            and left.button == right.button
+            and left.click_count == right.click_count
+        )
+    if isinstance(left, MouseMove) and isinstance(right, MouseMove):
+        return (
+            abs(left.x - right.x) <= tolerance
+            and abs(left.y - right.y) <= tolerance
+            and left.duration_ms == right.duration_ms
+        )
+    if isinstance(left, MouseDrag) and isinstance(right, MouseDrag):
+        return (
+            abs(left.start_x - right.start_x) <= tolerance
+            and abs(left.start_y - right.start_y) <= tolerance
+            and abs(left.end_x - right.end_x) <= tolerance
+            and abs(left.end_y - right.end_y) <= tolerance
+            and left.duration_ms == right.duration_ms
+        )
+    return same_physical_action(left, right)
 
 
 def repetition_diagnostic(action: Action, repeats: int) -> str:
@@ -271,39 +411,6 @@ def target_point_of(action: Action) -> Point | None:
     return None
 
 
-def action_verification_kind(action: Action) -> Literal["region", "full", "window", "none"]:
-    """Select the least-assumptive verification strategy for an action.
-
-    * ``region`` — a local pixel diff around the action's target point
-      (clicks, drags, scrolls). Cheap and sufficient for element-level UI
-      changes (button highlight, menu open, checkbox toggle).
-    * ``full`` — a full-screen pixel diff. Used for actions that change
-      the entire visible page (submitting a search with Return, navigating
-      via a URL paste+Return, closing a modal with Escape). A local region
-      diff would miss the transition because the change is page-wide.
-    * ``window`` — a focused-window semantic check (activate_app).
-    * ``none`` — no pixel verification possible (plain modifier hotkeys
-      without a visible state change, or actions where only AXValue applies).
-    """
-    if isinstance(action, (MouseClick, MouseDrag, MouseScroll)):
-        return "region"
-    if isinstance(action, ActivateApp):
-        return "window"
-    if isinstance(action, PressHotkey):
-        # Return/Enter submits forms, searches, and dialogs — the entire
-        # page transitions. Escape closes modals/autocompletes — also
-        # full-screen. Other hotkeys (Cmd+L, Cmd+C, Cmd+V) are setup steps
-        # whose effect is verified by the *next* action's own pre-check
-        # (e.g. the paste that follows Cmd+L is verified by AXValue).
-        key = action.key.lower().strip()
-        if key in ("return", "enter"):
-            return "full"
-        if key == "escape":
-            return "full"
-        return "none"
-    return "none"
-
-
 def verification_region(target: Point, *, size: float = 48.0) -> Rect:
     """A square region (logical points) centred on an action's target.
 
@@ -316,27 +423,6 @@ def verification_region(target: Point, *, size: float = 48.0) -> Rect:
         raise ValueError(f"region size must be positive, got {size}")
     half = size / 2.0
     return Rect(Point(target.x - half, target.y - half), Size(size, size))
-
-
-def visual_failure_diagnostics(
-    action_type: str,
-    target: Point,
-    region: Rect,
-    verdict: ChangeVerdict,
-) -> str:
-    """The LLM-facing diagnostics when a verified action shows no change.
-
-    Kept pure so the message text is testable without a runner; the shell
-    folds this into ``last_error`` and the next provider turn steers around it
-    (Law 2 error injection).
-    """
-    return (
-        f"visual verification failed: {action_type} at ({target.x:.0f},{target.y:.0f}) "
-        f"produced no visible change in region {region} "
-        f"(mean_abs={verdict.mean_abs_change:.3f}, "
-        f"changed_fraction={verdict.changed_fraction:.3f}); the action likely did "
-        "not land — re-check the coordinates and current UI state before retrying"
-    )
 
 
 def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
@@ -359,6 +445,7 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
         knowledge=state.knowledge,
         active_window=state.active_window,
         ui_elements=state.ui_elements,
+        open_tabs=state.open_tabs,
         skill=state.skill,
         screenshot_b64=state.screenshot_b64,
         # The strategic plan is part of the rolling context: a decision must
@@ -368,52 +455,106 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
     return StepOutcome(state=next_state, action=action, route=route, step_label=step_label)
 
 
+@dataclass(frozen=True)
+class Observation:
+    """One complete OBSERVE cycle, stamped so staleness is detectable.
+
+    The loop used to scatter perception across half a dozen runner fields
+    (``_last_sensor_frame``, ``_last_capture_hash``, ``_screen_map_factor``,
+    the state's ``ui_elements`` …) that were invalidated one at a time. Any
+    path that forgot one of them left the next decision reading a frame from
+    before the last action — the "stale screenshot" class of failure. Binding
+    the whole cycle into one immutable value means perception is replaced
+    wholesale or not at all.
+    """
+
+    #: Raw frame at capture resolution; ``None`` when no sensor is configured.
+    frame: ScreenCapture | None
+    #: Base64 PNG of the screenshot map the model perceives, if vision is on.
+    screenshot_b64: str | None
+    #: The authoritative image-space <-> screen-space conversion for ``frame``.
+    screen_map: ScreenMap | None
+    #: Frontmost window as of this cycle, when the probe answered.
+    window: FocusedWindow | None
+    #: AX summaries rewritten into the model's image space — what the provider
+    #: reads coordinates from.
+    ui_elements: tuple[str, ...]
+    #: The AX probe's own output, in logical points. Verification compares
+    #: this against a fresh probe: comparing the rescaled form against a raw
+    #: one made every action look like it changed the UI, which silently
+    #: turned the AX witness into an unconditional "confirmed".
+    raw_ui_elements: tuple[str, ...]
+    open_tabs: tuple[str, ...]
+    #: Change-tolerant layout signature used for progress and staleness.
+    signature: str
+
+    @property
+    def app_name(self) -> str | None:
+        return self.window.app_name if self.window is not None else None
+
+
+EMPTY_OBSERVATION: Final = Observation(
+    frame=None,
+    screenshot_b64=None,
+    screen_map=None,
+    window=None,
+    ui_elements=(),
+    raw_ui_elements=(),
+    open_tabs=(),
+    signature="",
+)
+
+
+def observation_signature(observation: Observation) -> str:
+    """Collapse an observation into the identity used to detect progress (pure).
+
+    Composite by necessity: no single channel answers "did the screen move?"
+    in every configuration. The coarse frame fingerprint is silent when vision
+    is off; the window title is silent within a single page; the AX surface is
+    silent when consent is missing. The old signature used the raw screenshot
+    base64, which differs on *every* capture of a live desktop — so "the screen
+    changed" was always true and the stuck-loop guard could never fire — and
+    with vision off it was constant, so the guard fired on legitimate work.
+    """
+    window = observation.window
+    title = f"{window.app_name}|{window.window_title}" if window is not None else ""
+    return f"{observation.signature}|{title}|{hash(observation.raw_ui_elements)}"
+
+
 @dataclass
 class OodaRunner:
-    """Imperative shell: drives the OODA loop with the real side effects.
+    """Imperative shell: drives the full autonomy cycle with real side effects.
 
-    ``provider`` yields the next decision from a state; ``execute_physical``
-    physically runs a driver action and raises on failure; internal ``wait``s
-    sleep; ``finish`` ends the loop. ``max_steps`` bounds it so a degenerate
-    provider cannot spin forever; ``kill_switch`` (Law 5) is polled before
-    every step so a human can reclaim control at any moment — a trip surfaces
-    as :class:`KillSwitchTripped`.
+    One pass of the cycle is::
 
-    ``skill_scan``/``skill_loader`` (Law 3 RETRIEVE) are the two-stage
-    retrieval seam: ``skill_scan(goal)`` returns the ranked summary index
-    (Stage 1), and the top *same-app* match is loaded via ``skill_loader(id)``
-    and mounted into the provider's context (Stage 2). The provider can also
-    swap the mounted skill explicitly with a ``load_skill`` action.
+        OBSERVE -> UNDERSTAND -> PLAN -> VALIDATE -> ACT -> VERIFY -> RECOVER
 
-    ``guard`` (Law 5.1) is the VALIDATE step: given a proposed decision, it
-    returns a :class:`PermissionDecision`. ``BLOCK`` and ``CONFIRM`` raise the
-    typed errors before any physical action is dispatched.
+    * **OBSERVE** — :meth:`_observe` takes one :class:`Observation` (frame,
+      screenshot map, focused window, AX elements) and stamps it. Every
+      downstream step reads that single snapshot, so no two steps can disagree
+      about what the screen showed.
+    * **UNDERSTAND / PLAN** — ``skill_scan``/``skill_loader`` mount a relevant
+      workflow (Law 3), and the provider turns the observation into a decision.
+    * **VALIDATE** — the autonomy ``guard`` (Law 5.1), the coordinate gate, the
+      display-bounds check, the focus check, and the staleness check all run
+      *before* anything physical happens. A decision that fails any of them
+      never reaches the host.
+    * **ACT** — ``execute_physical`` dispatches to the driver, with the
+      kill-switch polled before, during, and after.
+    * **VERIFY** — :meth:`_verify` collects independent witnesses (pixels, AX
+      state, focused-field value, frontmost app) and asks
+      :mod:`computeruse.orchestrator.evidence` whether they corroborate the
+      action. Silence is never treated as failure.
+    * **RECOVER / REPLAN** — a failure is classified
+      (:mod:`computeruse.orchestrator.failures`), counted per signature, and
+      folded back into ``last_error`` with escalating guidance. The ladder ends
+      in :class:`~computeruse.orchestrator.failures.UnrecoverableFailureError`,
+      so the loop can neither repeat one mistake forever nor quit on the first.
 
-    ``sensor`` is the *single* capture source (Law 2 OBSERVE): a callable
-    returning a :class:`ScreenCapture`. Two flags decide how it is used:
-    ``verify_enabled`` drives the ORIENT step (capture *before* and *after* a
-    verifiable action, raising :class:`VisualVerificationFailedError` if the
-    target region did not change — the driver may ACK a click that landed on
-    nothing, and only the pixels know); ``vision_enabled`` drives the
-    multimodal OBSERVE (the same frame, downscaled to logical resolution,
-    feeds the provider's screenshot). One source, two consumers — the dual
-    ``sensor``/``screen_sensor`` split is gone. Without a sensor the loop
-    behaves exactly as before (backwards compatible).
-
-    ``window_probe`` (Law 2 OBSERVE) is a callable returning a
-    :class:`FocusedWindow`; ``ax_probe`` returns the compact UI-element
-    summaries of the frontmost app (ADR-2: AX *generates* the coordinates the
-    provider decides with). When provided, both are refreshed into every
-    provider state before each decision (and into ``last_error`` recovery
-    states), so the provider always knows what it is looking at and where the
-    actionable elements are. A probe failure degrades to the previous context
-    with a warning — perception is best-effort, never fatal.
-
-    ``app`` names the target application and ``on_complete`` is the DISTILL
-    step (Law 3/4): every terminal ``finish`` fires it with the executed
-    trajectory (successful actions only — the finish action itself excluded)
-    and the run outcome. The caller decides what to do (persist an episode,
-    distill a skill); the runner stays decoupled from the memory/skill stores.
+    ``completion_check`` is the honesty gate on ``finish``: a model claiming
+    success is re-asked, against a *fresh* observation, whether the goal is
+    actually satisfied. Without it a hallucinated success ends the run
+    unchallenged.
     """
 
     provider: Callable[[WorkingState], AgentTurn]
@@ -431,8 +572,8 @@ class OodaRunner:
     guard: Callable[[AgentTurn], PermissionDecision] | None = None
     confirm_handler: Callable[[AgentTurn], bool] | None = None
     sensor: Callable[[], ScreenCapture] | None = None
-    # Whether ``sensor`` is used for ORIENT verification (pre/post action
-    # pixel diff). Off = actions are executed but not pixel-verified.
+    # Whether ``sensor`` is used for VERIFY (pre/post action pixel comparison).
+    # Off = actions still get their AX/window witnesses, just not pixel ones.
     verify_enabled: bool = False
     # Whether ``sensor`` is used for the multimodal OBSERVE screenshot that
     # the provider sees each turn. Off = no screenshot is attached.
@@ -440,19 +581,30 @@ class OodaRunner:
     window_probe: Callable[[], FocusedWindow] | None = None
     ax_probe: Callable[[], AxProbeResult] | None = None
     # Semantic postcondition probe for typed/pasted text: returns the focused
-    # text field's current AXValue, or None when not determinable. When set,
-    # type_text/clipboard_paste are verified against it after actuation — a
-    # non-empty value that lacks the expected text is a real miss (ADR-2 AX
-    # as the state source). None means "skip verification" (insufficient
-    # evidence must never be claimed as success).
+    # text field's current AXValue, or None when not determinable.
     focused_text_value: Callable[[], str | None] | None = None
     # Optional cancellation-aware executor. The legacy executor remains the
     # public fallback; this seam lets long actions poll the kill switch without
     # changing existing callers.
     execute_physical_cancellable: Callable[[Action, Callable[[], bool]], None] | None = None
     app: str = "unknown"
+    # Whether the run is pinned to ``app``: the focus guard re-asserts it
+    # before positional actions. False when the app was merely discovered from
+    # whatever was frontmost, where "drift" is not a meaningful concept.
+    app_is_pinned: bool = False
     on_complete: Callable[[Trajectory, EpisodeOutcome], None] | None = None
+    # Goal-completion auditor (VERIFY, terminal): given the final state and the
+    # model's own summary, decide whether the goal is *observably* satisfied.
+    completion_check: Callable[[WorkingState, str], CompletionVerdict] | None = None
     knowledge: tuple[str, ...] = ()
+    # Post-action settle budget, in polls of ``settle_interval_s``. The
+    # runner is a mechanism and defaults to no wait; pacing is a product
+    # decision, and ``AgentConfig`` supplies the real host's budget
+    # (:data:`SETTLE_MAX_POLLS`). A caller driving a backend that never
+    # renders — the simulated driver, or an injected fake sensor — would
+    # otherwise pay a rendering delay for a screen that cannot change.
+    settle_max_polls: int = 0
+    settle_interval_s: float = SETTLE_INTERVAL_S
     max_steps: int = 100
     # Phase 3: the hierarchical plan the loop executes. When set, a ``finish``
     # marks the CURRENT sub-goal done and the loop advances to the next one
@@ -476,19 +628,33 @@ class OodaRunner:
         self._window_probe_warned: bool = False
         self._ax_probe_warned: bool = False
         self._screenshot_warned: bool = False
-            # Stuck-loop guard (Law 2): a single streak counter that combines
-        # "same action" + "no screen progress". When the same physical action
-        # is repeated AND the screen fingerprint is unchanged, the streak
-        # grows. After 2 (warn) the model gets a corrective hint; after 3
-        # (abort) the run terminates — a lost agent must never click forever.
-        # A different action OR a screen change resets the streak to 0.
+        # The single authoritative perception snapshot for the current turn.
+        self._observation: Observation = EMPTY_OBSERVATION
+        # Identity of the window the provider last decided against; the
+        # staleness gate compares it against a reading taken at actuation time.
+        self._decision_window: tuple[str, str] | None = None
+        self._stale_rejections: int = 0
+        # Stuck-loop guard (Law 2): the same physical intent repeated while
+        # the layout signature does not move.
         self._last_physical: Action | None = None
         self._stuck_streak: int = 0
-        self._last_progress_fingerprint: tuple[str | None, tuple[str, ...], str | None] | None = None
-        # Screenshot hash cache to avoid expensive redundant PNG re-encodings
+        # The action awaiting a progress verdict, and the observation
+        # signature captured just before it ran.
+        self._pending_action: Action | None = None
+        self._pre_action_signature: str = ""
+        # Screenshot encode cache, keyed by the exact frame fingerprint.
         self._last_capture_hash: str | None = None
         self._last_screenshot_b64: str | None = None
         self._last_error: str | None = None
+        # RECOVER: consecutive failures per failure signature, plus the total
+        # consecutive-failure count across all signatures.
+        self._failure_streaks: dict[str, int] = {}
+        self._consecutive_failures: int = 0
+        # Rejected finish claims, so a model that cannot prove completion still
+        # terminates instead of arguing with the auditor forever.
+        self._rejected_finishes: int = 0
+        # Whether a physical action ran since ``_observation`` was taken.
+        self._physical_since_capture: bool = False
 
     def run(self, goal: str) -> WorkingState:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
@@ -498,12 +664,20 @@ class OodaRunner:
         self._window_probe_warned = False
         self._ax_probe_warned = False
         self._screenshot_warned = False
+        self._observation = EMPTY_OBSERVATION
+        self._decision_window = None
+        self._stale_rejections = 0
         self._last_physical = None
         self._stuck_streak = 0
-        self._last_progress_fingerprint = None
+        self._pending_action = None
+        self._pre_action_signature = ""
         self._last_capture_hash = None
         self._last_screenshot_b64 = None
         self._last_error = None
+        self._failure_streaks = {}
+        self._consecutive_failures = 0
+        self._rejected_finishes = 0
+        self._physical_since_capture = False
         for _ in range(self.max_steps):
             # Law 5: yield control to the human the instant a kill-switch trips,
             # even mid-workflow — never start a fresh action against a takeover.
@@ -512,12 +686,12 @@ class OodaRunner:
                     f"human reclaimed control at step {state.step_index} for goal={goal!r}"
                 )
 
-            # Law 2 OBSERVE: refresh the focused-window and UI-element context
-            # before the provider decides, so the decision is grounded in what
-            # the host currently shows (ADR-2: AX/perception feeds generation).
+            # OBSERVE: one snapshot feeds the decision, the gates, and VERIFY.
             state = self._observe(state)
-            # Law 3 RETRIEVE: scan the skill index and mount a relevant skill
-            # into the context the provider decides against (two-stage).
+            # The fresh observation is also the verdict on the previous
+            # action: did anything actually move? (Stuck-loop guard.)
+            state = self._settle_progress(state)
+            # UNDERSTAND / RETRIEVE: mount a relevant skill (Law 3, two-stage).
             state = self._retrieve(state)
             if state.active_window or state.ui_elements:
                 LOGGER.info(
@@ -525,257 +699,43 @@ class OodaRunner:
                     state.active_window or "unknown",
                     len(state.ui_elements),
                 )
-            # Anti-hallucination guard: if the screen sensor is configured
-            # (real vision mode) but returned no screenshot, inject a warning
-            # so the model knows it is flying blind.
-            # Only fires after step 0 (the first probe may lag).
-            has_vision_configured = self.sensor is not None and self.vision_enabled
-            if (
-                has_vision_configured
-                and not state.screenshot_b64
-                and state.step_index > 0
-            ):
-                blind_warning = (
-                    "perception unavailable: live screenshot is unavailable. "
-                    "Grant Screen Recording consent (System Settings > Privacy & Security > "
-                    "Screen & System Audio Recording) or emit finish if the goal cannot be "
-                    "accomplished without visual grounding."
-                )
-                if state.last_error is None:
-                    state = WorkingState(
-                        goal=state.goal,
-                        completed_steps=state.completed_steps,
-                        last_error=blind_warning,
-                        step_index=state.step_index,
-                        knowledge=state.knowledge,
-                        active_window=state.active_window,
-                        ui_elements=state.ui_elements,
-                        skill=state.skill,
-                        screenshot_b64=state.screenshot_b64,
-                        plan=state.plan,
-                    )
+            state = self._warn_if_blind(state)
+            # The provider decides against exactly this snapshot; remember the
+            # window it describes so ACT can detect the host moving underneath.
+            self._decision_window = self._decision_window_of(self._observation)
             decision = self.provider(state)
             if decision.thought:
                 LOGGER.info("ooda thought: %s", decision.thought)
             if decision.sub_goal:
                 LOGGER.info("ooda sub_goal: %s", decision.sub_goal)
-            # Law 5.1 VALIDATE: the permission guard sees every proposed action
-            # *before* it becomes physical, and can hard-stop a dangerous move.
-            self._validate(decision)
-            outcome = decide_step(state, decision)
-            # Pure projection only advances step_index; completed_steps is still
-            # the pre-action list, so a failure below cannot pollute it (F2).
-            state = outcome.state
-
-            # Law 2 stuck-loop abort: refuse to execute the action that would
-            # be the 3rd consecutive identical repeat with no screen progress.
-            # The corrective hint already went into last_error after the 2nd,
-            # so a model that still repeats is not going to recover by clicking
-            # again. A screen change resets the streak — a repeated action
-            # against a *changing* screen is legitimate (e.g. clicking through
-            # a multi-step flow).
-            if outcome.route == "physical":
-                would_stuck = (
-                    self._stuck_streak + 1 if self._same_physical(outcome.action) else 0
+            # OpenAI computer-use lesson (action sequences): one model turn may
+            # carry an ordered batch of actions. Execute each in sequence
+            # within this same turn — every action is still individually
+            # validated, coordinate-gated, verified, and recorded — but no
+            # LLM round-trip happens between them, and the LLM turn is the
+            # dominant per-step cost (seconds, vs ~150ms for a capture). A
+            # failure or a finish ends the batch early; the loop then
+            # re-observes and asks the model for the next decision.
+            batch = decision.actions or [decision.action]
+            finished = False
+            for batch_index, batch_action in enumerate(batch):
+                if batch_index > 0:
+                    # Mid-batch: the previous action changed the screen, so
+                    # the model's pre-batch screenshot is stale. Refresh
+                    # perception (cheap — no LLM turn) so the next action
+                    # decides against the current frame, never the old one.
+                    state = self._observe(state)
+                    # The batch's later actions were chosen from the pre-batch
+                    # frame; accept them against the refreshed one rather than
+                    # tripping the staleness gate on our own re-observation.
+                    self._decision_window = self._decision_window_of(self._observation)
+                single = decision.model_copy(
+                    update={"action": batch_action, "actions": None}
                 )
-                if would_stuck >= REPEAT_ABORT_AFTER:
-                    raise StuckLoopError(
-                        action=outcome.action,
-                        repeats=would_stuck,
-                        goal=goal,
-                    )
-
-            try:
-                if outcome.route == "physical":
-                    # Capture meaningful actions before and after actuation;
-                    # semantic window checks take precedence where available.
-                    observed = self._observe_target(outcome.action)
-                    if observed is not None:
-                        before, target = observed
-                        # Fail-closed coordinate gate: a point outside the
-                        # observed display is rejected BEFORE any physical
-                        # effect (never clamped — Law 6.3).
-                        self._validate_bounds(outcome.action, before)
-                    self._execute_physical(outcome.action)
-                    # Any physical action may have changed the screen.
-                    # Invalidate the screenshot cache so the next OBSERVE
-                    # always captures a fresh frame — the model must never
-                    # see a stale pre-action screenshot as "current state".
-                    self._last_capture_hash = None
-                    self._last_screenshot_b64 = None
-                    if observed is not None:
-                        before, target = observed
-                        self._orient(before, target, outcome.action)
-                    elif self.window_probe is not None and isinstance(outcome.action, ActivateApp):
-                        self._verify_activation(outcome.action)
-                    elif isinstance(outcome.action, (TypeText, ClipboardPaste)):
-                        self._verify_text_insertion(outcome.action)
-                    # Even without --verify, page-navigation actions
-                    # (Return, Escape) need a settle delay before the next
-                    # OBSERVE captures — otherwise the model sees the
-                    # pre-navigation frame and acts on stale state.
-                    elif (
-                        not self.verify_enabled
-                        and action_verification_kind(outcome.action) == "full"
-                    ):
-                        self._wait_for_settle()
-                elif outcome.route == "internal_wait":
-                    self._sleep_for(outcome.action)
-                elif outcome.route == "internal_skill":
-                    # Explicit Stage 2: the provider asked for this skill by id;
-                    # mount it (replacing any auto-retrieved one).
-                    self._skill = self._load_skill_for(outcome.action)
-            except KillSwitchTripped:
-                # Physical drivers may also raise a trip (e.g. during a long
-                # type/drag); propagate it out cleanly rather than folding it
-                # into a generic failure.
-                raise
-            except Exception as exc:  # noqa: BLE001 - shell must survive provider/OS faults
-                # Law 2: fold the failure into state so the provider steers
-                # around it on the next iteration instead of dying. The failed
-                # step is deliberately NOT added to completed_steps (F2); the
-                # next provider turn sees an accurate picture of what ran.
-                failure_message = f"{type(exc).__name__}: {exc}"
-                self._last_error = failure_message
-                state = WorkingState(
-                    goal=state.goal,
-                    completed_steps=state.completed_steps,
-                    last_error=failure_message,
-                    step_index=state.step_index,
-                    knowledge=state.knowledge,
-                    active_window=state.active_window,
-                    ui_elements=state.ui_elements,
-                    skill=state.skill,
-                    screenshot_b64=state.screenshot_b64,
-                    plan=state.plan,
-                )
-                LOGGER.warning("ooda step %s failed: %s", outcome.action.type, state.last_error)
-                continue
-
-            # The action succeeded: only now does the step enter the completed
-            # history, keeping the trace honest for the next ORIENT (F2). The
-            # typed action joins the distilled trajectory too — except the
-            # finish itself, which is orchestrator-internal and would pollute
-            # the flow signature (every workflow would end with "finish").
-            if outcome.route != "finish":
-                self._executed.append(outcome.action)
-                self._sub_goals.append(decision.sub_goal or outcome.step_label)
-                if outcome.route == "physical":
-                    # Live step visibility: a real run takes seconds per LLM
-                    # decision, and a silent terminal reads as "nothing is
-                    # happening". Log every executed physical action with its
-                    # payload so an interactive user sees the agent working.
-                    LOGGER.info(
-                        "ooda %s: %s", outcome.step_label, outcome.action.model_dump(exclude_none=True)
-                    )
-            # Stuck-loop warn: after REPEAT_WARN_AFTER identical executions
-            # with no screen progress, fold the corrective hint into the next
-            # provider state so the model sees it *before* it repeats again.
-            repeat_hint: str | None = None
-            if outcome.route == "physical":
-                fingerprint = (state.active_window, state.ui_elements, state.screenshot_b64)
-                # First iteration: no previous fingerprint, so we can't claim
-                # the screen changed — treat as unchanged (conservative: the
-                # streak grows, which is the safe direction for a stuck model).
-                screen_changed = (
-                    self._last_progress_fingerprint is not None
-                    and self._last_progress_fingerprint != fingerprint
-                )
-                self._last_progress_fingerprint = fingerprint
-                repeat_hint = self._register_executed(outcome.action, screen_changed)
-            # A successful action clears obsolete recovery diagnostics. Preserve
-            # the most recent failure only when this action itself emitted a
-            # fresh repetition hint; otherwise a verified success restores a
-            # clean working context.
-            state = WorkingState(
-                goal=state.goal,
-                completed_steps=state.completed_steps + (outcome.step_label,),
-                last_error=repeat_hint if repeat_hint is not None else state.last_error,
-                step_index=state.step_index,
-                knowledge=state.knowledge,
-                active_window=state.active_window,
-                ui_elements=state.ui_elements,
-                # Authoritative runner skill state: reflects an explicit
-                # load_skill mounted earlier in this same iteration.
-                skill=self._skill,
-                screenshot_b64=state.screenshot_b64,
-                plan=state.plan,
-            )
-
-            if outcome.route == "finish":
-                if (
-                    isinstance(outcome.action, Finish)
-                    and outcome.action.status == "success"
-                    and (
-                        self.sensor is not None
-                        or self.window_probe is not None
-                        or self.ax_probe is not None
-                    )
-                ):
-                    self._verify_finish(state)
-                # Terminal decisions are a fresh control boundary: repetition
-                # diagnostics are useful while selecting an action, but must
-                # not survive a valid completion decision.
-                state = WorkingState(
-                    goal=state.goal,
-                    completed_steps=state.completed_steps,
-                    last_error=self._last_error,
-                    step_index=state.step_index,
-                    knowledge=state.knowledge,
-                    active_window=state.active_window,
-                    ui_elements=state.ui_elements,
-                    skill=self._skill,
-                    screenshot_b64=state.screenshot_b64,
-                    plan=state.plan,
-                )
-                # Phase 3: when executing a hierarchical plan, a ``finish``
-                # means the CURRENT sub-goal is done — advance to the next one
-                # instead of terminating. The loop ends only when the whole
-                # plan is complete (no pending/in-progress sub-goal remains).
-                if state.plan is not None:
-                    # The route says "finish", so the action must be a Finish;
-                    # narrow through the union explicitly (Law 6.3: never
-                    # getattr-bypass a routed invariant).
-                    if not isinstance(outcome.action, Finish):
-                        raise RuntimeError(
-                            f"OODA coding error: finish branch received "
-                            f"{type(outcome.action).__name__}"
-                        )
-                    success = outcome.action.status == "success"
-                    advanced = advance_plan(
-                        state.plan,
-                        success=success,
-                        error=outcome.action.summary if not success else None,
-                    )
-                    if advanced.current_sub_goal is not None:
-                        state = WorkingState(
-                            goal=state.goal,
-                            completed_steps=state.completed_steps,
-                            last_error=state.last_error,
-                            step_index=state.step_index,
-                            knowledge=state.knowledge,
-                            active_window=state.active_window,
-                            ui_elements=state.ui_elements,
-                            skill=self._skill,
-                            screenshot_b64=state.screenshot_b64,
-                            plan=advanced,
-                        )
-                        if self.on_sub_goal_complete is not None:
-                            self.on_sub_goal_complete(advanced)
-                        next_sub_goal = advanced.current_sub_goal
-                        assert next_sub_goal is not None
-                        LOGGER.info(
-                            "ooda sub-goal complete; next: %r (%s)",
-                            next_sub_goal.description,
-                            next_sub_goal.success_criteria,
-                        )
-                        continue
-
-                LOGGER.info("ooda finished goal=%r at step %s", goal, state.step_index)
-                # OODA step 7 (DISTILL): hand the executed trajectory to the
-                # caller so a successful run can become a reusable skill and
-                # every terminal run can be remembered (Law 3 + Law 4).
-                self._finalize(state, outcome.action)
+                state, finished, stop_batch = self._execute_one(state, single, goal)
+                if finished or stop_batch:
+                    break
+            if finished:
                 return state
 
         LOGGER.warning("ooda hit max_steps=%s on goal=%r", self.max_steps, goal)
@@ -783,104 +743,412 @@ class OodaRunner:
         # no DISTILL, no episode — and no ambiguity about why the run ended.
         raise MaxStepsError(steps=self.max_steps, goal=goal)
 
-    def _execute_physical(self, action: Action) -> None:
-        """Execute a physical action while honoring the emergency stop."""
-        def cancelled() -> bool:
-            return self.kill_switch is not None and self.kill_switch.tripped()
-
-        if cancelled():
-            raise KillSwitchTripped("human reclaimed control before physical action")
-        if self.execute_physical_cancellable is not None:
-            self.execute_physical_cancellable(action, cancelled)
-        else:
-            self.execute_physical(action)
-        if cancelled():
-            raise KillSwitchTripped("human reclaimed control during physical action")
-
-    def _same_physical(self, action: Action) -> bool:
-        """Whether an action continues the current identical-repeat streak."""
-        return self._last_physical is not None and same_physical_action(
-            self._last_physical, action
-        )
-
-    def _register_executed(self, action: Action, screen_changed: bool) -> str | None:
-        """Update the stuck-loop streak after a physical action succeeded.
-
-        Single streak counter: the streak grows only when the action is
-        identical to the previous one AND the screen did not change. Any
-        other action or any screen change resets to 0. Returns the corrective
-        hint once the streak reaches ``REPEAT_WARN_AFTER`` (the runner folds
-        it into ``last_error``); non-guard-sensitive actions reset the streak.
-        """
-        if not repetition_sensitive(action):
-            self._last_physical = None
-            self._stuck_streak = 0
+    @staticmethod
+    def _decision_window_of(observation: Observation) -> tuple[str, str] | None:
+        """The window identity a decision was made against (pure)."""
+        window = observation.window
+        if window is None:
             return None
-        is_same = self._same_physical(action)
-        if is_same and not screen_changed:
-            self._stuck_streak += 1
-        else:
-            self._stuck_streak = 0
-        self._last_physical = action
-        if self._stuck_streak >= REPEAT_WARN_AFTER:
-            return repetition_diagnostic(action, self._stuck_streak)
-        return None
+        return (window.app_name, window.window_title)
 
-    def _observe(self, state: WorkingState) -> WorkingState:
-        """Law 2 OBSERVE: refresh window + UI-element context before a decision.
+    def _warn_if_blind(self, state: WorkingState) -> WorkingState:
+        """Tell the model when vision was requested but is not available.
 
-        Best-effort by design: a probe failure (driver hiccup, consent revoked)
-        degrades to the previous context with a logged warning — a perception
-        gap must not abort the whole workflow, but it is never swallowed
-        silently (Law 6.3). Both probes are folded in one pure transition so
-        the state never flickers through a half-refreshed intermediate.
+        Flying blind is a legitimate (degraded) mode, but the model must know:
+        without this it keeps emitting coordinates as if it could see, and
+        every one of them is a guess.
         """
-        active_window = state.active_window
-        ui_elements = state.ui_elements
-        open_tabs = state.open_tabs
-        if self.window_probe is not None:
-            try:
-                active_window = window_summary(self.window_probe())
-            except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
-                if self._window_probe_warned:
-                    LOGGER.debug("focused-window probe still failing: %s", exc)
-                else:
-                    self._window_probe_warned = True
-                    LOGGER.warning("focused-window probe failed: %s", exc)
-        if self.ax_probe is not None:
-            try:
-                ax_result = self.ax_probe()
-                ui_elements = ax_result.summaries
-                open_tabs = ax_result.open_tabs
-            except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
-                if self._ax_probe_warned:
-                    LOGGER.debug("ui-element probe still failing: %s", exc)
-                else:
-                    self._ax_probe_warned = True
-                    LOGGER.warning("ui-element probe failed: %s", exc)
-        screenshot_b64 = state.screenshot_b64
-        if self.sensor is not None and self.vision_enabled:
-            screenshot_b64 = self._probe_screenshot() or state.screenshot_b64
-        if (
-            active_window == state.active_window
-            and ui_elements == state.ui_elements
-            and open_tabs == state.open_tabs
-            and screenshot_b64 == state.screenshot_b64
-        ):
+        if self.sensor is None or not self.vision_enabled:
             return state
-        return WorkingState(
-            goal=state.goal,
-            completed_steps=state.completed_steps,
-            last_error=state.last_error,
-            step_index=state.step_index,
-            knowledge=state.knowledge,
-            active_window=active_window,
-            ui_elements=ui_elements,
-            open_tabs=open_tabs,
-            skill=state.skill,
-            screenshot_b64=screenshot_b64,
-            plan=state.plan,
+        if state.screenshot_b64 or state.step_index == 0 or state.last_error is not None:
+            return state
+        return replace(
+            state,
+            last_error=(
+                "perception unavailable: live screenshot is unavailable. "
+                "Grant Screen Recording consent (System Settings > Privacy & Security > "
+                "Screen & System Audio Recording) or emit finish if the goal cannot be "
+                "accomplished without visual grounding."
+            ),
         )
+
+    def _execute_one(
+        self, state: WorkingState, decision: AgentTurn, goal: str
+    ) -> tuple[WorkingState, bool, bool]:
+        """Run one action through VALIDATE -> ACT -> VERIFY -> RECOVER (shell).
+
+        Returns ``(state, finished, stop_batch)``:
+
+        * ``finished`` — a terminal ``finish`` was accepted and the run is
+          complete (the caller returns the state).
+        * ``stop_batch`` — the batch must stop before this action's
+          successors: the action failed (the diagnosis is folded into
+          ``last_error`` for the next provider turn) or a ``finish`` advanced
+          a hierarchical plan. Either way the outer cycle re-observes.
+        """
+        # Coordinate gate: the provider reports coordinates in the screenshot
+        # map's image space; convert them to real screen points before
+        # anything validates or actuates them. ``ScreenMap`` owns the
+        # direction, so the conversion cannot be applied backwards.
+        screen_map = self._observation.screen_map
+        if screen_map is not None and not screen_map.is_identity:
+            decision = decision.model_copy(
+                update={
+                    "action": scale_action_coordinates(
+                        decision.action, screen_map.points_per_pixel
+                    )
+                }
+            )
+        # Law 5.1 VALIDATE: the permission guard sees every proposed action
+        # *before* it becomes physical, and can hard-stop a dangerous move.
+        # Deliberately outside the recovery handler: a policy denial is the
+        # user's decision, not a failure the agent may route around.
+        self._validate(decision)
+        outcome = decide_step(state, decision)
+        # Pure projection only advances step_index; completed_steps is still
+        # the pre-action list, so a failure below cannot pollute it (F2).
+        state = outcome.state
+
+        try:
+            if outcome.route == "physical":
+                # The repetition guard runs inside the recovery path, not
+                # before it: an agent stuck on one target deserves the same
+                # escalating "change your approach" ladder as any other
+                # failure. Aborting the whole run at the first trip threw away
+                # work the model could still have salvaged — while the ladder
+                # still guarantees termination, because a trip that keeps
+                # repeating climbs to ABORT within a handful of turns.
+                self._guard_stuck_loop(outcome.action, goal)
+                self._act_and_verify(outcome.action)
+            elif outcome.route == "internal_wait":
+                self._sleep_for(outcome.action)
+            elif outcome.route == "internal_skill":
+                # Explicit Stage 2: the provider asked for this skill by id;
+                # mount it (replacing any auto-retrieved one).
+                self._skill = self._load_skill_for(outcome.action)
+        except KillSwitchTripped:
+            # Physical drivers may also raise a trip (e.g. during a long
+            # type/drag); propagate it out cleanly rather than folding it
+            # into a generic failure.
+            raise
+        except Exception as exc:  # noqa: BLE001 - shell must survive provider/OS faults
+            # RECOVER: classify, count, and hand the model an escalating hint.
+            # The failed step is deliberately NOT added to completed_steps (F2)
+            # so the next turn sees an accurate picture of what actually ran.
+            hint = self._register_failure(exc, outcome.action, goal)
+            state = replace(state, last_error=hint)
+            LOGGER.warning("ooda step %s failed: %s", outcome.action.type, hint)
+            return state, False, True
+
+        # A terminal decision is judged before it is recorded: a completion
+        # claim the auditor rejects must leave no trace in the history (F2),
+        # exactly like a failed action.
+        if outcome.route == "finish":
+            return self._finish(state, outcome.action, outcome.step_label, goal)
+
+        # The action succeeded: only now does the step enter the completed
+        # history, keeping the trace honest for the next cycle (F2). The
+        # typed action joins the distilled trajectory too — except the
+        # finish itself, which is orchestrator-internal and would pollute
+        # the flow signature (every workflow would end with "finish").
+        self._executed.append(outcome.action)
+        self._sub_goals.append(decision.sub_goal or outcome.step_label)
+        if outcome.route == "physical":
+            # Live step visibility: a real run takes seconds per LLM decision,
+            # and a silent terminal reads as "nothing is happening". Log every
+            # executed physical action with its payload so an interactive user
+            # sees the agent working.
+            LOGGER.info(
+                "ooda %s: %s", outcome.step_label, outcome.action.model_dump(exclude_none=True)
+            )
+        if outcome.route == "physical":
+            self._record_for_progress(outcome.action)
+        # A successful action clears obsolete recovery diagnostics: the
+        # provider must not keep steering around a failure that already
+        # recovered (M1). A stuck-loop hint is re-injected by the next
+        # cycle's progress check, which is when the model can act on it.
+        self._last_error = None
+        self._failure_streaks.clear()
+        self._consecutive_failures = 0
+        state = replace(
+            state,
+            completed_steps=state.completed_steps + (outcome.step_label,),
+            last_error=None,
+            # Authoritative runner skill state: reflects an explicit
+            # load_skill mounted earlier in this same iteration.
+            skill=self._skill,
+        )
+        return state, False, False
+
+    # ------------------------------------------------------------------
+    # ACT + VERIFY
+    # ------------------------------------------------------------------
+
+    def _act_and_verify(self, action: Action) -> None:
+        """Gate, actuate, and corroborate one physical action.
+
+        Every gate runs before the host is touched, in cheapest-first order,
+        and each raises a typed error the recovery ladder understands.
+        """
+        expectation = expectation_for(action)
+        self._guard_positional(action)
+        before = self._pre_action_frame(expectation)
+        if before is not None:
+            # Fail-closed coordinate gate: a point outside the observed
+            # display is rejected BEFORE any physical effect (never clamped).
+            self._validate_bounds(action, before)
+        before_ui = self._observation.raw_ui_elements
+        before_window = self._observation.window
+
+        self._execute_physical(action)
+        # Any physical action may have changed the screen: invalidate the
+        # encode cache so the next OBSERVE captures and encodes a fresh frame.
+        self._last_capture_hash = None
+        self._last_screenshot_b64 = None
+
+        self._verify(action, expectation, before, before_ui, before_window)
+
+    def _pre_action_frame(self, expectation: ActionExpectation) -> ScreenCapture | None:
+        """The frame the bounds check and (optionally) the pixel witness read.
+
+        A cached OBSERVE frame is enough for the bounds check — display
+        geometry does not change between two actions, and re-capturing a Retina
+        frame is the single most expensive thing the loop can do. The pixel
+        witness is the one consumer that needs a frame taken *after* the
+        previous action: diffing against a screen two actions old would confirm
+        a change this action did not make.
+        """
+        if self.sensor is None:
+            return None
+        cached = self._observation.frame
+        needs_fresh = self.verify_enabled and expectation.pixel != "none"
+        if cached is not None and not (needs_fresh and self._physical_since_capture):
+            return cached
+        return self.sensor()
+
+    def _verify(
+        self,
+        action: Action,
+        expectation: ActionExpectation,
+        before: ScreenCapture | None,
+        before_ui: tuple[str, ...],
+        before_window: FocusedWindow | None,
+    ) -> None:
+        """Collect independent witnesses and judge whether the action landed.
+
+        The decisive design choice: a witness that cannot speak returns
+        ``INCONCLUSIVE`` and never fails the action, and a single confirming
+        witness outweighs silent ones. A failure needs either a *direct*
+        denial (the text is not in the field, the wrong app is frontmost) or
+        two corroborating *circumstantial* ones — which is what makes the
+        check safe to run on every action rather than the narrow subset a
+        pixel-only diff could judge without inventing failures.
+        """
+        if not expectation.is_verifiable:
+            return
+        if expectation.needs_settle:
+            self._wait_for_settle(before_window)
+
+        reports: list[tuple[str, Evidence]] = []
+        direct: list[Evidence] = []
+        circumstantial: list[Evidence] = []
+
+        if expectation.expected_app is not None:
+            verdict = app_evidence(expectation.expected_app, self._probe_app_name())
+            reports.append(("frontmost_app", verdict))
+            direct.append(verdict)
+        if expectation.expected_text is not None:
+            verdict = text_evidence(expectation.expected_text, self._probe_text_value())
+            reports.append(("focused_field", verdict))
+            direct.append(verdict)
+        if expectation.expects_ui_change and self.ax_probe is not None:
+            verdict = ui_state_evidence(before_ui, self._probe_ui_elements())
+            reports.append(("ax_state", verdict))
+            circumstantial.append(verdict)
+        if expectation.pixel != "none" and self.verify_enabled and before is not None:
+            verdict = self._pixel_evidence(before, expectation)
+            reports.append(("pixels", verdict))
+            circumstantial.append(verdict)
+
+        outcome = combine(direct=tuple(direct), circumstantial=tuple(circumstantial))
+        if outcome is Evidence.CONTRADICTED:
+            raise VerificationFailedError(
+                verification_diagnostic(action.type, expectation, tuple(reports))
+            )
+        detail = ", ".join(f"{name}={value.value}" for name, value in reports)
+        if outcome is Evidence.CONFIRMED:
+            LOGGER.info("ooda verified %s: %s", action.type, detail)
+        else:
+            # Not verified is not failed: say so once, at debug volume, and
+            # let the model's own next observation be the arbiter.
+            LOGGER.debug("ooda %s unverified (no conclusive witness): %s", action.type, detail)
+
+    def _pixel_evidence(
+        self, before: ScreenCapture, expectation: ActionExpectation
+    ) -> Evidence:
+        """Did the pixels corroborate the action (never the sole judge)?"""
+        sensor = self.sensor
+        if sensor is None:
+            return Evidence.INCONCLUSIVE
+        try:
+            after = sensor()
+        except Exception as exc:  # noqa: BLE001 - a dead sensor is silence, not failure
+            LOGGER.debug("post-action capture failed; pixels abstain: %s", exc)
+            return Evidence.INCONCLUSIVE
+        if before.display_id != after.display_id:
+            # The captures describe different displays; they cannot be compared.
+            return Evidence.INCONCLUSIVE
+        if expectation.pixel == "frame":
+            # A whole-frame comparison uses the coarse layout signature, not a
+            # byte hash: a byte hash "confirms" a navigation because a clock
+            # ticked, which is how a failed Return used to pass verification.
+            changed = coarse_fingerprint(before) != coarse_fingerprint(after)
+            return Evidence.CONFIRMED if changed else Evidence.CONTRADICTED
+        target = expectation.region_point
+        if target is None:
+            return Evidence.INCONCLUSIVE
+        if (before.width, before.height, before.scale) != (
+            after.width,
+            after.height,
+            after.scale,
+        ):
+            # Geometry changed under us (display reconfigured); that is itself
+            # a change, but not one this region diff can quantify.
+            return Evidence.CONFIRMED
+        verification = verify_capture_region(before, after, verification_region(target))
+        return Evidence.CONFIRMED if verification.changed else Evidence.CONTRADICTED
+
+    def _probe_app_name(self) -> str | None:
+        if self.window_probe is None:
+            return None
+        try:
+            return self.window_probe().app_name
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+            LOGGER.debug("window probe failed during verification: %s", exc)
+            return None
+
+    def _probe_text_value(self) -> str | None:
+        if self.focused_text_value is None:
+            return None
+        try:
+            return self.focused_text_value()
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+            LOGGER.debug("text-value probe failed during verification: %s", exc)
+            return None
+
+    def _probe_ui_elements(self) -> tuple[str, ...]:
+        if self.ax_probe is None:
+            return ()
+        try:
+            return self.ax_probe().summaries
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+            LOGGER.debug("ui-element probe failed during verification: %s", exc)
+            return ()
+
+    # ------------------------------------------------------------------
+    # Gates
+    # ------------------------------------------------------------------
+
+    def _guard_positional(self, action: Action) -> None:
+        """One fresh window read gates both focus drift and decision staleness.
+
+        Both questions are about the same thing — "does the window my
+        coordinates describe still own the screen?" — and both need a reading
+        taken *now*, not the one from before the model's turn. Sharing a single
+        ``focused_window`` probe answers them for the price of one small RPC.
+
+        Deliberately not a screenshot: re-capturing a Retina frame before every
+        click would roughly double the per-step capture cost, which is the
+        dominant latency in the loop. The window identity catches the races
+        that actually misplace a click — a navigation completing, an app
+        switching, a dialog taking over — while in-page content shifts remain
+        the job of post-action verification and the recovery ladder.
+        """
+        if not isinstance(action, (MouseClick, MouseDrag, MouseScroll)):
+            return
+        if self.window_probe is None:
+            return
+        try:
+            current = self.window_probe()
+        except Exception as exc:  # noqa: BLE001 - a perception gap must not block acting
+            LOGGER.debug("window probe failed before actuation: %s", exc)
+            return
+        self._guard_focus(current, action)
+        self._guard_staleness(current)
+
+    def _guard_focus(self, current: FocusedWindow, action: Action) -> None:
+        """Refuse positional actions while another app owns the screen.
+
+        Coordinates are meaningless once focus drifts: a dialog, a
+        notification, or the user clicking elsewhere silently re-points every
+        click at the wrong window. The run's target app is re-asserted once
+        (the driver's activation is idempotent) and only a second mismatch is
+        reported as a failure.
+        """
+        if not self.app_is_pinned or not current.app_name:
+            return
+        if app_evidence(self.app, current.app_name) is not Evidence.CONTRADICTED:
+            return
+        LOGGER.warning(
+            "focus drifted to %r; re-activating %r before %s",
+            current.app_name,
+            self.app,
+            action.type,
+        )
+        self.execute_physical(ActivateApp(type="activate_app", app=self.app))
+        try:
+            after = self.window_probe() if self.window_probe is not None else None
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+            LOGGER.debug("window probe failed after re-activation: %s", exc)
+            return
+        if after is not None and app_evidence(self.app, after.app_name) is Evidence.CONTRADICTED:
+            raise FocusLostError(
+                f"the target application {self.app!r} is not frontmost "
+                f"({after.app_name!r} is), and re-activating it did not help; "
+                "coordinates read from the screenshot refer to a window that is "
+                "no longer on top"
+            )
+
+    def _guard_staleness(self, current: FocusedWindow) -> None:
+        """Refuse coordinates derived from a window the host has moved past.
+
+        The model's turn takes seconds, during which a page can finish loading
+        or a new window can take over. Clicking a coordinate read off the old
+        layout then lands on whatever moved into that spot.
+
+        A second consecutive rejection falls through: on a host whose title
+        changes continuously (a video, a progress counter) blocking forever
+        would be worse than acting on a slightly old reading, and the
+        post-action witnesses still get the final say.
+        """
+        decided_at = self._decision_window
+        if decided_at is None:
+            return
+        if (current.app_name, current.window_title) == decided_at:
+            self._stale_rejections = 0
+            return
+        if self._stale_rejections >= 1:
+            LOGGER.warning("host still changing; acting on a slightly stale reading")
+            self._stale_rejections = 0
+            return
+        self._stale_rejections += 1
+        raise StaleObservationError(
+            f"the active window changed after this decision was made "
+            f"({decided_at[0]!r} — {decided_at[1]!r} became {current.app_name!r} — "
+            f"{current.window_title!r}); the coordinates describe a layout that is "
+            "no longer on screen — re-read the target from the new screenshot"
+        )
+
+    def _guard_stuck_loop(self, action: Action, goal: str) -> None:
+        """Refuse the repeat that would exceed the no-progress budget.
+
+        The corrective hint already went into ``last_error`` after the second
+        identical action; a model that still repeats is not going to recover by
+        repeating again.
+        """
+        would_stuck = self._stuck_streak + 1 if self._same_physical(action) else 0
+        if would_stuck >= REPEAT_ABORT_AFTER:
+            raise StuckLoopError(action=action, repeats=would_stuck, goal=goal)
 
     def _validate(self, decision: AgentTurn) -> None:
         """Law 5.1 VALIDATE: enforce the autonomy guard before actuating.
@@ -910,54 +1178,14 @@ class OodaRunner:
                 "requires human confirmation before it can run"
             )
 
-    def _probe_screenshot(self) -> str | None:
-        """Capture, downscale to logical resolution, and encode as base64 PNG.
-
-        Uses the screenshot cache: if the frame fingerprint matches the
-        previous capture, reuses the cached base64 string — avoids the full
-        PNG encode on an idle screen (the dominant case).
-        """
-        try:
-            from computeruse.vision.capture import (
-                capture_to_base64_png,
-                fallback_screencapture_b64,
-                frame_fingerprint,
-                to_logical_resolution,
-            )
-
-            capture = self.sensor()  # type: ignore[misc]
-            fingerprint = frame_fingerprint(capture)
-            if fingerprint == self._last_capture_hash and self._last_screenshot_b64 is not None:
-                return self._last_screenshot_b64
-            screenshot_b64 = capture_to_base64_png(to_logical_resolution(capture))
-            self._last_capture_hash = fingerprint
-            self._last_screenshot_b64 = screenshot_b64
-            return screenshot_b64
-        except Exception as exc:  # noqa: BLE001
-            from computeruse.vision.capture import fallback_screencapture_b64
-
-            fallback_b64 = fallback_screencapture_b64()
-            if fallback_b64 is not None:
-                self._last_screenshot_b64 = fallback_b64
-                return fallback_b64
-            if not self._screenshot_warned:
-                self._screenshot_warned = True
-                LOGGER.warning("screenshot capture failed during observe: %s", exc)
-            else:
-                LOGGER.debug("screenshot capture still failing: %s", exc)
-            return None
-
     def _validate_bounds(self, action: Action, capture: ScreenCapture) -> None:
         """Fail-closed: reject coordinates outside the observed main display.
 
         A model can hallucinate coordinates; the schema only enforces
         non-negative values. The captured frame's logical size (physical px /
-        scale) is the main display's bounds — a point beyond it (a phantom
-        coordinate, or a secondary-display target, which is not yet supported)
-        is rejected before any physical effect instead of silently clicking
-        somewhere the agent did not intend. The failure folds into
-        ``last_error`` so the next turn re-derives the coordinate from the
-        screenshot (ADR-2: perception grounds generation).
+        scale) is the main display's bounds — a point beyond it is rejected
+        before any physical effect instead of silently clicking somewhere the
+        agent did not intend.
         """
         logical_w = capture.width / capture.scale
         logical_h = capture.height / capture.scale
@@ -977,217 +1205,320 @@ class OodaRunner:
                     "the current screenshot."
                 )
 
-    def _observe_target(self, action: Action) -> tuple[ScreenCapture, Point] | None:
-        """Capture before verifiable actions.
+    # ------------------------------------------------------------------
+    # RECOVER
+    # ------------------------------------------------------------------
 
-        ``region`` actions get a local pre/post diff around their target
-        point. ``full`` actions (Return, Escape) get a full-screen pre/post
-        diff — the transition is page-wide, so a local region would miss it.
-        Scrolling is included: it has no point target, but the whole frame
-        is the observable region and a visible content transition is the
-        strongest available deterministic evidence.
+    def _register_failure(self, exc: Exception, action: Action, goal: str) -> str:
+        """Classify a failure, advance its ladder rung, and build the hint.
+
+        Raises :class:`UnrecoverableFailureError` when the ladder is exhausted
+        — the guarantee that one obstacle can never consume a whole run.
         """
-        if self.sensor is None or not self.verify_enabled:
-            return None
-        kind = action_verification_kind(action)
-        if kind == "region":
-            target = target_point_of(action)
-            if target is None:
-                if isinstance(action, MouseScroll):
-                    return (self.sensor(), Point(0, 0))
-                return None
-            return (self.sensor(), target)
-        if kind == "full":
-            # Full-screen diff: target is (0,0) and the orient step uses the
-            # entire frame as the region. A Return key submits a search →
-            # the page changes; an Escape closes a modal → the screen changes.
-            return (self.sensor(), Point(0, 0))
-        return None
+        failure = classify_failure(exc, action)
+        streak = self._failure_streaks.get(failure.signature, 0) + 1
+        self._failure_streaks[failure.signature] = streak
+        self._consecutive_failures += 1
+        if recovery_for(streak) is RecoveryAction.ABORT:
+            raise UnrecoverableFailureError(failure=failure, streak=streak, goal=goal)
+        if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            raise UnrecoverableFailureError(
+                failure=failure, streak=self._consecutive_failures, goal=goal
+            )
+        if recovery_for(streak) is RecoveryAction.REPLAN and self._skill is not None:
+            # A mounted workflow that keeps failing is actively misleading the
+            # model — unmount it so the replan starts from the real screen.
+            LOGGER.info("unmounting skill %s after repeated failures", self._skill.skill_id)
+            self._skill = None
+        hint = recovery_hint(failure, streak)
+        self._last_error = hint
+        return hint
 
-    def _orient(self, before: ScreenCapture, target: Point, action: Action) -> None:
-        """Law 2 ORIENT: verify the action changed its target region on screen.
+    def _record_for_progress(self, action: Action) -> None:
+        """Remember an executed action so the NEXT observation can judge it.
 
-        Captures after the action, diffs the region around ``target``, and
-        raises :class:`VisualVerificationFailedError` (with rich diagnostics
-        for the next provider turn) when the region did not change. The generic
-        handler in :meth:`run` folds that failure into ``last_error`` and the
-        failed step never enters ``completed_steps`` (F2).
+        Progress is deliberately evaluated one cycle late. Asking "did the
+        screen move?" immediately after actuating means either an extra probe
+        per step or a read of a half-rendered frame; the next cycle's OBSERVE
+        already captures a settled screen for free, and its signature answers
+        the same question with no additional I/O.
+        """
+        if not repetition_sensitive(action):
+            self._pending_action = None
+            self._last_physical = None
+            self._stuck_streak = 0
+            return
+        self._pending_action = action
+        self._pre_action_signature = observation_signature(self._observation)
 
-        ``full`` verification kinds (Return, Escape) diff the entire frame:
-        the transition is page-wide, so a 48pt local region would miss it.
-        ``region`` kinds diff a generous square around the target point.
+    def _settle_progress(self, state: WorkingState) -> WorkingState:
+        """Score the previous action against the fresh observation (stuck guard).
+
+        The streak grows only when an action repeated the one before it AND
+        nothing observable moved. Any different action, or any real change,
+        resets it. At ``REPEAT_WARN_AFTER`` the corrective hint is folded into
+        the state the provider is about to read — before it repeats again.
+        """
+        pending = self._pending_action
+        if pending is None:
+            return state
+        self._pending_action = None
+        moved = observation_signature(self._observation) != self._pre_action_signature
+        if self._same_physical(pending) and not moved:
+            self._stuck_streak += 1
+        else:
+            self._stuck_streak = 0
+        self._last_physical = pending
+        if self._stuck_streak < REPEAT_WARN_AFTER:
+            return state
+        hint = repetition_diagnostic(pending, self._stuck_streak)
+        self._last_error = hint
+        return replace(state, last_error=hint)
+
+    def _same_physical(self, action: Action) -> bool:
+        """Whether an action continues the current repeat streak."""
+        return self._last_physical is not None and equivalent_action(
+            self._last_physical, action
+        )
+
+    # ------------------------------------------------------------------
+    # OBSERVE
+    # ------------------------------------------------------------------
+
+    def _observe(self, state: WorkingState) -> WorkingState:
+        """Refresh the whole perception snapshot before a decision.
+
+        Best-effort by design: a probe failure (driver hiccup, consent revoked)
+        degrades to the previous context with a logged warning — a perception
+        gap must not abort the workflow, but it is never swallowed silently.
+        All probes fold into one immutable :class:`Observation`, so the state
+        never flickers through a half-refreshed intermediate.
+        """
+        previous = self._observation
+        window = previous.window
+        if self.window_probe is not None:
+            try:
+                window = self.window_probe()
+            except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+                if self._window_probe_warned:
+                    LOGGER.debug("focused-window probe still failing: %s", exc)
+                else:
+                    self._window_probe_warned = True
+                    LOGGER.warning("focused-window probe failed: %s", exc)
+        raw_ui_elements = previous.raw_ui_elements
+        open_tabs = previous.open_tabs
+        if self.ax_probe is not None:
+            try:
+                ax_result = self.ax_probe()
+                raw_ui_elements = ax_result.summaries
+                open_tabs = ax_result.open_tabs
+            except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+                if self._ax_probe_warned:
+                    LOGGER.debug("ui-element probe still failing: %s", exc)
+                else:
+                    self._ax_probe_warned = True
+                    LOGGER.warning("ui-element probe failed: %s", exc)
+
+        frame = previous.frame
+        screenshot_b64 = previous.screenshot_b64
+        screen_map = previous.screen_map
+        signature = previous.signature
+        if self.sensor is not None:
+            captured = self._capture_frame()
+            if captured is not None:
+                frame, screenshot_b64, screen_map = captured
+                signature = coarse_fingerprint(frame)
+                self._physical_since_capture = False
+        # One coordinate space for both perception sources: AX rects arrive in
+        # logical points and are rewritten into the image space the model reads
+        # coordinates from, so a coordinate picked from either source converts
+        # back with the same map.
+        ui_elements = raw_ui_elements
+        if screen_map is not None and not screen_map.is_identity and raw_ui_elements:
+            ui_elements = summaries_to_image_space(
+                raw_ui_elements, screen_map.points_per_pixel
+            )
+
+        self._observation = Observation(
+            frame=frame,
+            screenshot_b64=screenshot_b64,
+            screen_map=screen_map,
+            window=window,
+            ui_elements=ui_elements,
+            raw_ui_elements=raw_ui_elements,
+            open_tabs=open_tabs,
+            signature=signature,
+        )
+        active_window = window_summary(window) if window is not None else state.active_window
+        return replace(
+            state,
+            active_window=active_window,
+            ui_elements=ui_elements,
+            open_tabs=open_tabs,
+            screenshot_b64=screenshot_b64 if self.vision_enabled else None,
+        )
+
+    def _capture_frame(
+        self,
+    ) -> tuple[ScreenCapture, str | None, ScreenMap] | None:
+        """Capture one frame and derive the model's map from it.
+
+        The screenshot the VLM perceives and the map that converts its
+        coordinates are produced together, from the same capture, or not at
+        all. A capture that cannot yield both is discarded: a screenshot whose
+        coordinate space is unknown is worse than none, because every click
+        derived from it is confidently wrong.
         """
         sensor = self.sensor
         if sensor is None:
-            raise RuntimeError("ORIENT requires a sensor; this is a coding error")
-        # Post-action settle: page-navigation actions (Return submitting a
-        # search, Escape closing a modal) need the host to render before the
-        # after-capture is meaningful. A fixed delay is fragile — Chrome on
-        # a fast machine renders in 200ms, on a slow one in 2s. Instead,
-        # poll the focused-window title: if it changes (URL changed, page
-        # title changed), the navigation landed and we capture immediately.
-        # If the title is stable for the whole window, fall back to a final
-        # capture — the diff itself is the ultimate arbiter.
-        kind = action_verification_kind(action)
-        if kind == "full":
-            self._wait_for_settle()
-        after = sensor()
-        if before.display_id != after.display_id:
-            raise VisualVerificationFailedError(
-                action_type=action.type,
-                target=target,
-                region=verification_region(target),
-                verdict=ChangeVerdict(kind=ChangeKind.UNCHANGED, mean_abs_change=0.0, changed_fraction=0.0),
+            return None
+        try:
+            capture = sensor()
+        except Exception as exc:  # noqa: BLE001 - perception degradation is recoverable
+            if self._screenshot_warned:
+                LOGGER.debug("screen capture still failing: %s", exc)
+            else:
+                self._screenshot_warned = True
+                LOGGER.warning("screen capture failed during observe: %s", exc)
+            return None
+        logical = to_logical_resolution(capture)
+        mapped = downscale_to_max_side(logical, SCREENSHOT_MAP_MAX_SIDE)
+        screen_map = screen_map_of(logical, mapped)
+        if not self.vision_enabled:
+            return capture, None, screen_map
+        fingerprint = frame_fingerprint(capture)
+        if fingerprint == self._last_capture_hash and self._last_screenshot_b64 is not None:
+            return capture, self._last_screenshot_b64, screen_map
+        screenshot_b64 = capture_to_base64_png(mapped)
+        self._last_capture_hash = fingerprint
+        self._last_screenshot_b64 = screenshot_b64
+        return capture, screenshot_b64, screen_map
+
+    # ------------------------------------------------------------------
+    # Terminal handling
+    # ------------------------------------------------------------------
+
+    def _finish(
+        self, state: WorkingState, action: Action, step_label: str, goal: str
+    ) -> tuple[WorkingState, bool, bool]:
+        """Handle a terminal decision: audit it, advance the plan, or accept it.
+
+        The audit runs *before* any bookkeeping. A completion claim the checker
+        rejects must leave the run exactly as it found it — no recorded step, no
+        distilled trajectory — so the model's next turn sees an honest history
+        rather than one that already says it finished.
+        """
+        if not isinstance(action, Finish):
+            raise RuntimeError(  # noqa: TRY004 - routing invariant, not a caller type error
+                f"OODA coding error: finish branch received {type(action).__name__}"
             )
-        # Full-screen diff for Return/Escape; local region for clicks/scrolls.
-        if kind == "full" or isinstance(action, MouseScroll):
-            region = Rect(Point(0, 0), Size(float(before.width), float(before.height)))
-        else:
-            region = verification_region(target)
-        verification = verify_capture_region(before, after, region)
-        if verification.changed:
-            LOGGER.info(
-                "ooda verified %s at (%s,%s) -> %s",
-                action.type,
-                target.x,
-                target.y,
-                verification.verdict.kind.value,
-            )
-            # Invalidate the screenshot cache: the screen changed, so the
-            # next OBSERVE must capture and encode a fresh frame rather than
-            # reuse the pre-action cached one.
-            self._last_capture_hash = None
-            self._last_screenshot_b64 = None
-            return
-        raise VisualVerificationFailedError(
-            action_type=action.type,
-            target=target,
-            region=region,
-            verdict=verification.verdict,
+        if action.status == "success":
+            rejection = self._audit_completion(state, action)
+            if rejection is not None:
+                self._last_error = rejection
+                LOGGER.warning("ooda finish rejected: %s", rejection)
+                return replace(state, last_error=rejection), False, True
+        # Terminal decisions are a fresh control boundary: repetition
+        # diagnostics are useful while selecting an action, but must not
+        # survive a valid completion decision.
+        state = replace(
+            state,
+            completed_steps=state.completed_steps + (step_label,),
+            last_error=self._last_error,
+            skill=self._skill,
         )
-
-    def _wait_for_settle(self, *, max_polls: int = 10, interval_s: float = 0.15) -> None:
-        """Wait for the host to settle after a page-transition action.
-
-        Polls the focused-window title: if it changes (URL navigated, page
-        title changed), the transition landed and we return immediately —
-        no need to wait the full budget. If the window probe is unavailable
-        or the title never changes, we wait the full ``max_polls * interval_s``
-        (1.5s) as a fallback so the after-capture still has a chance to see
-        a rendered page rather than a half-loaded one.
-        """
-        import time
-
-        if self.window_probe is None:
-            time.sleep(max_polls * interval_s)
-            return
-        try:
-            before_title = self.window_probe().window_title
-        except Exception:  # noqa: BLE001 - probe is best-effort
-            time.sleep(max_polls * interval_s)
-            return
-        for _ in range(max_polls):
-            time.sleep(interval_s)
-            try:
-                after_title = self.window_probe().window_title
-            except Exception as exc:  # noqa: BLE001 - probe is best-effort
-                LOGGER.debug("window probe failed during settle poll: %s", exc)
-                continue
-            if after_title != before_title:
-                return  # Title changed — navigation landed.
-
-    def _verify_text_insertion(self, action: TypeText | ClipboardPaste) -> None:
-        """Verify typed/pasted text visibly landed in the focused input.
-
-        Uses the AXValue of the focused text field (ADR-2 state source). When
-        the probe is unavailable or the value is not determinable, verification
-        is skipped — absence of evidence must not fail a valid action (Law 2).
-        Only a *contradictory* value (non-empty yet lacking the expected text)
-        raises, because that is conclusive: the text did not land where the
-        agent thinks it did.
-        """
-        if self.focused_text_value is None or not action.text:
-            return
-        try:
-            current = self.focused_text_value()
-        except Exception as exc:  # noqa: BLE001 - a probe failure is a perception gap
-            LOGGER.debug("text-value probe failed; skipping semantic check: %s", exc)
-            return
-        if current is None or not current:
-            # Insufficient evidence (no focused text field, empty/redacted
-            # value): do not claim verification either way.
-            return
-        if action.text not in current:
-            raise SemanticVerificationFailedError(
-                f"text insertion verification failed: expected {action.text!r} to appear "
-                f"in the focused input field, but its current value is {current!r}. "
-                "The typing/paste did not land in the expected field — re-check which "
-                "field holds focus and where the text went before retrying."
+        # Phase 3: when executing a hierarchical plan, a ``finish`` means the
+        # CURRENT sub-goal is done — advance to the next one instead of
+        # terminating. The run ends only when the plan has no sub-goal left.
+        if state.plan is not None:
+            advanced = advance_plan(
+                state.plan,
+                success=action.status == "success",
+                error=action.summary if action.status != "success" else None,
             )
+            if advanced.current_sub_goal is not None:
+                state = replace(state, plan=advanced, skill=self._skill)
+                if self.on_sub_goal_complete is not None:
+                    self.on_sub_goal_complete(advanced)
+                next_sub_goal = advanced.current_sub_goal
+                LOGGER.info(
+                    "ooda sub-goal complete; next: %r (%s)",
+                    next_sub_goal.description,
+                    next_sub_goal.success_criteria,
+                )
+                return state, False, True
+            state = replace(state, plan=advanced)
 
-    def _verify_activation(self, action: ActivateApp) -> None:
-        """Verify that the requested app owns the focused window."""
-        if self.window_probe is None:
-            raise RuntimeError(
-                f"activation verification unavailable for {action.app!r}: "
-                "no focused-window probe is configured"
-            )
-        focused = self.window_probe()
-        if focused.app_name.casefold() != action.app.casefold():
-            raise RuntimeError(
-                f"activation verification failed: requested {action.app!r}, "
-                f"focused {focused.app_name!r}"
-            )
+        LOGGER.info("ooda finished goal=%r at step %s", goal, state.step_index)
+        # DISTILL: hand the executed trajectory to the caller so a successful
+        # run can become a reusable skill and every terminal run is remembered.
+        self._finalize(state, action)
+        return state, True, False
 
-    def _verify_finish(self, state: WorkingState) -> None:
-        """Require fresh observable evidence before accepting finish(success).
+    def _audit_completion(self, state: WorkingState, finish: Finish) -> str | None:
+        """Challenge a success claim; return the rejection reason, or None.
 
-        A configured screenshot or focused-window probe is evidence that the
-        final decision was made against a current host state. With neither
-        available, accepting success would turn a model claim into an
-        unverified completion.
+        A model that claims success is the least reliable witness to its own
+        success. Two gates apply, cheapest first: the run must have observable
+        perception at all, and — when an auditor is configured — a fresh,
+        narrowly-scoped re-read of the current screen must agree that the goal
+        is satisfied. A rejected claim is folded back as a normal recoverable
+        error, so the loop keeps working instead of ending on a fiction.
         """
         if self.sensor is None and self.window_probe is None and self.ax_probe is None:
-            raise RuntimeError(
-                "finish verification unavailable: no screenshot, focused-window, or AX probe"
-            )
+            # No perception at all: there is nothing to audit against, and
+            # inventing a rejection would trap the run. Production wiring
+            # always supplies probes (``Agent.run`` fails fast at startup when
+            # the sensor is unavailable), so this is the headless/test shape.
+            return None
         if self.vision_enabled and not state.screenshot_b64:
             raise RuntimeError(
                 "finish verification unavailable: the latest screenshot is missing"
             )
-        # The normal pre-decision observe already refreshed the authoritative
-        # state. Avoid an extra capture here: verification must not consume a
-        # second sensor frame or make finish depend on an unbounded probe.
-        if self.window_probe is not None or self.ax_probe is not None:
-            # Probes are best-effort perception sources; their failures are
-            # already diagnosed by OBSERVE and must not make finish handling
-            # less reliable than ordinary turns.
-            try:
-                if self.window_probe is not None:
-                    self.window_probe()
-                elif self.ax_probe is not None:
-                    self.ax_probe()
-            except Exception as exc:  # noqa: BLE001 - perception degradation is recoverable
-                LOGGER.warning("finish verification probe unavailable: %s", exc)
+        if self.completion_check is None:
+            return None
+        if self._rejected_finishes >= MAX_FINISH_REJECTIONS:
+            # The auditor and the actor disagree persistently. Accept the
+            # model's own verdict rather than looping: the run's honest
+            # outcome is recorded in ``last_error`` either way.
+            LOGGER.warning(
+                "accepting finish after %d rejected completion claims",
+                self._rejected_finishes,
+            )
+            return None
+        try:
+            verdict = self.completion_check(state, finish.summary)
+        except Exception as exc:  # noqa: BLE001 - the auditor must never kill a run
+            LOGGER.warning("completion audit unavailable: %s", exc)
+            return None
+        if verdict.satisfied:
+            LOGGER.info("ooda completion audited: %s", verdict.evidence)
+            return None
+        self._rejected_finishes += 1
+        return (
+            "completion check rejected this finish: "
+            f"{verdict.evidence} "
+            "The goal is not yet observably satisfied on screen. Either continue "
+            "working toward it, or emit finish with status \"failed\" and explain "
+            "what blocked it."
+        )
 
     def _finalize(self, state: WorkingState, finish: Action) -> None:
-        """OODA step 7: trigger the DISTILL/remember hooks on a terminal run.
+        """Trigger the DISTILL/remember hooks on a terminal run.
 
         Only fires when at least one action actually executed — an empty run
         carries no trajectory to distil and no episode worth remembering.
-        Aborted runs (``max_steps``) and kill-switch takeovers never reach
-        here: a truncated trace would teach the skill store noise.
+        Aborted runs (``max_steps``, unrecoverable failure) and kill-switch
+        takeovers never reach here: a truncated trace would teach the skill
+        store noise.
         """
         if self.on_complete is None or not self._executed:
             return
-        if finish.type != "finish":
-            # Internal invariant: only called from the finish branch.
-            raise RuntimeError("DISTILL requires a finish action; this is a coding error")
+        if not isinstance(finish, Finish):
+            raise RuntimeError(  # noqa: TRY004 - routing invariant, not a caller type error
+                "DISTILL requires a finish action; this is a coding error"
+            )
         outcome: EpisodeOutcome = "success" if finish.status == "success" else "failure"
-        # step_descriptions: the completed-steps labels ("<sub_goal> -> <type>")
-        # for the executed actions. The distiller folds the intent part into the
-        # flow signature, so two runs that click the same coordinates for
-        # DIFFERENT reasons no longer collide into one skill (Law 3.3).
         self.on_complete(
             Trajectory(
                 app=self.app,
@@ -1200,12 +1531,62 @@ class OodaRunner:
 
     @property
     def executed_trajectory(self) -> tuple[Action, ...]:
-        """The actions that physically succeeded in the most recent run.
-
-        Finishes and failed steps are excluded, so a caller auditing or
-        distilling from this never records work that did not happen.
-        """
+        """The actions that physically succeeded in the most recent run."""
         return tuple(self._executed)
+
+    # ------------------------------------------------------------------
+    # Primitives
+    # ------------------------------------------------------------------
+
+    def _execute_physical(self, action: Action) -> None:
+        """Execute a physical action while honoring the emergency stop."""
+
+        def cancelled() -> bool:
+            return self.kill_switch is not None and self.kill_switch.tripped()
+
+        if cancelled():
+            raise KillSwitchTripped("human reclaimed control before physical action")
+        if self.execute_physical_cancellable is not None:
+            self.execute_physical_cancellable(action, cancelled)
+        else:
+            self.execute_physical(action)
+        # Any physical action invalidates the reused OBSERVE frame: the next
+        # pre-action capture must be fresh, never a pre-action snapshot.
+        self._physical_since_capture = True
+        if cancelled():
+            raise KillSwitchTripped("human reclaimed control during physical action")
+
+    def _wait_for_settle(self, before_window: FocusedWindow | None) -> None:
+        """Give the host time to render before the after-observation.
+
+        A fixed delay is either too short (a slow page renders after the
+        capture, so verification sees a half-drawn frame and calls it
+        unchanged) or wasteful (a fast app rendered in 50ms). This polls the
+        cheapest available change signal — the focused window's title — and
+        returns the moment it moves, falling back to the full budget when
+        there is no probe or nothing changes.
+        """
+        import time
+
+        max_polls = self.settle_max_polls
+        interval_s = self.settle_interval_s
+        if max_polls <= 0 or interval_s <= 0:
+            return
+        if self.window_probe is None or before_window is None:
+            time.sleep(max_polls * interval_s)
+            return
+        for _ in range(max_polls):
+            time.sleep(interval_s)
+            try:
+                current = self.window_probe()
+            except Exception as exc:  # noqa: BLE001 - probe is best-effort
+                LOGGER.debug("window probe failed during settle poll: %s", exc)
+                continue
+            if (current.app_name, current.window_title) != (
+                before_window.app_name,
+                before_window.window_title,
+            ):
+                return  # The host moved on — no need to wait out the budget.
 
     def _sleep_for(self, action: Action) -> None:
         # The route says "internal_wait", so the action must be a Wait. Narrow
@@ -1225,12 +1606,7 @@ class OodaRunner:
         time.sleep(duration_ms / 1000.0)
 
     def _load_skill_for(self, action: Action) -> SkillDefinition:
-        """Law 3 Stage 2: load the requested skill's full definition.
-
-        Same discipline as _sleep_for: the route says "internal_skill", so the
-        action must be a LoadSkill — narrow, never getattr (Law 6.3). The
-        loaded definition is what the caller mounts into the working context.
-        """
+        """Law 3 Stage 2: load the requested skill's full definition."""
         if not isinstance(action, LoadSkill):
             raise RuntimeError(  # noqa: TRY004 - coding-invariant error, not a type error
                 f"OODA coding error: _load_skill_for received {type(action).__name__}, "
@@ -1242,15 +1618,15 @@ class OodaRunner:
         return self.skill_loader(skill_id)
 
     def _retrieve(self, state: WorkingState) -> WorkingState:
-        """OODA step 3 (Law 3): two-stage skill retrieval before a decision.
+        """Two-stage skill retrieval before a decision (Law 3).
 
         Stage 1 scans the summary index with the goal as the query; Stage 2
         loads the top *same-app* match (skills are app-scoped — another app's
         workflow must not mount) and carries its full instructions into the
         provider context. Runs at most once per run: after a mount, only an
-        explicit ``load_skill`` swaps the mounted skill. Best-effort: a scan
-        or load failure degrades to the unmounted context with a warning,
-        never aborts the workflow (Law 6.3).
+        explicit ``load_skill`` swaps the mounted skill (or repeated failures
+        unmount it). Best-effort: a scan or load failure degrades to the
+        unmounted context with a warning, never aborts the workflow.
         """
         if self.skill_scan is None or self.skill_loader is None:
             return state
@@ -1281,33 +1657,27 @@ class OodaRunner:
         except Exception as exc:  # noqa: BLE001 - retrieval is best-effort
             LOGGER.warning("skill load failed: %s", exc)
             return state
-        return WorkingState(
-            goal=state.goal,
-            completed_steps=state.completed_steps,
-            last_error=state.last_error,
-            step_index=state.step_index,
-            knowledge=state.knowledge,
-            active_window=state.active_window,
-            ui_elements=state.ui_elements,
-            skill=self._skill,
-            plan=state.plan,
-        )
+        return replace(state, skill=self._skill)
 
 
 class KillSwitchTripped(RuntimeError):
     """Raised when the human reclaims control of the physical host (Law 5).
 
-    Raised by the OODA loop and physical drivers when a kill-switch trips; a    caller distinguishes a user takeover from a generic action failure.
+    Raised by the OODA loop and physical drivers when a kill-switch trips; a
+    caller distinguishes a user takeover from a generic action failure.
     """
 
 
 class StuckLoopError(RuntimeError):
-    """The provider repeated one physical action with no progress (Law 2).
+    """The provider repeated one physical action with no observable progress.
 
     Raised *before* the repeat that would exceed ``REPEAT_ABORT_AFTER``, so the
-    run terminates with at most ``REPEAT_ABORT_AFTER - 1`` executions of the
-    same action. Guarantees the loop always ends even against a degenerate
-    model — a lost agent must never click the same spot forever.
+    host never sees more than ``REPEAT_ABORT_AFTER - 1`` executions of the same
+    intent. This is a recoverable failure, not a verdict on the run: it enters
+    the recovery ladder, where the model is told — with escalating firmness —
+    to change its approach. Only a model that keeps insisting reaches
+    :class:`~computeruse.orchestrator.failures.UnrecoverableFailureError`, which
+    is what guarantees the loop terminates against a degenerate provider.
     """
 
     def __init__(self, *, action: Action, repeats: int, goal: str) -> None:
@@ -1316,9 +1686,8 @@ class StuckLoopError(RuntimeError):
         self.goal = goal
         super().__init__(
             f"stuck loop: the agent repeated the identical {action.type} action "
-            f"{repeats} times for goal={goal!r} with no progress; aborting. "
-            "Make the goal more specific, or run with --verify so ORIENT can "
-            "confirm whether actions actually land."
+            f"{repeats} times for goal={goal!r} with nothing changing on screen; "
+            "this repeat was refused before it reached the host"
         )
 
 
@@ -1338,37 +1707,43 @@ class MaxStepsError(RuntimeError):
         )
 
 
+class FocusLostError(RuntimeError):
+    """The run's target application is no longer frontmost.
+
+    Every coordinate the model reads off a screenshot describes the window
+    that was on top when the frame was taken. Once focus drifts — a dialog, a
+    notification, the user clicking away — those coordinates address a
+    different window, and clicking them is worse than doing nothing. The loop
+    re-asserts the target app once and raises this only when that fails.
+    """
+
+
+class StaleObservationError(RuntimeError):
+    """The screen moved between the decision and its actuation.
+
+    The model's turn takes seconds, during which a page can finish loading or
+    a dialog can appear. Acting on the pre-change layout puts the click
+    wherever the new content happens to sit. Folded into ``last_error`` so the
+    next turn decides from the frame that actually exists.
+    """
+
+
 class SemanticVerificationFailedError(RuntimeError):
     """A text action was ACKed but the focused field shows no trace of it.
 
-    The ADR-2 AXValue postcondition contradicted the intended outcome: the
-    focused input's value is non-empty yet lacks the typed/pasted text. The
-    message is the LLM-facing hint folded into ``last_error`` so the next turn
-    re-targets instead of repeating the same miss.
+    The AXValue postcondition contradicted the intended outcome: the focused
+    input's value is non-empty yet lacks the typed/pasted text. Retained as a
+    distinct type so a caller can tell "the text went to the wrong field" from
+    a generic verification miss.
     """
 
 
-class VisualVerificationFailedError(RuntimeError):
-    """An action was ACKed by the driver but produced no visible change.
+class VerificationFailedError(RuntimeError):
+    """Every available witness contradicted an action's expected effect.
 
-    The ORIENT step's verdict: the pixels say the action did not land. Carries
-    the rich context Law 6.3 demands (target, region, both diff signals) so a
-    caller can log structured diagnostics; the message itself is the
-    LLM-facing hint folded into ``last_error`` for the next provider turn.
+    Not a pixel verdict: the loop asks pixels, the AX surface, the focused
+    field's value, and the frontmost app, and raises only when the witnesses
+    that could speak all reported the expected change did *not* happen. A
+    witness that abstains never contributes to this failure, which is what
+    makes the check safe to run on every action instead of a narrow subset.
     """
-
-    def __init__(
-        self,
-        *,
-        action_type: str,
-        target: Point,
-        region: Rect,
-        verdict: ChangeVerdict,
-    ) -> None:
-        self.action_type = action_type
-        self.target = target
-        self.region = region
-        self.verdict = verdict
-        super().__init__(
-            visual_failure_diagnostics(action_type, target, region, verdict)
-        )

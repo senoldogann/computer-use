@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from computeruse.orchestrator.schemas import MouseClick, PressHotkey
+from computeruse.orchestrator.schemas import MouseClick, PressHotkey, TypeText, Wait
 from computeruse.skills.distiller import Trajectory, distill, signature_of
 from computeruse.skills.registry import SkillRegistry, search
 from computeruse.skills.schemas import SkillDefinition, summary_of
@@ -47,6 +47,23 @@ def test_distill_produces_definition_with_stable_signature() -> None:
     assert result.kind == "skill"
     assert result.definition is not None
     assert result.signature == signature_of(traj)
+
+
+def test_distill_signature_ignores_pacing_fields() -> None:
+    """L14: two runs of the same flow with different wait/typing pacing share
+    one signature — pacing is not workflow meaning, and hashing it would break
+    de-dup between two runs of the same skill."""
+    slow = (
+        Wait(type="wait", duration_ms=1000, reason="settle"),
+        TypeText(type="type_text", text="hello", wpm=30),
+    )
+    fast = (
+        Wait(type="wait", duration_ms=50, reason="settle"),
+        TypeText(type="type_text", text="hello", wpm=90),
+    )
+    sig_slow = signature_of(Trajectory(app="Chrome", description="x", steps=slow))
+    sig_fast = signature_of(Trajectory(app="Chrome", description="x", steps=fast))
+    assert sig_slow == sig_fast
 
 
 def test_distill_deduplicates_identical_flow() -> None:

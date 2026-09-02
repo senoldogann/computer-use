@@ -99,6 +99,52 @@ def test_valid_clipboard_paste() -> None:
     assert frame.action.text == "https://github.com"
 
 
+def test_valid_action_batch() -> None:
+    """A batch of actions validates; ``action`` repeats the batch lead."""
+    frame = AgentTurn.model_validate(
+        {
+            "thought": "",
+            "sub_goal": "",
+            "action": {"type": "mouse_click", "x": 1, "y": 1},
+            "actions": [
+                {"type": "mouse_click", "x": 1, "y": 1},
+                {"type": "mouse_click", "x": 2, "y": 2},
+                {"type": "finish", "status": "success", "summary": "done"},
+            ],
+        }
+    )
+    assert frame.actions is not None
+    assert [a.type for a in frame.actions] == ["mouse_click", "mouse_click", "finish"]
+
+
+def test_finish_mid_batch_rejected() -> None:
+    """A batch must never continue acting after the run has ended."""
+    with pytest.raises(ValidationError):
+        AgentTurn.model_validate(
+            {
+                "thought": "",
+                "sub_goal": "",
+                "action": {"type": "finish", "status": "success", "summary": ""},
+                "actions": [
+                    {"type": "finish", "status": "success", "summary": ""},
+                    {"type": "mouse_click", "x": 1, "y": 1},
+                ],
+            }
+        )
+
+
+def test_empty_batch_rejected() -> None:
+    with pytest.raises(ValidationError):
+        AgentTurn.model_validate(
+            {
+                "thought": "",
+                "sub_goal": "",
+                "action": {"type": "mouse_click", "x": 1, "y": 1},
+                "actions": [],
+            }
+        )
+
+
 def test_negative_coordinate_rejected() -> None:
     frame = AgentTurn.model_validate_json(
         """

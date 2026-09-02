@@ -171,6 +171,22 @@
   .status-text.w { color: var(--warning); }
   .status-text.e { color: var(--error); }
 
+  /* Live usage counters: total tokens + elapsed time, fed by "st :" lines */
+  .stat-pill {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: var(--radius-pill);
+    background: #1E1E1E;
+    border: 0.5px solid var(--border);
+    font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+    font-size: 9.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .stat-pill svg { width: 10px; height: 10px; color: var(--accent); }
+
   .icon-btn {
     width: 24px;
     height: 24px;
@@ -287,10 +303,11 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 12px 14px;
+    gap: 2px;
+    padding: 10px 12px;
     min-height: 0;
-    background: var(--bg-base);
+    /* Streaming feed surface: near-black like the reference activity feed. */
+    background: #121212;
   }
 
   #log::-webkit-scrollbar,
@@ -370,79 +387,103 @@
     color: var(--text-primary);
   }
 
-  /* ----- Tree / Branch Timeline Flow ------------------------------------- */
-  .tree-group {
-    position: relative;
-    padding-left: 18px;
+  /* ----- Tree / Branch Timeline Flow ------------------------------------- */  .tree-group {
     display: flex;
     flex-direction: column;
-    gap: 5px;
-    margin-top: 4px;
-    margin-bottom: 4px;
+    gap: 4px;
     animation: fadeIn 0.2s ease-out;
   }
 
-  .tree-group::before {
-    content: "";
-    position: absolute;
-    left: 6px;
-    top: 8px;
-    bottom: 8px;
-    width: 1.5px;
-    background: rgba(80, 165, 116, 0.30);
-    border-radius: 1px;
-  }
-
   .branch-node {
-    position: relative;
     display: flex;
     align-items: flex-start;
   }
 
-  .branch-node::before {
-    content: "";
-    position: absolute;
-    left: -12px;
-    top: 11px;
-    width: 8px;
-    height: 8px;
-    border-left: 1.5px solid rgba(80, 165, 116, 0.30);
-    border-bottom: 1.5px solid rgba(80, 165, 116, 0.30);
-    border-bottom-left-radius: 4px;
-  }
-
-  .branch-node::after {
-    content: "";
-    position: absolute;
-    left: -13.5px;
-    top: 9.5px;
-    width: 4.5px;
-    height: 4.5px;
-    border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 5px var(--accent-glow);
-  }
-
-  /* All branch dots use accent; only error gets red */
-  .branch-node.node-err::after { background: var(--error); box-shadow: 0 0 5px var(--error-glow); }
-
+  /* Flat activity-feed rows (reference design: no boxes, no timeline rails) */
   .step-card {
     width: 100%;
-    background: #1A1A1A;
-    border: 0.5px solid var(--border);
-    border-radius: 7px;
-    padding: 5.5px 9px;
-    font-size: 10.5px;
-    color: var(--text-secondary);
-    line-height: 1.4;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 2.5px 6px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
     transition: background 0.15s ease;
   }
   .step-card:hover {
-    background: #222222;
-    border-color: var(--border-highlight);
+    background: #1A1C1A;
+  }
+
+  /* One streaming event row: small icon + monospace text, like the feed */
+  .feed-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    color: #C9C9C9;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .feed-line .feed-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: #50A574;
+  }
+  .feed-line .feed-icon svg { width: 12px; height: 12px; }
+  .feed-line .feed-text { flex: 1; min-width: 0; }
+  .feed-line .feed-meta {
+    flex-shrink: 0;
+    margin-left: auto;
+    padding-left: 8px;
+    font-size: 9px;
+    color: #5F5F5F;
+    align-self: center;
+  }
+
+  /* Group header row (e.g. a sub-goal) — slightly brighter, bolder */
+  .feed-line.feed-head {
+    color: #EDEDED;
+    font-weight: 600;
+    margin-top: 5px;
+  }
+  .feed-line.feed-head .feed-icon { color: #EDEDED; }
+
+  /* Indented child rows under a group header (the "searches under a count"
+     pattern from the reference feed) */
+  .feed-sub {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    padding-left: 18px;
+    font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+    font-size: 10.5px;
+    line-height: 1.45;
+    color: #858585;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+  .feed-sub .feed-icon { display: inline-flex; flex-shrink: 0; margin-top: 2px; color: #6E6E6E; }
+  .feed-sub .feed-icon svg { width: 11px; height: 11px; }
+  .feed-sub .expand-btn { margin-left: 4px; }
+
+  /* Group block: a header row (sub-goal / totals) followed by its indented
+     child rows — the reference feed's "header + children" pattern. */
+  .group-block {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px 0 3px;
+  }
+  .feed-nested {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-left: 18px;
   }
 
   .card-row {
@@ -540,6 +581,45 @@
     font-weight: 600;
     color: var(--text-primary);
     line-height: 1.35;
+  }
+
+  /* Confirmation Card (Law 5.1 panel approval) */
+  .card-confirm {
+    border-radius: var(--radius-md);
+    background: #241D15;
+    border: 0.5px solid rgba(255, 196, 90, 0.4);
+    padding: 8px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .card-confirm .confirm-msg {
+    font-size: 11px;
+    color: var(--text-primary);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .card-confirm .confirm-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .confirm-btn {
+    padding: 4px 12px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    font-weight: 700;
+    cursor: pointer;
+    border: 0.5px solid;
+  }
+  .confirm-btn.approve {
+    background: rgba(80, 165, 116, 0.15);
+    border-color: rgba(80, 165, 116, 0.4);
+    color: var(--accent);
+  }
+  .confirm-btn.deny {
+    background: rgba(255, 69, 58, 0.12);
+    border-color: rgba(255, 69, 58, 0.35);
+    color: var(--error);
   }
 
   /* Summary Card Banner */
@@ -936,6 +1016,8 @@
         <div class="status-dot ok" id="dot"></div>
         <span class="status-text" id="stLabel">Idle</span>
       </div>
+      <div class="stat-pill" id="statTokens" title="Toplam kullanılan token">⚡ 0 tok</div>
+      <div class="stat-pill" id="statElapsed" title="Toplam geçen süre">⏱ 0s</div>
       <button class="icon-btn" id="copyBtn" title="Tüm logları kopyala / Copy session logs" onclick="copySessionLogs()">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -1128,6 +1210,10 @@
   var runBtn = document.getElementById("run");
   var stopBtn = document.getElementById("stop");
   var clearBtn = document.getElementById("clearBtn");
+  var statsTokens = document.getElementById("statTokens");
+  var statsElapsed = document.getElementById("statElapsed");
+  window._lastTokens = 0;
+  window._lastElapsedS = 0;
   var dot = document.getElementById("dot");
   var stLabel = document.getElementById("stLabel");
 
@@ -1146,6 +1232,10 @@
 
   // SVG Icon Templates
   var ICONS = {
+    bulb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5"/></svg>',
+    globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+    laptop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="10" rx="2"/><line x1="2" y1="19" x2="22" y2="19"/></svg>',
+    flag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
     target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>',
     brain: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-2.04z"/></svg>',
     eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
@@ -1159,6 +1249,8 @@
     verify: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
     skill: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
     summary: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
+    search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+    bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
     err: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
     rerun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>'
   };
@@ -1272,6 +1364,17 @@
     return currentTree;
   }
 
+  function updateRunStats(line){
+    // "st : tok_total=1234 elapsed=41.3s" streamed by the CLI after every
+    // model call; feeds the header counters without touching the feed.
+    var t = (line.match(/tok_total=(\d+)/) || [])[1];
+    var e = (line.match(/elapsed=([\d.]+)s/) || [])[1];
+    var c = (line.match(/calls=(\d+)/) || [])[1];
+    if (t) { window._lastTokens = parseInt(t, 10) || 0; statsTokens.textContent = "⚡ " + window._lastTokens.toLocaleString("tr-TR") + " tok"; }
+    if (e) { window._lastElapsedS = parseFloat(e) || 0; statsElapsed.textContent = "⏱ " + Math.round(window._lastElapsedS) + "s"; }
+    if (c) { window._lastCalls = parseInt(c, 10) || 0; }
+  }
+
   function submit(){
     var g = goal.value.trim();
     if(!g) return;
@@ -1281,6 +1384,13 @@
 
     if (emptyHero) emptyHero.style.display = "none";
     currentTree = null; // Start fresh tree spine
+    // Fresh run, fresh counters.
+    window._lastTokens = 0;
+    window._lastElapsedS = 0;
+    window._lastCalls = 0;
+    statsTokens.textContent = "⚡ 0 tok";
+    statsElapsed.textContent = "⏱ 0s";
+    renderConnectCard();
     renderGoalCard(g, a);
     setRunning(true);
 
@@ -1311,6 +1421,7 @@
     currentRunRecord.durationSec = Math.round((Date.now() - currentRunRecord.startTime) / 1000) || 1;
     currentRunRecord.timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     currentRunRecord.dateStr = new Date().toLocaleDateString([], { month: 'short', day: 'numeric' });
+    currentRunRecord.tokens = window._lastTokens || 0;
 
     var hist = getStoredHistory();
     hist.unshift(currentRunRecord);
@@ -1449,15 +1560,20 @@
   }
 
   function renderGoalCard(goalText, appText) {
+    closeGroup();
     recordSessionEvent("Goal", (appText ? "[" + appText + "] " : "") + goalText);
+    // Reference pattern: "connected to the computer" style first line with a
+    // laptop icon; the target app rides as the indented child row.
     var card = document.createElement("div");
-    card.className = "card-goal";
-    card.innerHTML = 
-      '<div class="card-header">' +
-        '<span style="display:flex;align-items:center;gap:4px">' + ICONS.target + ' Active Goal</span>' +
-        (appText ? '<span>' + escapeHtml(appText) + '</span>' : '<span>Auto Focus</span>') +
-      '</div>' +
-      '<div class="card-body">' + escapeHtml(goalText) + '</div>';
+    card.className = "step-card";
+    var html = 
+      '<div class="feed-line feed-head"><span class="feed-icon">' + ICONS.laptop + '</span>' +
+      '<span class="feed-text">' + escapeHtml(goalText) + '</span></div>';
+    if (appText) {
+      html += '<div class="feed-sub"><span class="feed-icon">' + ICONS.globe + '</span>' +
+        '<span>Hedef uygulama · ' + escapeHtml(appText) + '</span></div>';
+    }
+    card.innerHTML = html;
     log.appendChild(card);
     log.scrollTop = log.scrollHeight;
   }
@@ -1471,19 +1587,61 @@
     log.scrollTop = log.scrollHeight;
   }
 
+  /* ----- Reference-feed group pattern ------------------------------------ */
+  // Streaming rows are grouped like the reference feed: a header line
+  // (💻 connected, ◎ sub-goal, 🔍 totals) with the rows that belong to it as
+  // indented children — the same shape as its "N arama çalıştırıldı" group.
+  var currentGroup = null;
+
+  function closeGroup() {
+    currentGroup = null;
+  }
+
+  function openGroup(headerHtml) {
+    closeGroup();
+    currentGroup = document.createElement("div");
+    currentGroup.className = "group-block";
+    currentGroup.innerHTML = headerHtml;
+    log.appendChild(currentGroup);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function appendNested(html) {
+    var wrap = document.createElement("div");
+    wrap.className = "feed-nested";
+    wrap.innerHTML = html;
+    (currentGroup || log).appendChild(wrap);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderConnectCard() {
+    // Reference feed: a laptop-icon "connected to the computer" first line.
+    var card = document.createElement("div");
+    card.className = "step-card";
+    card.innerHTML =
+      '<div class="feed-line"><span class="feed-icon">' + ICONS.laptop + '</span>' +
+      '<span class="feed-text">Bilgisayara bağlandı</span></div>';
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
+  }
+
   function renderThoughtCard(thoughtText) {
+    closeGroup();
     recordSessionEvent("Reasoning", thoughtText);
+    // Reference feed pattern: a reasoning/analysis line with a light-bulb icon.
     appendBranch("thought",
-      '<div class="card-tag thought">' + ICONS.brain + ' Reasoning</div>' +
-      '<div style="color:var(--text-secondary);font-size:11px;line-height:1.45;word-break:break-word;">' + escapeHtml(thoughtText) + '</div>'
+      '<div class="feed-line"><span class="feed-icon">' + ICONS.bulb + '</span>' +
+      '<span class="feed-text">' + escapeHtml(thoughtText) + '</span></div>'
     );
   }
 
   function renderSubgoalCard(subgoalText) {
     recordSessionEvent("Sub-goal", subgoalText);
-    appendBranch("subgoal",
-      '<div class="card-tag subgoal">' + ICONS.target + ' Sub-goal</div>' +
-      '<div style="font-weight:600;color:var(--text-primary);font-size:11.5px;word-break:break-word;">' + escapeHtml(subgoalText) + '</div>'
+    // Reference feed: a group header row whose steps follow as indented
+    // children — like the "N arama çalıştırıldı" header with its searches.
+    openGroup(
+      '<div class="feed-line feed-head"><span class="feed-icon">' + ICONS.target + '</span>' +
+      '<span class="feed-text">' + escapeHtml(subgoalText) + '</span></div>'
     );
   }
 
@@ -1494,27 +1652,25 @@
     var obsId = "obs_" + obsCounter;
     var htmlContent = "";
 
+    // Reference pattern: a "tab/view observed" line with a globe icon.
     if (obsText.length > 85) {
       var shortSnippet = escapeHtml(obsText.substring(0, 80)) + "...";
       var fullSnippet = escapeHtml(obsText);
       htmlContent = 
-        '<div class="card-row">' +
-          '<span class="card-tag" style="color:var(--accent);flex-shrink:0;margin-top:2px;">' + ICONS.eye + '</span>' +
-          '<div class="obs-text">' +
+        '<div class="feed-line"><span class="feed-icon">' + ICONS.globe + '</span>' +
+          '<span class="feed-text">' +
             '<span id="' + obsId + '_short">' + shortSnippet + '</span>' +
             '<span id="' + obsId + '_full" style="display:none;">' + fullSnippet + '</span>' +
             '<button class="expand-btn" id="' + obsId + '_btn" onclick="toggleExpand(\'' + obsId + '\')">+ Devamını göster</button>' +
-          '</div>' +
+          '</span>' +
         '</div>';
     } else {
       htmlContent = 
-        '<div class="card-row">' +
-          '<span class="card-tag" style="color:var(--accent);flex-shrink:0;margin-top:2px;">' + ICONS.eye + '</span>' +
-          '<div class="obs-text">' + escapeHtml(obsText) + '</div>' +
-        '</div>';
+        '<div class="feed-line"><span class="feed-icon">' + ICONS.globe + '</span>' +
+          '<span class="feed-text">' + escapeHtml(obsText) + '</span></div>';
     }
 
-    appendBranch("observe", htmlContent);
+    appendNested(htmlContent);
   }
 
   function renderActionCard(stepLabel, actionPayload) {
@@ -1579,28 +1735,31 @@
     saveStoredTotals(totals);
     recordSessionEvent("Action", stepLabel + ": " + actType + " " + detail.replace(/<[^>]+>/g, ""), String(actionPayload));
 
-    appendBranch("action",
-      '<div style="display:flex;align-items:center;justify-content:space-between">' +
-        '<span class="badge-tool ' + actType.replace("mouse_", "").replace("_text", "") + '">' + iconSvg + ' ' + actType.toUpperCase() + '</span>' +
-        '<span style="font-size:9.5px;color:var(--text-tertiary)">' + escapeHtml(stepLabel) + '</span>' +
-      '</div>' +
-      '<div class="card-detail" style="word-break:break-word;">' + detail + '</div>'
+    // Reference pattern: an executed step line with its tool icon, the
+    // rendered payload as the indented child row, and the step id on the right.
+    appendNested(
+      '<div class="feed-line">' +
+        '<span class="feed-icon">' + iconSvg + '</span>' +
+        '<span class="feed-text">' + detail + '</span>' +
+        '<span class="feed-meta">' + escapeHtml(stepLabel) + '</span>' +
+      '</div>'
     );
   }
 
   function renderVerificationCard(verifText) {
     recordSessionEvent("Verified", verifText);
-    appendBranch("verify",
-      '<div class="card-tag verify">' + ICONS.verify + ' Verified State</div>' +
-      '<div style="color:var(--accent);font-size:10.5px;word-break:break-word;">' + escapeHtml(verifText) + '</div>'
+    appendNested(
+      '<div class="feed-sub"><span class="feed-icon" style="color:#50A574;">' + ICONS.verify + '</span>' +
+      '<span>' + escapeHtml(verifText) + '</span></div>'
     );
   }
 
   function renderSkillCard(skillText) {
+    closeGroup();
     recordSessionEvent("Skill", skillText);
     appendBranch("skill",
-      '<div class="card-tag skill">' + ICONS.skill + ' Skill Distilled</div>' +
-      '<div style="color:#ffe066;font-size:10.5px;word-break:break-word;">' + escapeHtml(skillText) + '</div>'
+      '<div class="feed-line"><span class="feed-icon" style="color:#FFD060;">' + ICONS.skill + '</span>' +
+      '<span class="feed-text">Beceri damıtıldı · ' + escapeHtml(skillText) + '</span></div>'
     );
 
     var skills = getStoredSkills();
@@ -1613,15 +1772,92 @@
   function renderSummaryCard(sumText) {
     recordSessionEvent("Completed", sumText);
     currentTree = null; // Close active tree group
+    // Strip the runner's "finished goal=... at step N" scaffolding so the
+    // feed reads as plain text: "⚑ Tamamlandı · <goal>" instead of
+    // "Tamamlandı · finished goal='x' at step 4". The loop tolerates any
+    // repeated marker combo ("finished: finished goal=", "completed goal="…).
+    var clean = sumText;
+    for (var i = 0; i < 3; i++) {
+      var prev = clean;
+      clean = clean
+        .replace(/^(?:finished|completed|goal|hedef|objective)\s*[:=]?\s*/i, "")
+        .replace(/^["']/, "");
+      if (clean === prev) break;
+    }
+    clean = clean.replace(/["']\s+at step\s+\d+$/i, "").replace(/["']\s*$/, "");
+    clean = clean.charAt(0).toUpperCase() + clean.slice(1);
     var card = document.createElement("div");
-    card.className = "card-summary";
+    card.className = "step-card";
     card.innerHTML = 
-      '<div class="summary-title">' + ICONS.summary + ' Execution Completed</div>' +
-      '<div class="summary-text" style="word-break:break-word;">' + escapeHtml(sumText) + '</div>';
+      '<div class="feed-line feed-head"><span class="feed-icon" style="color:#50A574;">' + ICONS.flag + '</span>' +
+      '<span class="feed-text">Tamamlandı · ' + escapeHtml(clean) + '</span></div>';
     log.appendChild(card);
     log.scrollTop = log.scrollHeight;
 
+    // Reference-feed trailing group: a magnifier "totals" header with its
+    // token / time / step children as indented rows (the "N arama çalıştırıldı"
+    // pattern, now summarizing the whole run).
+    var stepsCount = currentRunRecord ? currentRunRecord.steps : 0;
+    window._lastCalls = window._lastCalls || 0;
+    if (window._lastTokens || window._lastElapsedS) {
+      var sumHeader =
+        '<div class="feed-line feed-head"><span class="feed-icon">' + ICONS.search + '</span>' +
+        '<span class="feed-text">Toplam ' + stepsCount + ' adım · ' +
+        (window._lastTokens || 0).toLocaleString("tr-TR") + ' token' +
+        (window._lastCalls ? ' · ' + window._lastCalls + ' çağrı' : '') + '</span></div>';
+      var sumChildren = "";
+      if (window._lastTokens) {
+        sumChildren += '<div class="feed-line"><span class="feed-icon" style="color:#FFD060;">' + ICONS.bolt + '</span>' +
+          '<span class="feed-text">' + window._lastTokens.toLocaleString("tr-TR") + ' token kullanıldı</span></div>';
+      }
+      if (window._lastElapsedS) {
+        sumChildren += '<div class="feed-line"><span class="feed-icon">' + ICONS.wait + '</span>' +
+          '<span class="feed-text">' + Math.round(window._lastElapsedS) + ' saniye sürdü</span></div>';
+      }
+      if (stepsCount) {
+        sumChildren += '<div class="feed-line"><span class="feed-icon">' + ICONS.click + '</span>' +
+          '<span class="feed-text">' + stepsCount + ' fiziksel eylem</span></div>';
+      }
+      openGroup(sumHeader);
+      appendNested(sumChildren);
+      closeGroup();
+    }
+
     finishCurrentRun("success");
+  }
+
+  function renderConfirmCard(message) {
+    // One approval at a time: a second CONFIRMATION line while the first is
+    // unanswered would mean two blocked reads on one pipe.
+    if (document.getElementById("confirm-card")) return;
+    var card = document.createElement("div");
+    card.id = "confirm-card";
+    card.className = "card-confirm";
+    var msg = document.createElement("div");
+    msg.className = "confirm-msg";
+    msg.textContent = message;
+    card.appendChild(msg);
+    var actions = document.createElement("div");
+    actions.className = "confirm-actions";
+    var approve = document.createElement("button");
+    approve.className = "confirm-btn approve";
+    approve.textContent = "✓ Approve";
+    approve.addEventListener("click", function(){
+      post({cmd:"confirm", answer:"y"});
+      card.remove();
+    });
+    var deny = document.createElement("button");
+    deny.className = "confirm-btn deny";
+    deny.textContent = "✕ Deny";
+    deny.addEventListener("click", function(){
+      post({cmd:"confirm", answer:"n"});
+      card.remove();
+    });
+    actions.appendChild(approve);
+    actions.appendChild(deny);
+    card.appendChild(actions);
+    log.appendChild(card);
+    log.scrollTop = log.scrollHeight;
   }
 
   function processIncomingLine(lineText, kind) {
@@ -1645,10 +1881,18 @@
       return;
     }
 
-    if (trimmed.startsWith("ooda thought:")) {
+    if (trimmed.startsWith("st :")) {
+      // Live usage telemetry (tokens + elapsed) — updates header counters.
+      updateRunStats(trimmed);
+    } else if (trimmed.startsWith("ooda thought:")) {
       renderThoughtCard(trimmed.substring(13).trim());
     } else if (trimmed.startsWith("ooda sub_goal:")) {
       renderSubgoalCard(trimmed.substring(14).trim());
+    } else if (trimmed.indexOf("CONFIRMATION REQUIRED") !== -1) {
+      // Law 5.1: the agent paused on a destructive/routine action; surface
+      // Approve/Deny buttons that answer through the bridge to the child's
+      // piped stdin (M6).
+      renderConfirmCard(trimmed);
     } else if (trimmed.startsWith("ooda observe:")) {
       renderObserveCard(trimmed.substring(13).trim());
     } else if (trimmed.startsWith("ooda step_")) {
@@ -1670,10 +1914,11 @@
         renderSkillCard(skillVal);
       }
     } else if (kind === "err" || trimmed.includes("error:") || trimmed.includes("fatal:")) {
+      closeGroup();
       recordSessionEvent("Error", trimmed);
       appendBranch("err",
-        '<div class="card-tag err">' + ICONS.err + ' Error</div>' +
-        '<div style="color:#ff9d97;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;word-break:break-word;overflow-wrap:anywhere;white-space:pre-wrap;">' + escapeHtml(trimmed) + '</div>'
+        '<div class="feed-line"><span class="feed-icon" style="color:#FF5A4E;">' + ICONS.err + '</span>' +
+        '<span class="feed-text" style="color:#FF9D97;white-space:pre-wrap;">' + escapeHtml(trimmed) + '</span></div>'
       );
       if (currentRunRecord) finishCurrentRun("failed");
     }
@@ -1705,18 +1950,27 @@
       card.innerHTML = 
         '<div class="history-header">' +
           '<div class="history-goal">' + escapeHtml(item.goal) + '</div>' +
-          '<button class="rerun-btn" onclick="rerunTask(\'' + escapeHtml(item.goal).replace(/'/g, "\\'") + '\', \'' + (item.app !== "Auto Focus" ? escapeHtml(item.app).replace(/'/g, "\\'") : '') + '\')">' +
-            ICONS.rerun + ' Re-run' +
-          '</button>' +
         '</div>' +
         '<div class="history-meta">' +
           '<div class="history-tags">' +
             '<span class="tag-pill ' + statusClass + '">' + statusLabel + '</span>' +
             '<span class="tag-pill">' + (item.steps || 0) + ' steps · ' + (item.durationSec || 1) + 's</span>' +
+            (item.tokens ? '<span class="tag-pill">⚡ ' + Number(item.tokens).toLocaleString("tr-TR") + ' tok</span>' : '') +
             (item.app && item.app !== "Auto Focus" ? '<span class="tag-pill">' + escapeHtml(item.app) + '</span>' : '') +
           '</div>' +
           '<div>' + (item.dateStr || "") + ' ' + (item.timeStr || "") + '</div>' +
         '</div>';
+
+      // The re-run button is wired with addEventListener, never an inline
+      // onclick carrying interpolated goal text: a `"` in a history goal
+      // used to break out of the attribute and inject new attributes (L11).
+      var rerunBtn = document.createElement("button");
+      rerunBtn.className = "rerun-btn";
+      rerunBtn.innerHTML = ICONS.rerun + ' Re-run';
+      rerunBtn.addEventListener("click", function(){
+        rerunTask(item.goal, item.app !== "Auto Focus" ? item.app : "");
+      });
+      card.querySelector(".history-header").appendChild(rerunBtn);
 
       container.appendChild(card);
     });
@@ -1793,10 +2047,16 @@
           '<div class="skill-info">' +
             '<div class="skill-name">✨ ' + escapeHtml(s.name) + '</div>' +
             '<div class="skill-desc">Autonomous Reusable Workflow</div>' +
-          '</div>' +
-          '<button class="rerun-btn" onclick="rerunTask(\'Execute distilled skill: ' + escapeHtml(s.name).replace(/'/g, "\\'") + '\', \'\')">' +
-            '⚡ Run' +
-          '</button>';
+          '</div>';
+        // Same L11 hardening as the history re-run button: no inline onclick
+        // with interpolated skill names.
+        var runBtn = document.createElement("button");
+        runBtn.className = "rerun-btn";
+        runBtn.innerHTML = '⚡ Run';
+        runBtn.addEventListener("click", function(){
+          rerunTask("Execute distilled skill: " + s.name, "");
+        });
+        card.appendChild(runBtn);
         skillContainer.appendChild(card);
       });
     }

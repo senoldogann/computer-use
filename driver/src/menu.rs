@@ -62,10 +62,14 @@ enum LineKind {
     Err,
 }
 
-#[derive(Default)]
 struct Shared {
     lines: VecDeque<(LineKind, String)>,
     child_pid: Option<u32>,
+    // Piped stdin of the agent child: the panel's Approve/Deny buttons write
+    // the human answer here when the CLI is blocked on a Law 5.1 confirmation
+    // (M6). Dropped when the run ends or is stopped so a blocked read gets EOF
+    // instead of a dangling writer.
+    child_stdin: Option<std::process::ChildStdin>,
     exit: Option<Option<i32>>,
     signalled: bool,
 }
@@ -73,6 +77,7 @@ struct Shared {
 static SHARED: Mutex<Shared> = Mutex::new(Shared {
     lines: VecDeque::new(),
     child_pid: None,
+    child_stdin: None,
     exit: None,
     signalled: false,
 });
@@ -94,13 +99,53 @@ static STATUS_ITEM_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
 /// whatever the user was using (a typed app field wins over this).
 static CAPTURED_APP: Mutex<Option<String>> = Mutex::new(None);
 
+/// True only when ``pid`` names a live process running the *same executable*
+/// as this launcher. A crash leaves the pid file behind, and that pid can
+/// later be reused by an *unrelated* process — signaling it would terminate
+/// the wrong program (M5). ``proc_name`` gives the pid's executable name;
+/// SIGTERM is only ever sent after this identity check passes.
+///
+/// The name is compared against our *own* executable name plus the known
+/// launcher names: the packaged app renames the binary to ``ComputerUse``
+/// while the dev build runs as ``actuation-menu``, so a dev binary must
+/// recognize a running packaged app (and vice versa) or two menu instances
+/// could coexist. Comparing to ourselves also keeps the check working if the
+/// bundle is renamed again.
+fn process_is_menu_launcher(pid: i32) -> bool {
+    let mut name = [0u8; 64];
+    let len = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32) };
+    if len <= 0 {
+        return false; // ESRCH or no permission — never signal an unknown pid.
+    }
+    let candidate = String::from_utf8_lossy(&name[..len as usize])
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    let mut self_name = [0u8; 64];
+    let self_len = unsafe {
+        libc::proc_name(
+            std::process::id() as i32,
+            self_name.as_mut_ptr().cast(),
+            self_name.len() as u32,
+        )
+    };
+    if self_len > 0 {
+        let mine_cow = String::from_utf8_lossy(&self_name[..self_len as usize]);
+        let mine = mine_cow.trim_end_matches('\0').trim();
+        if !mine.is_empty() && candidate == mine {
+            return true;
+        }
+    }
+    matches!(candidate.as_str(), "actuation-menu" | "ComputerUse")
+}
+
 /// Ensures only one instance of the menu launcher runs at any given time.
 fn ensure_single_instance() {
     let pid_file = "/tmp/actuation-menu.pid";
     if let Ok(content) = std::fs::read_to_string(pid_file) {
         if let Ok(old_pid) = content.trim().parse::<i32>() {
             let my_pid = std::process::id() as i32;
-            if old_pid != my_pid {
+            if old_pid != my_pid && process_is_menu_launcher(old_pid) {
                 // Send SIGTERM and wait until the old process is truly gone.
                 // A simple 150ms sleep is not enough — macOS launchd or `open`
                 // can spawn a second instance before the first exits.
@@ -464,6 +509,9 @@ fn drain_to_webview(webview: &WKWebView) {
         }
         let mut s = SHARED.lock().unwrap();
         s.child_pid = None;
+        // Run over: drop the pipe so any blocked confirmation read gets EOF
+        // (the child is gone anyway; this just keeps the handle honest).
+        s.child_stdin = None;
     }
 }
 
@@ -492,6 +540,23 @@ fn handle_script_message(message: &WKScriptMessage) {
             run_agent(&goal, app.as_deref());
         }
         Some("stop") => stop_agent(),
+        Some("confirm") => {
+            // Law 5.1: the panel's Approve/Deny answer for an action the agent
+            // paused on. Written to the child's piped stdin; the CLI's confirm
+            // handler reads exactly one line. No stdin (no run in flight, or
+            // nothing waiting) means the message is a no-op.
+            let answer = value
+                .get("answer")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("n")
+                .to_string();
+            use std::io::Write;
+            let mut s = SHARED.lock().unwrap();
+            if let Some(stdin) = s.child_stdin.as_mut() {
+                let _ = writeln!(stdin, "{answer}");
+                let _ = stdin.flush();
+            }
+        }
         _ => {}
     }
 }
@@ -597,6 +662,11 @@ fn run_agent(goal: &str, app: Option<&str>) {
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
     cmd.env("OPENAI_API_KEY", key.expect("checked above"));
+    // Piped stdin is the panel's confirmation channel (M6): the CLI uses the
+    // interactive confirm handler whenever COMPUTERUSE_MENU is set, and this
+    // pipe carries the Approve/Deny answer back to the blocked read.
+    cmd.env("COMPUTERUSE_MENU", "1");
+    cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -610,11 +680,13 @@ fn run_agent(goal: &str, app: Option<&str>) {
         }
     };
     let pid = child.id();
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     {
         let mut s = SHARED.lock().unwrap();
         s.child_pid = Some(pid);
+        s.child_stdin = stdin;
         s.exit = None;
         s.signalled = false;
     }
@@ -654,6 +726,12 @@ fn stop_agent() {
     };
     match pid {
         Some(pid) => {
+            // Drop the stdin pipe first so a pending confirmation read gets EOF
+            // (fail-closed: the blocked agent resolves "no answer" instead of
+            // hanging), then terminate the child and its whole process group.
+            let mut s = SHARED.lock().unwrap();
+            s.child_stdin = None;
+            drop(s);
             // SAFETY: immediately terminate the child process and its entire process group
             unsafe {
                 libc::killpg(pid as i32, libc::SIGKILL);

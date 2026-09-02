@@ -22,98 +22,156 @@ flow through identical scaffolding.
 
 from __future__ import annotations
 
+import html
+import inspect
 import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, cast
 
+from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import WorkingState
-from computeruse.orchestrator.schemas import AgentTurn
+from computeruse.orchestrator.schemas import Action, AgentTurn, ClipboardPaste, TypeText
 
 # The action contract, spelled out for a model that has never seen it. The
 # exact JSON shape mirrors what `AgentTurn` validates at parse time, so the
 # instruction and the gate can never disagree about the *shape*.
 ACTION_CONTRACT: Final[str] = (
-    "You are driving a physical macOS computer as an autonomous agent via closed-loop visual perception and natural input actuation.\n"
+    "You are operating a real macOS computer as an autonomous agent. Every action you emit "
+    "moves a physical cursor and presses physical keys on a machine someone is using.\n"
     "\n"
     "1. OUTPUT CONTRACT:\n"
     "Return exactly ONE valid JSON object. Output NOTHING outside the JSON object (no markdown formatting, no explanations, no text wrappers).\n"
-    "The JSON object must match:\n"
-    '{\n'
-    '  "thought": "<brief evidence-based observation of the current screen supporting the action>",\n'
-    '  "sub_goal": "<single immediate objective that moves the main goal forward>",\n'
-    '  "action": {"type": "<action_type>", ...}\n'
-    '}\n'
+    "The JSON object must match EITHER of these two forms:\n"
+    "  Single action (default):\n"
+    '  {\n'
+    '    "thought": "<what you SEE on the current screenshot, and why it justifies this action>",\n'
+    '    "sub_goal": "<the single immediate objective this action advances>",\n'
+    '    "action": {"type": "<action_type>", ...}\n'
+    '  }\n'
+    "  Action batch (up to 3 actions executed back-to-back in this ONE turn):\n"
+    '  {\n'
+    '    "thought": "<observation>",\n'
+    '    "sub_goal": "<objective advanced by the whole batch>",\n'
+    '    "action": {"type": "<type of the FIRST action>", ...},\n'
+    '    "actions": [{"type": "<action_type>", ...}, {"type": "<action_type>", ...}]\n'
+    '  }\n'
+    '  (In the batch form, "action" repeats the FIRST element of "actions".)\n'
+    "  BATCHING RULES: batch only actions that are safe to execute SEQUENTIALLY from the CURRENT screen without re-observation — e.g. Cmd+L, then paste a URL, then Return; or two clicks on already-visible elements. NEVER batch an action whose target depends on a screen change caused by an earlier action in the same batch (e.g. do not click a search result in the same batch as the Return that submits the search). If any doubt, emit a single action. `finish` must be the LAST action of a batch.\n"
     "\n"
     "2. SUPPORTED ACTIONS:\n"
     '- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2}\n'
     '- mouse_move: {"type": "mouse_move", "x": int, "y": int, "duration_ms": int (default 180)} — ONLY when hover, tooltip, or drag preparation is explicitly needed\n'
-    '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 400)}\n'
-    '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at CURRENT cursor position (ensure cursor is over the target scrollable area first)\n'
-    '- type_text: {"type": "type_text", "text": str, "wpm": int (default 50)}\n'
-    '- clipboard_paste: {"type": "clipboard_paste", "text": str} — preferred for URLs, search queries, coding prompts, and long text (Cmd+V)\n'
+    '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
+    '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
+    '- type_text: {"type": "type_text", "text": str, "wpm": int (default 40)}\n'
+    '- clipboard_paste: {"type": "clipboard_paste", "text": str} — preferred for URLs, search queries, and any long text (Cmd+V)\n'
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
     '- activate_app: {"type": "activate_app", "app": str} — brings an application (e.g. "Google Chrome", "Notes", "Finder") to the front\n'
     '- wait: {"type": "wait", "duration_ms": int, "reason": str}\n'
-    '- finish: {"type": "finish", "status": "success|failed", "summary": str} — emit ONLY when goal completion is visibly verified on screen\n'
+    '- finish: {"type": "finish", "status": "success|failed", "summary": str}\n'
     "\n"
-    "3. CLOSED-LOOP AUTONOMOUS CONTROL (OBSERVE → DECIDE → ACT → VERIFY):\n"
-    "   - The screenshot is the single authoritative source of truth for the current computer state.\n"
-    "   - Never assume an action succeeded. After every meaningful action, inspect the next screenshot and verify whether the expected state transition occurred.\n"
-    "   - If the expected state change did not occur, diagnose the new screen state before acting again.\n"
-    "   - Maintain a clear distinction between: (a) observed visual facts, (b) inferred state, (c) intended outcome. Always prefer observed visual facts over assumptions.\n"
+    "3. THE CYCLE YOU ARE INSIDE:\n"
+    "   OBSERVE -> UNDERSTAND -> PLAN -> VALIDATE -> ACT -> VERIFY -> RECOVER.\n"
+    "   The orchestrator runs VALIDATE, VERIFY and RECOVER for you: it rejects coordinates that\n"
+    "   do not exist, checks after every action whether the expected change actually happened,\n"
+    "   and reports what it found in 'Last error to recover from'. Your job is the other half:\n"
+    "   OBSERVE honestly, and change approach when the orchestrator tells you something failed.\n"
+    "   - The screenshot is the single authoritative source of truth for the current state.\n"
+    "   - Never assume an action succeeded because you emitted it.\n"
+    "   - Keep observed facts, inferences, and intentions separate. Prefer what you can see.\n"
     "\n"
     "4. VISUAL GROUNDING & DISPLAY COORDINATES:\n"
-    "   - Never assume fixed coordinates. Windows move, resize, and layouts adapt.\n"
-    "   - Derive all click coordinates (x, y) directly from visible UI evidence on the current screenshot.\n"
-    "   - Coordinate Space: The attached screenshot is at LOGICAL resolution — 1 image pixel == 1 screen point. Report x,y EXACTLY as they appear in the image; never apply Retina/scale math.\n"
-    "   - Click directly in the center of the target link, button, or input field you wish to activate.\n"
-    "   - AX UI elements list exact native-app coordinates (toolbar, menu, address bar). For web page content (search results, links, article text), the AX tree is often empty — ground on the screenshot directly in that case.\n"
+    "   - Never reuse a coordinate from an earlier turn. Windows move, pages scroll, layouts adapt.\n"
+    "   - Derive every (x, y) from the CURRENT screenshot.\n"
+    "   - Coordinate space: the screenshot is a SCALED-DOWN MAP of the screen (max 512px on its\n"
+    "     longest side). Report x,y EXACTLY as they appear in that image. The system converts them\n"
+    "     to real screen points for you — never apply any scale math yourself.\n"
+    "   - AX UI element coordinates are listed in the SAME image space, so both sources are directly\n"
+    "     comparable. AX is exact for native chrome (toolbars, menus, the address bar); for web page\n"
+    "     content the AX tree may be truncated, so prefer the screenshot there.\n"
+    "   - Click the CENTER of the target link, button, or field.\n"
     "\n"
     "5. SAFE BROWSER NAVIGATION & TEXT INPUT:\n"
-    "   - When entering a URL or search query in Chrome/Safari: ALWAYS use Cmd+L first to select all existing text cleanly before pasting:\n"
-    "     Step 1: press_hotkey: {'modifiers': ['command'], 'key': 'l'} (focuses and selects entire address bar)\n"
-    "     Step 2: clipboard_paste: {'text': '<target URL or query>'} (replaces selection cleanly without appending)\n"
-    "     Step 3: press_hotkey: {'modifiers': [], 'key': 'return'} (submits the URL immediately — do not leave unsubmitted)\n"
-    "   - NEVER call clipboard_paste twice in a row on an address bar without pressing Return first.\n"
-    "   - When typing into any text input: ensure the field is focused and cleared before entering text.\n"
-    "   - If target content (e.g. search results, repo links) is ALREADY visible on screen, DO NOT touch the address bar — click the visible target directly.\n"
+    "   - To enter a URL or search query in Chrome/Safari, always in this order:\n"
+    "     Step 1: press_hotkey {'modifiers': ['command'], 'key': 'l'} (focuses and selects the whole address bar)\n"
+    "     Step 2: clipboard_paste {'text': '<target URL or query>'} (replaces the selection cleanly)\n"
+    "     Step 3: press_hotkey {'modifiers': [], 'key': 'return'} (submits — never leave it unsubmitted)\n"
+    "   - NEVER call clipboard_paste twice in a row on an address bar without pressing Return between them.\n"
+    "   - Before typing into any field: click it, confirm it is focused, and clear it (Cmd+A) first.\n"
+    "   - If the target is ALREADY visible on screen, do NOT touch the address bar — click it directly.\n"
     "\n"
-    "6. SCROLLING & OFF-SCREEN TARGETS (CRITICAL):\n"
-    "   - Web pages are often taller than the viewport. If the element you need (menu, button, link, avatar, sign-out option) is NOT visible in the current screenshot, it may be off-screen — DO NOT guess its coordinate and DO NOT click blindly. Scroll to bring it into view.\n"
-    "   - To scroll DOWN (see content below): first move the cursor over the page content area, then mouse_scroll with dy=positive (e.g. {\"dy\": 300}).\n"
-    "   - To scroll UP (see content above): mouse_scroll with dy=negative (e.g. {\"dy\": -300}).\n"
-    "   - Re-observe the new screenshot after each scroll. Repeat small scrolls until the target is visible; only then click the center coordinate read from the screenshot.\n"
-    "   - If scrolling produces no visible change you may not be over a scrollable area — move to the page center first.\n"
-    "   - When looking for a UI element (avatar, settings, sign out) that is not on screen: scroll UP first (page headers/menus are usually at the top), then scroll down if needed.\n"
-    "   - Do NOT click on browser chrome (tab bar, address bar, toolbar) when you mean to click a page element. Page content is below the toolbar/bookmarks bar.\n"
+    "6. SCROLLING & OFF-SCREEN TARGETS:\n"
+    "   - Pages are taller than the viewport. If the element you need is NOT visible in the current\n"
+    "     screenshot, it is off-screen: DO NOT guess its coordinate and DO NOT click blindly. Scroll.\n"
+    "   - Move the cursor over the page content area first, then mouse_scroll: dy POSITIVE scrolls DOWN\n"
+    "     (reveals content below), dy NEGATIVE scrolls UP (reveals content above).\n"
+    "   - Re-read the new screenshot after each scroll. Repeat small scrolls until the target is visible,\n"
+    "     then click the coordinate you read from that screenshot.\n"
+    "   - If a scroll changes nothing, the cursor is probably not over a scrollable area (move it to the\n"
+    "     page center) — or you are already at the end, in which case scroll the OTHER way.\n"
+    "   - Headers, avatars and account menus live at the TOP: scroll up before hunting downward.\n"
+    "   - Do NOT click browser chrome (tab bar, address bar, toolbar) when you mean a page element.\n"
     "\n"
-    "7. NEVER GUESS VIA KEYBOARD FOCUS (Tab / arrows):\n"
-    "   - If a UI element is not visible, DO NOT press Tab, Shift+Tab, arrows, or other focus-steering keys to 'find' it. Keyboard focus routing is unpredictable across web apps and often lands on the wrong control (browser profile popups, address bar, unrelated buttons).\n"
-    "   - Instead: scroll to reveal the element, then click the visible element directly.\n"
+    "7. NEVER NAVIGATE BY KEYBOARD FOCUS (Tab / arrows):\n"
+    "   - Do not press Tab, Shift+Tab or arrow keys to 'find' an invisible element. Focus routing is\n"
+    "     unpredictable across web apps and lands on the wrong control (profile popups, the address bar).\n"
+    "   - Scroll the element into view and click it instead.\n"
     "\n"
-    "8. ERROR RECOVERY & ADAPTATION:\n"
-    "   - Unexpected states (dialogs, popups, login screens, wrong window focus, loading delays, unchanged UI) are normal.\n"
-    "   - When an unexpected state appears, stop following your previous plan and re-plan from the new visible state.\n"
-    "   - If a click produces no visible change, the target may be wrong or off-screen. Try: (a) scroll to find the real target, (b) use a different interaction (e.g. navigate via URL instead of clicking), (c) wait for a loading state to finish.\n"
-    "   - If an action fails or produces no visible change twice, choose a fundamentally different approach (do not repeat the same click at nearby coordinates).\n"
-    "   - The persistent macOS top menu bar (y=0..25) is permanent system UI, not an open popup menu. Do not spam Escape.\n"
-    "   - Browser tabs open at the top of the window. If you see unexpected tabs labeled 'Logout' or similar, your previous click may have opened a new tab instead of navigating — close extra tabs with Cmd+W and return to the original tab.\n"
+    "8. RECOVERY — READ THIS WHENEVER 'Last error to recover from' IS PRESENT:\n"
+    "   The orchestrator escalates deliberately, and the error text tells you which rung you are on:\n"
+    "   - FIRST failure of a kind: a corrected retry is fine. Fix the specific thing named.\n"
+    "   - SECOND in a row: do NOT retry the same action with adjusted coordinates. Change the METHOD —\n"
+    "     a different UI path, a keyboard shortcut, a direct URL, or scrolling to reveal the real target.\n"
+    "   - THIRD in a row: abandon the tactic completely. Re-derive the shortest remaining route to the\n"
+    "     goal from the CURRENT screenshot alone, and take its first step.\n"
+    "   - Unexpected states (dialogs, popups, login screens, wrong focus, loading delays) are normal.\n"
+    "     Stop following your previous plan and re-plan from the new visible state.\n"
+    "   - The macOS menu bar (y near the top edge) is permanent system UI, not an open popup. Do not spam Escape.\n"
+    "   - If unexpected tabs appear, a click opened a background tab instead of navigating: close it with\n"
+    "     Cmd+W and return to the original tab.\n"
     "\n"
-    "9. ACTION MINIMIZATION & EFFICIENCY:\n"
+    "9. ACTION MINIMIZATION:\n"
     "   - Prefer the smallest reliable action that advances the goal.\n"
-    "   - Do not emit mouse_move before mouse_click unless hover behavior, tooltip inspection, or drag preparation is explicitly needed.\n"
+    "   - Do not emit mouse_move before mouse_click unless hover, tooltip inspection, or a drag needs it.\n"
     "   - Prefer clipboard_paste for long text, queries, prompts, and URLs.\n"
     "\n"
-    "10. SUCCESS VERIFICATION:\n"
-    "   - Emit 'finish' ONLY when the requested goal has been visibly verified on the screenshot.\n"
-    "   - Do not consider an action itself proof of success. The final screen must show visible evidence that the task is complete.\n"
-    "   - Once success is verified, immediately emit finish with status 'success'.\n"
+    "10. FINISHING — THE STRICTEST RULE:\n"
+    "   - Emit finish with status 'success' ONLY when the CURRENT screenshot itself shows the goal is done.\n"
+    "   - Having performed the right actions is NOT evidence of success. The final screen is.\n"
+    "   - Your summary must state the visible evidence ('the profile page shows the name updated to X'),\n"
+    "     not the actions you took. A separate check re-reads the screen against your claim and will\n"
+    "     reject a summary it cannot see evidence for.\n"
+    "   - If the goal genuinely cannot be reached from here, emit finish with status 'failed' and say\n"
+    "     exactly what blocked it. An honest failure is a correct answer; a false success is not.\n"
     "\n"
     "11. IDE INPUT HANDLING:\n"
-    "   - Locate the current IDE composer from the screenshot or AX elements; never rely on a fixed coordinate.\n"
-    "   - Focus the composer, paste the complete prompt, submit with Return, then verify the prompt appears in the conversation before finishing."
+    "   - Locate the IDE composer from the screenshot or AX elements; never rely on a fixed coordinate.\n"
+    "   - Focus the composer, paste the complete prompt, submit with Return, then verify the prompt\n"
+    "     appears in the conversation before finishing."
+)
+
+
+COMPLETION_AUDIT_CONTRACT: Final[str] = (
+    "You are a verification checker, not an operator. You do NOT control the computer.\n"
+    "An autonomous agent has just claimed it finished a task. You are shown the goal, the agent's "
+    "own claim, and a screenshot of the CURRENT screen.\n"
+    "\n"
+    "Decide one thing: does the screenshot itself show that the goal is complete?\n"
+    "\n"
+    "Rules:\n"
+    "- Judge ONLY what is visible. Ignore how plausible the agent's story sounds.\n"
+    "- The agent having performed reasonable actions is NOT evidence. Visible end state is.\n"
+    "- If the screen shows work in progress, a loading state, an error, or an unrelated view, the\n"
+    "  goal is NOT satisfied.\n"
+    "- If the goal is inherently unverifiable from a screenshot (e.g. it asked to read something out),\n"
+    "  and the screen is consistent with the claim, accept it.\n"
+    "- Be strict but not pedantic: cosmetic differences from the wording do not make a completed task\n"
+    "  incomplete.\n"
+    "\n"
+    "Reply with exactly one JSON object and nothing else:\n"
+    '{"satisfied": true|false, "evidence": "<what you can actually SEE that supports your verdict>"}'
 )
 
 
@@ -163,11 +221,11 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
             lines.append(f"  {idx}. {tab_title}")
     if state.screenshot_b64:
         lines.append(
-            "PRIMARY PERCEPTION (VISION-FIRST): A live screenshot is attached at LOGICAL "
-            "resolution — 1 image pixel == 1 screen point, no Retina scaling to apply. "
-            "Examine it directly to locate buttons, text inputs, search results, and chat "
-            "boxes, and report every click coordinate EXACTLY as it appears in the image "
-            "(no division or multiplication). What you see is what gets clicked."
+            "PRIMARY PERCEPTION (VISION-FIRST): A live screenshot is attached as a scaled-down "
+            "MAP of the screen (max 512px). Report every click coordinate EXACTLY as it appears "
+            "in the image — the system converts image pixels to real screen points "
+            "automatically, so never apply scale math yourself. AX element coordinates, when "
+            "listed above, are in this same image space. What you point at is what gets clicked."
         )
     if state.skill is not None:
         # Law 3 Stage 2: the mounted skill's full instructions, so the model
@@ -223,16 +281,18 @@ def decision_prompt(
     return "\n".join(parts)
 
 
-def _normalize_action_payload(payload: dict[str, object]) -> dict[str, object]:
-    """Normalize common model alias variations into standard Action contract."""
-    action_raw = payload.get("action")
-    if not isinstance(action_raw, dict):
-        return payload
-    raw_dict = cast(dict[object, object], action_raw)
-    action: dict[str, object] = {str(k): v for k, v in raw_dict.items()}
+def _unescape_text_action(action: Action) -> Action:
+    """Unescape HTML entities in the text of paste/type actions (pure)."""
+    if isinstance(action, (ClipboardPaste, TypeText)):
+        return action.model_copy(update={"text": html.unescape(action.text)})
+    return action
+
+
+def _normalize_action_dict(action: dict[str, object]) -> dict[str, object]:
+    """Normalize one action dict's common model alias variations (pure)."""
     action_type = action.get("type")
     if not isinstance(action_type, str):
-        return payload
+        return action
 
     # Common aliases from LLM models
     if action_type == "click":
@@ -314,7 +374,37 @@ def _normalize_action_payload(payload: dict[str, object]) -> dict[str, object]:
     if "text" in action and action["text"] is not None:
         action["text"] = str(action["text"])
 
-    return {**payload, "action": action}
+    return action
+
+
+def _normalize_action_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Normalize model alias variations in the single action AND any batch.
+
+    Applies :func:`_normalize_action_dict` to ``action`` and to every item of
+    ``actions`` on the same path, so a batch item using an alias (e.g.
+    ``{"type": "click"}``) is corrected exactly like the single-action form.
+    Malformed sub-payloads (non-dict actions) pass through untouched so the
+    Pydantic gate rejects them with its own corrective hint (Law 2).
+    """
+    result = dict(payload)
+    action_raw = payload.get("action")
+    if isinstance(action_raw, dict):
+        raw_dict = cast(dict[object, object], action_raw)
+        result["action"] = _normalize_action_dict(
+            {str(k): v for k, v in raw_dict.items()}
+        )
+    actions_raw = payload.get("actions")
+    if isinstance(actions_raw, list):
+        normalized_items: list[dict[str, object]] = []
+        for item in cast(list[object], actions_raw):
+            if not isinstance(item, dict):
+                return payload
+            raw_item = cast(dict[object, object], item)
+            normalized_items.append(
+                _normalize_action_dict({str(k): v for k, v in raw_item.items()})
+            )
+        result["actions"] = normalized_items
+    return result
 
 
 def _first_json_object(text: str) -> str | None:
@@ -413,7 +503,7 @@ def parse_decision(raw: str) -> AgentTurn:
     typed_payload: dict[str, object] = {str(k): v for k, v in raw_dict.items()}
     normalized = _normalize_action_payload(typed_payload)
     try:
-        return AgentTurn.model_validate(normalized)
+        turn = AgentTurn.model_validate(normalized)
     except ValueError as exc:
         raise InvalidDecisionError(
             cause=f"schema validation failed: {exc}",
@@ -421,14 +511,52 @@ def parse_decision(raw: str) -> AgentTurn:
             "type, missing field, or invalid parameter); use exactly the "
             "shapes listed above",
         ) from exc
+    # Weak-model text hygiene: models frequently HTML-escape user-facing text
+    # (observed in the field: a YouTube URL arrived as `watch?v=...&amp;t=1860s`
+    # and was pasted literally, breaking the `t=` seek). Unescape pasted and
+    # typed text deterministically so the driver always receives the plain
+    # string the goal meant.
+    if turn.actions is not None:
+        turn = turn.model_copy(
+            update={"actions": [_unescape_text_action(item) for item in turn.actions]}
+        )
+    else:
+        turn = turn.model_copy(update={"action": _unescape_text_action(turn.action)})
+    return turn
+
+
+def _supports_image_argument(model: Callable[..., str]) -> bool:
+    """Whether ``model`` accepts ``image_b64`` as a second positional arg.
+
+    Inspected from the signature once per call — never inferred from a thrown
+    ``TypeError``, which would also swallow a genuine bug raised from *inside*
+    the model implementation and re-invoke it under a misleading assumption
+    (L10). A ``Callable[..., str]`` from a C extension without an
+    introspectable signature conservatively reads as prompt-only.
+    """
+    try:
+        params = list(inspect.signature(model).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if not params:
+        return False
+    # A variadic second position (``def f(prompt, *rest)``) accepts the image.
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params):
+        return True
+    if len(params) < 2:
+        return False
+    second = params[1]
+    return second.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.POSITIONAL_ONLY,
+    )
 
 
 def _call_model(model: Callable[..., str], prompt: str, image_b64: str | None) -> str:
     """Invoke a model callable, passing image_b64 if supported (pure wrapper)."""
-    try:
-        return model(prompt, image_b64)
-    except TypeError:
+    if image_b64 is None or not _supports_image_argument(model):
         return model(prompt)
+    return model(prompt, image_b64)
 
 
 def scaffolded_provider(
@@ -465,3 +593,93 @@ def scaffolded_provider(
         raise last_error
 
     return provider
+
+
+def completion_prompt(state: WorkingState, claim: str, *, app: str) -> str:
+    """The verification checker's prompt for one completion claim (pure).
+
+    Deliberately narrow. The auditor sees the goal, the claim, and the current
+    perception — but *not* the acting model's reasoning, its plan, or its step
+    history. Sharing those would let the story that produced a wrong claim also
+    justify it: the whole value of a second read is that it is uncontaminated
+    by the first one's beliefs.
+    """
+    lines = [
+        COMPLETION_AUDIT_CONTRACT,
+        "",
+        f"Application: {app}",
+        f"Goal: {state.goal}",
+        f"Agent's completion claim: {claim}",
+    ]
+    if state.active_window:
+        lines.append(f"Active window: {state.active_window}")
+    if state.ui_elements:
+        lines.append("AX UI elements currently on screen:")
+        lines.extend(f"- {element}" for element in state.ui_elements)
+    if state.screenshot_b64:
+        lines.append("A screenshot of the current screen is attached — judge from it.")
+    lines.append("")
+    lines.append("Reply now with exactly one JSON object.")
+    return "\n".join(lines)
+
+
+def parse_completion(raw: str) -> CompletionVerdict:
+    """Parse an auditor reply into a verdict (pure, with gate).
+
+    A malformed reply raises :class:`InvalidDecisionError`. The caller treats
+    that as "the auditor could not answer" and accepts the finish rather than
+    blocking it: a broken checker must never trap a run that genuinely
+    completed. Refusing to *guess* a verdict here is what keeps that policy
+    decision in one place instead of buried in a parser default.
+    """
+    candidate = _first_json_object(raw.strip())
+    if candidate is None:
+        raise InvalidDecisionError(
+            cause="no JSON object found in the completion reply",
+            hint='reply with {"satisfied": true|false, "evidence": "..."}',
+        )
+    try:
+        payload: object = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise InvalidDecisionError(
+            cause=f"invalid JSON: {exc}",
+            hint='reply with {"satisfied": true|false, "evidence": "..."}',
+        ) from exc
+    if not isinstance(payload, dict):
+        raise InvalidDecisionError(
+            cause="root JSON element is not an object",
+            hint='reply with {"satisfied": true|false, "evidence": "..."}',
+        )
+    typed = cast(dict[str, object], payload)
+    satisfied = typed.get("satisfied")
+    if not isinstance(satisfied, bool):
+        raise InvalidDecisionError(
+            cause=f"'satisfied' must be a boolean, got {type(satisfied).__name__}",
+            hint='"satisfied" must be exactly true or false',
+        )
+    evidence = typed.get("evidence")
+    return CompletionVerdict(
+        satisfied=satisfied,
+        evidence=evidence if isinstance(evidence, str) and evidence else "(no evidence given)",
+    )
+
+
+def completion_auditor(
+    model: Callable[..., str],
+    *,
+    app: str,
+) -> Callable[[WorkingState, str], CompletionVerdict]:
+    """Build the goal-completion checker the loop calls before accepting success.
+
+    A model is the least reliable witness to its own success: the same context
+    that convinced it to act convinces it the acting worked. Re-asking the
+    question in a fresh, minimal context — goal, claim, current screen, nothing
+    else — turns "I did the steps" back into "the screen shows the result",
+    which is the only claim a user actually cares about.
+    """
+
+    def audit(state: WorkingState, claim: str) -> CompletionVerdict:
+        prompt = completion_prompt(state, claim, app=app)
+        return parse_completion(_call_model(model, prompt, state.screenshot_b64))
+
+    return audit

@@ -107,7 +107,10 @@ def distill(trajectory: Trajectory, known_signatures: set[str]) -> DistillResult
 _COORDINATE_KEYS: frozenset[str] = frozenset({"x", "y", "start_x", "start_y", "end_x", "end_y"})
 # Fields that carry *workflow meaning* and must feed the signature hash. The
 # exact pixel coordinates are deliberately absent so UI drift doesn't break
-# de-dup, but text/keys/buttons do distinguish otherwise-identical flows.
+# de-dup, and so are the *pacing* fields (``duration_ms`` for waits/moves,
+# ``wpm`` for typing): the same flow run at a different pace is still the same
+# flow — hashing pacing would break de-dup across two runs of one workflow
+# (L14). Text/keys/buttons do distinguish otherwise-identical flows.
 _SEMANTIC_KEYS: frozenset[str] = frozenset(
     {
         "text",
@@ -115,9 +118,7 @@ _SEMANTIC_KEYS: frozenset[str] = frozenset(
         "modifiers",
         "button",
         "click_count",
-        "duration_ms",
         "skill_id",
-        "wpm",
         "app",
     }
 )

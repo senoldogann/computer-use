@@ -33,9 +33,10 @@ def is_mouse_shake(samples: Sequence[CursorSample], *, min_reversals: int = 6) -
 
     A human taking over by forcing the mouse side to side produces a *burst of
     direction reversals* within a short window while the net displacement stays
-    small. ``None``-condition ahead, anything else is an escape hatch for the
-    user, so false positives (a few reversals from normal work) must be rare:
-    we require a generous reversal count all happening inside the window.
+    small. A false positive is an escape hatch tripped for the user — control
+    is yanked away mid-workflow — so false positives (a few reversals from
+    normal work) must be rare: we require a generous reversal count all
+    happening inside the window.
 
     Args:
         samples: timestamped cursor positions, oldest first.

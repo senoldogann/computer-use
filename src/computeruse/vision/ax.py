@@ -18,6 +18,7 @@ top-left, Y grows down), so an element's rect feeds directly into
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from pydantic import BaseModel
@@ -169,7 +170,7 @@ def interactive_summaries(
     max_depth: int = 12,
     max_count: int = 24,
 ) -> tuple[str, ...]:
-    """Compact renderings of actionable elements, depth-first (pure).
+    """Compact renderings of actionable elements, web-content first (pure).
 
     This is what ADR-2's *primary* source feeds the provider: the model sees
     real elements with real coordinates instead of hallucinating them, and
@@ -178,11 +179,21 @@ def interactive_summaries(
     levels below the app root, so a shallow cap silently de-grounds the
     model and it hallucinates coordinates — while ``max_count`` bounds the
     working context regardless of tree depth (Law 4.3); order is
-    deterministic DFS.
+    deterministic.
+
+    Traversal order is deliberately **web-first**: browsers expose the page
+    (``AXWebArea``) as a sibling subtree *after* their own chrome (tab strip,
+    toolbar, omnibox). A plain DFS with a count cap therefore fills the
+    budget with browser chrome and hides the very page links the agent needs
+    (observed in the field: Google result links never appeared, and the
+    model guessed coordinates). Collecting the ``WebArea`` subtree before the
+    rest of the tree keeps the budget on what the user actually interacts
+    with. Non-browser apps have no ``WebArea`` and keep plain DFS order.
     """
     summaries: list[str] = []
 
-    def walk(node: AXElement, depth: int) -> None:
+    def collect(node: AXElement, depth: int) -> None:
+        """Append an interactive element (and its subtree) when budget remains."""
         if len(summaries) >= max_count:
             return
         if node.role in INTERACTIVE_ROLES and not (
@@ -191,10 +202,79 @@ def interactive_summaries(
             summaries.append(element_summary(node))
         if depth < max_depth and len(summaries) < max_count:
             for child in node.children:
-                walk(child, depth + 1)
+                collect(child, depth + 1)
 
-    walk(root, 0)
+    def walk_all(node: AXElement, depth: int) -> None:
+        """DFS over the whole tree, never entering WebArea subtrees."""
+        if node.role == "WebArea" or len(summaries) >= max_count:
+            return
+        if node.role in INTERACTIVE_ROLES and not (
+            node.role == "MenuBarItem" and node.title.lower() in ("apple", "")
+        ):
+            summaries.append(element_summary(node))
+        # Nodes at exactly max_depth are still collected; only their children
+        # are cut off (same depth semantics as the original walk).
+        if depth < max_depth:
+            for child in node.children:
+                walk_all(child, depth + 1)
+
+    def walk_web(node: AXElement, depth: int) -> None:
+        """DFS that enters WebArea subtrees (page content) and skips chrome."""
+        if len(summaries) >= max_count:
+            return
+        if node.role == "WebArea":
+            collect(node, depth)
+            return
+        if depth < max_depth:
+            for child in node.children:
+                walk_web(child, depth + 1)
+
+    # Pass 1: page content. Chrome's WebArea subtree (links, buttons, inputs)
+    # is what the agent interacts with; it gets the whole count budget first.
+    walk_web(root, 0)
+    # Pass 2: everything else (native toolbar, menus, tabs) with the leftover.
+    walk_all(root, 0)
     return tuple(summaries)
+
+
+def summaries_to_image_space(
+    summaries: tuple[str, ...], points_per_pixel: float
+) -> tuple[str, ...]:
+    """Rewrite element summaries from logical points into image-map space (pure).
+
+    The provider works in exactly one coordinate space: the screenshot map the
+    VLM sees (``downscale_to_max_side``). AX rects arrive in logical screen
+    points, which are *larger* numbers than the map's — a 1512pt-wide display
+    maps to a 512px image, so a button at x=232pt sits at x=79px in the image.
+    The conversion therefore **divides** by the map's points-per-pixel; the
+    runner's actuation gate multiplies by the same number on the way back.
+
+    Getting this direction wrong is not a rounding error: it multiplied every
+    AX coordinate by ~3 instead of dividing, so the model was handed positions
+    off the right-hand edge of its own screenshot, and the gate then scaled
+    them again into coordinates the bounds check rejected outright. That is why
+    AX grounding silently never worked and the model fell back to guessing from
+    pixels. :class:`~computeruse.vision.coordinates.ScreenMap` now owns both
+    directions so the mistake cannot recur.
+
+    Only the ``at (x,y) WxH`` fragment is rewritten (rounded to integers);
+    titles, values, and focus markers pass through untouched. Lines without a
+    coordinate fragment (e.g. the truncation note) are unchanged.
+    """
+    if points_per_pixel <= 0:
+        raise ValueError(f"points per pixel must be positive, got {points_per_pixel}")
+    if points_per_pixel == 1.0 or not summaries:
+        return summaries
+
+    def rescale(match: re.Match[str]) -> str:
+        x, y, width, height = (int(g) for g in match.groups())
+        return (
+            f"at ({round(x / points_per_pixel)},{round(y / points_per_pixel)}) "
+            f"{round(width / points_per_pixel)}x{round(height / points_per_pixel)}"
+        )
+
+    pattern = re.compile(r"at \((\d+),(\d+)\) (\d+)x(\d+)")
+    return tuple(pattern.sub(rescale, line) for line in summaries)
 
 
 def open_tabs_from_tree(root: AXElement) -> tuple[str, ...]:

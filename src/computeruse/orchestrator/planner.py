@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -66,105 +66,155 @@ def plan_summary_for_prompt(plan: GoalPlan) -> str:
     return "\n".join(lines)
 
 
+# Explicit sequence markers. Only these split a goal into ordered sub-goals.
+# Conjunctions ("and", "ve") are deliberately absent: "search for cats and dogs"
+# is one step, and splitting it produced two nonsense sub-goals ("search for
+# cats" / "dogs") that the executor then chased separately. A planner that
+# invents work is worse than one that plans a single step.
+SEQUENCE_MARKERS: Final[tuple[str, ...]] = (
+    " then ",
+    " sonra ",
+    " ardından ",
+    " after that ",
+    " afterwards ",
+    " danach ",
+    " ensuite ",
+    " luego ",
+)
+
+# Shortest sub-goal worth executing on its own, in words. A fragment below
+# this ("dogs", "it") carries no actionable intent — splitting there yields a
+# sub-goal no executor could satisfy or verify.
+MIN_SUB_GOAL_WORDS: Final[int] = 2
+
+
+def split_sequential_goal(goal: str) -> tuple[str, ...]:
+    """Split a goal on explicit sequence markers only (pure).
+
+    Returns a single-element tuple when the goal names no sequence, which is
+    the common case and the safe default: the executor decomposes tactically
+    from what it sees, and a bad strategic split actively misleads it. A split
+    is accepted only when *every* resulting part is substantial enough to be a
+    step in its own right.
+    """
+    cleaned = goal.strip()
+    if not cleaned:
+        return ()
+    lowered = cleaned.lower()
+    marker = next((m for m in SEQUENCE_MARKERS if m in lowered), None)
+    if marker is None:
+        return (cleaned,)
+    parts: list[str] = []
+    remaining = cleaned
+    while marker is not None:
+        index = remaining.lower().index(marker)
+        parts.append(remaining[:index].strip().strip(","))
+        remaining = remaining[index + len(marker) :]
+        lowered_rest = remaining.lower()
+        marker = next((m for m in SEQUENCE_MARKERS if m in lowered_rest), None)
+    parts.append(remaining.strip().strip(","))
+    parts = [part for part in parts if part]
+    if len(parts) < 2 or any(len(part.split()) < MIN_SUB_GOAL_WORDS for part in parts):
+        return (cleaned,)
+    return tuple(parts)
+
+
 def decompose_goal(
     goal: str,
     *,
-    app: str | None = None,
-    knowledge: tuple[str, ...] = (),
+    app: str | None,
+    knowledge: tuple[str, ...],
 ) -> GoalPlan:
     """Decompose a high-level user goal into ordered sub-goals (pure).
 
-    Analyzes multi-step phrasing (connectors like 'and', 'then', 'after', commas)
-    to create a clean linear execution plan.
+    Deliberately conservative. A strategic plan is only useful when it is
+    *right*: a wrong decomposition does not merely waste a step, it redirects
+    the executor toward work the user never asked for and then reports the
+    invented step as failed. So the plan splits only on explicit sequence
+    words, and otherwise carries the goal as a single sub-goal whose success
+    criteria restate the user's own wording — the executor's own perception,
+    not a template, decides what "done" looks like.
+
+    ``knowledge`` is accepted so the signature is stable for a model-backed
+    decomposer; the deterministic implementation does not consult it.
     """
-    clean_goal = goal.strip()
-    # Normalize step split markers
-    normalized = clean_goal.replace(" ve ", " and ").replace(" sonra ", " then ").replace(" ardından ", " then ")
-    
-    # Split on sequence connectors
-    parts: list[str] = []
-    for chunk in normalized.split(" then "):
-        for sub_chunk in chunk.split(" and "):
-            trimmed = sub_chunk.strip().strip(",")
-            if trimmed:
-                parts.append(trimmed)
-
+    del knowledge  # Reserved for a model-backed decomposer; unused here.
+    parts = split_sequential_goal(goal)
     if not parts:
-        parts = [clean_goal]
+        raise ValueError("goal must be a non-empty string")
 
-    sub_goals: list[PlannedSubGoal] = []
-    for i, part in enumerate(parts):
-        # Infer target app or default
-        target = app
-        lower_part = part.lower()
-        if "chrome" in lower_part:
-            target = "Google Chrome"
-        elif "safari" in lower_part:
-            target = "Safari"
-        elif "finder" in lower_part:
-            target = "Finder"
-
-        criteria = f"'{part}' completed visibly"
-        if "open" in lower_part or "aç" in lower_part:
-            criteria = f"Target application {target or 'window'} is active and focused"
-        elif "search" in lower_part or "ara" in lower_part:
-            criteria = "Search query entered and results are displayed"
-        elif "click" in lower_part or "tıkla" in lower_part:
-            criteria = "Target UI element clicked"
-
-        sub_goals.append(
-            PlannedSubGoal(
-                index=i,
-                description=part,
-                success_criteria=criteria,
-                target_app=target,
-                status="in_progress" if i == 0 else "pending",
-            )
+    sub_goals = tuple(
+        PlannedSubGoal(
+            index=index,
+            description=part,
+            success_criteria=(
+                f"The screen shows observable evidence that '{part}' is done."
+            ),
+            target_app=app,
+            status="in_progress" if index == 0 else "pending",
         )
-
+        for index, part in enumerate(parts)
+    )
+    clean_goal = goal.strip()
     slug = "".join(ch if ch.isalnum() else "-" for ch in clean_goal[:20].lower()).strip("-")
     plan_id = f"plan-{slug}-{int(datetime.now(UTC).timestamp())}"
-    return GoalPlan(plan_id=plan_id, goal=clean_goal, sub_goals=tuple(sub_goals))
+    return GoalPlan(plan_id=plan_id, goal=clean_goal, sub_goals=sub_goals)
 
 
-def advance_plan(plan: GoalPlan, *, success: bool, error: str | None = None) -> GoalPlan:
-    """Advance the current sub-goal status and activate the next one (pure)."""
+def _with_status(
+    sub_goal: PlannedSubGoal,
+    status: SubGoalStatus,
+    error: str | None,
+) -> PlannedSubGoal:
+    """Copy a sub-goal with a new status (pure)."""
+    return sub_goal.model_copy(update={"status": status, "error": error})
+
+
+def advance_plan(plan: GoalPlan, *, success: bool, error: str | None) -> GoalPlan:
+    """Close the current sub-goal and open the next one (pure).
+
+    The next sub-goal is promoted to ``in_progress`` on *both* outcomes. When
+    a failure left the plan with a ``failed`` head and no ``in_progress``
+    successor, the very next call found nothing to advance and returned the
+    plan unchanged — while ``current_sub_goal`` still reported a pending item,
+    so the loop treated every subsequent ``finish`` as "sub-goal done, keep
+    going" and could not terminate until the step budget ran out. Promoting on
+    both paths is what makes the plan strictly monotonic: every call either
+    moves the head forward or reports the plan complete.
+    """
     sub_goals = list(plan.sub_goals)
-    current_idx: int | None = None
-    for i, sg in enumerate(sub_goals):
-        if sg.status == "in_progress":
-            current_idx = i
-            break
-
-    if current_idx is None:
-        return plan
-
-    if success:
-        sub_goals[current_idx] = PlannedSubGoal(
-            index=sub_goals[current_idx].index,
-            description=sub_goals[current_idx].description,
-            success_criteria=sub_goals[current_idx].success_criteria,
-            target_app=sub_goals[current_idx].target_app,
-            status="completed",
+    current_index = next(
+        (i for i, sub_goal in enumerate(sub_goals) if sub_goal.status == "in_progress"),
+        None,
+    )
+    if current_index is None:
+        # No head to close. Promote the first pending sub-goal so a plan that
+        # lost its head (e.g. after a failure) still advances rather than
+        # deadlocking; with nothing pending the plan is genuinely finished.
+        pending_index = next(
+            (i for i, sub_goal in enumerate(sub_goals) if sub_goal.status == "pending"),
+            None,
         )
-        if current_idx + 1 < len(sub_goals):
-            sub_goals[current_idx + 1] = PlannedSubGoal(
-                index=sub_goals[current_idx + 1].index,
-                description=sub_goals[current_idx + 1].description,
-                success_criteria=sub_goals[current_idx + 1].success_criteria,
-                target_app=sub_goals[current_idx + 1].target_app,
-                status="in_progress",
-            )
-    else:
-        sub_goals[current_idx] = PlannedSubGoal(
-            index=sub_goals[current_idx].index,
-            description=sub_goals[current_idx].description,
-            success_criteria=sub_goals[current_idx].success_criteria,
-            target_app=sub_goals[current_idx].target_app,
-            status="failed",
-            error=error,
+        if pending_index is None:
+            return plan
+        sub_goals[pending_index] = _with_status(sub_goals[pending_index], "in_progress", None)
+        return GoalPlan(
+            plan_id=plan.plan_id,
+            goal=plan.goal,
+            sub_goals=tuple(sub_goals),
+            created_at=plan.created_at,
+            updated_at=datetime.now(UTC),
         )
 
+    sub_goals[current_index] = _with_status(
+        sub_goals[current_index],
+        "completed" if success else "failed",
+        None if success else error,
+    )
+    if current_index + 1 < len(sub_goals):
+        sub_goals[current_index + 1] = _with_status(
+            sub_goals[current_index + 1], "in_progress", None
+        )
     return GoalPlan(
         plan_id=plan.plan_id,
         goal=plan.goal,

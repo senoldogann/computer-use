@@ -1,5 +1,6 @@
 """Vision perception and spatial grounding (Law 1, ADR-2)."""
 
+from computeruse.vision.apps import extract_goal_app, infer_target_app
 from computeruse.vision.ax import (
     AXElement,
     element_rect,
@@ -7,10 +8,17 @@ from computeruse.vision.ax import (
     find_elements,
     focused_text_value,
     interactive_summaries,
+    open_tabs_from_tree,
+    summaries_to_image_space,
 )
 from computeruse.vision.capture import (
+    SCREENSHOT_MAP_MAX_SIDE,
     LumaGrid,
     ScreenCapture,
+    coarse_fingerprint,
+    downscale_to_max_side,
+    frame_fingerprint,
+    screen_map_of,
     to_luma_grid,
     verify_capture_region,
 )
@@ -19,6 +27,7 @@ from computeruse.vision.coordinates import (
     DisplayGeometry,
     Point,
     Rect,
+    ScreenMap,
     Size,
     display_origin_offset,
     display_px_to_global_point,
@@ -43,6 +52,7 @@ from computeruse.vision.diff import (
 from computeruse.vision.focus import FocusedWindow, window_summary
 
 __all__ = [
+    "SCREENSHOT_MAP_MAX_SIDE",
     "AXElement",
     "ChangeKind",
     "ChangeVerdict",
@@ -53,18 +63,25 @@ __all__ = [
     "Point",
     "Rect",
     "ScreenCapture",
+    "ScreenMap",
     "Size",
     "Verification",
+    "coarse_fingerprint",
     "crop_luma",
     "display_origin_offset",
     "display_px_to_global_point",
     "downsample_luma",
+    "downscale_to_max_side",
     "element_rect",
     "element_summary",
+    "extract_goal_app",
     "find_elements",
     "focused_text_value",
+    "frame_fingerprint",
     "global_point_to_display_px",
+    "infer_target_app",
     "interactive_summaries",
+    "open_tabs_from_tree",
     "pixels_to_point",
     "point_in_frame",
     "point_to_pixels",
@@ -72,6 +89,8 @@ __all__ = [
     "regional_diff",
     "regional_mean_abs",
     "scale_point",
+    "screen_map_of",
+    "summaries_to_image_space",
     "to_luma",
     "to_luma_grid",
     "verdict",

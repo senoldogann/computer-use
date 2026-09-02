@@ -253,8 +253,11 @@ def decide_permission(level: AutonomyLevel, risk: Risk) -> PermissionDecision:
     Policy:
     * Level 0 -- observer: never act, always recommend = BLOCK at the driver.
     * Level 1 -- supervised: every action needs human confirmation.
-    * Level 2 -- guarded: routine/benign actions auto-run, destructive asks.
-    * Level 3 -- full: routine actions run autonomously; destructive actions still require confirmation.
+    * Level 2 -- guarded: plain navigation auto-runs; routine-but-stateful
+      actions (save/close/confirm dialog clicks) pause for confirmation;
+      destructive actions ask.
+    * Level 3 -- full: everything non-destructive runs autonomously;
+      destructive actions still require confirmation.
     """
     # Full autonomy still requires confirmation for destructive operations.
     # Physical side effects must remain fail-closed even in unattended mode.
@@ -270,6 +273,12 @@ def decide_permission(level: AutonomyLevel, risk: Risk) -> PermissionDecision:
     if level is AutonomyLevel.OBSERVER:
         return PermissionDecision.BLOCK
     if level is AutonomyLevel.SUPERVISED:
+        return PermissionDecision.CONFIRM
+    # Guarded mode: the routine markers ("save", "close", "confirm", "ok" —
+    # the multilingual ``_ROUTINE_MARKERS`` set) name state-changing dialog
+    # actions that the policy treats as worth a human sign-off (M2: this
+    # branch makes that list live policy instead of dead classification).
+    if risk is Risk.ROUTINE:
         return PermissionDecision.CONFIRM
     return PermissionDecision.ALLOW
 

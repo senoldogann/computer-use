@@ -94,3 +94,12 @@ def rpc_call_raw(wire_line: bytes) -> dict[str, object]:
         return response
     finally:
         connection.close()
+
+
+# The simulated backend serves a fixed fixture frame: it can never "settle",
+# so the post-action render wait is pure dead time in every smoke test that
+# drives it through the product shell. Production keeps the real budget.
+SIMULATED_SETTLE: dict[str, int | float] = {
+    "settle_max_polls": 0,
+    "settle_interval_s": 0.0,
+}

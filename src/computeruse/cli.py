@@ -10,15 +10,18 @@ to inject any ``Callable[[WorkingState], AgentTurn]`` (e.g. a real model
 client). The demo drives the *simulated* driver by default; ``--real`` passes
 through to the driver for actual host actuation on macOS.
 
-Note on ``--verify``: the simulated driver cannot render, so a click never
-visibly changes anything and ORIENT verification would fail by design. Enable
-``--verify`` only with ``--real``, where the pixels can actually respond.
+Note on ``--verify``: verification itself is always on — every action is
+checked against whatever witnesses exist (the accessibility surface, the
+focused field's value, the frontmost app). ``--verify`` adds the *pixel*
+witness, which costs a screen capture per verified action and is the only
+witness that can see a purely visual change.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import logging
 import os
 import subprocess
@@ -26,18 +29,21 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 from computeruse.agent import Agent, AgentConfig
 from computeruse.orchestrator.client import ActuationClient, DriverRpcError
+from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import (
     KillSwitchTripped,
     MaxStepsError,
     StuckLoopError,
+    UnrecoverableFailureError,
     WorkingState,
 )
-from computeruse.orchestrator.prompts import scaffolded_provider
+from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.providers.openai import DEFAULT_MODEL, OpenAIError, openai_model
 from computeruse.security.autonomy import (
@@ -46,6 +52,7 @@ from computeruse.security.autonomy import (
     PermissionDeniedError,
 )
 from computeruse.security.killswitch import KillSwitch, install_sigint_catcher
+from computeruse.vision.apps import extract_goal_app, infer_target_app
 
 DEFAULT_SOCKET = "/tmp/actuation-driver.sock"
 DEFAULT_STORE = Path.home() / ".computeruse"
@@ -100,8 +107,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--verify",
-        action="store_true",
-        help="Enable ORIENT visual verification (needs --real; simulated never renders).",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Add the pixel witness to action verification (a screen capture "
+        "before and after each verifiable action). Verification against the "
+        "accessibility surface and focused-field values runs regardless. "
+        "Defaults to ON for real LLM runs; pass --no-verify to disable.",
     )
     parser.add_argument(
         "--vision",
@@ -183,38 +194,134 @@ def load_provider(spec: str, goal: str) -> Callable[[WorkingState], AgentTurn]:
     return cast(Callable[[WorkingState], AgentTurn], _load_callable(spec, "provider"))
 
 
-def load_model(
-    spec: str, *, app: str, max_steps: int = 100
-) -> Callable[[WorkingState], AgentTurn]:
+@dataclass(frozen=True)
+class ModelBinding:
+    """The two callables one model transport is used for.
+
+    ``provider`` decides the next action; ``completion_check`` re-reads the
+    screen to challenge a claimed success. They share a transport (one API key,
+    one model, one usage counter) but never share a context — the whole point
+    of the audit is that it is not persuaded by the reasoning it is checking.
+    """
+
+    provider: Callable[[WorkingState], AgentTurn]
+    completion_check: Callable[[WorkingState, str], CompletionVerdict]
+
+
+def load_model_binding(
+    spec: str,
+    *,
+    app: str,
+    max_steps: int = 100,
+    stats_sink: Callable[[object], None] | None = None,
+) -> ModelBinding:
     """Resolve a raw text model and wrap it with the weak-model scaffolding.
 
-    ``openai[:model_id]`` selects the built-in OpenAI transport (key from the
-    ``OPENAI_API_KEY`` environment variable or ``~/.computeruse/env``); any other
+    ``openai[:model_id]`` selects the built-in OpenAI transport (key resolved by
+    :func:`load_api_key`); any other
     ``module:callable`` spec is imported as a user-provided ``str -> str``
     transport. Either way the scaffolding builds the prompt from the working state
     (goal, last error, knowledge, mounted skill) and retries with corrective hints
     when the model emits invalid JSON (Law 2.1). ``max_steps`` is passed through
     so the prompt always states the true step budget.
     """
-    if not os.environ.get("OPENAI_API_KEY"):
-        env_file = DEFAULT_STORE / "env"
-        if env_file.is_file():
-            try:
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line.startswith("OPENAI_API_KEY="):
-                        val = line.split("=", 1)[1].strip().strip("\"'")
-                        if val:
-                            os.environ["OPENAI_API_KEY"] = val
-            except OSError:
-                pass
+    load_api_key()
 
     if spec == OPENAI_PREFIX or spec.startswith(f"{OPENAI_PREFIX}:"):
         model_id = spec.split(":", 1)[1].strip() if ":" in spec else ""
-        model = openai_model(model_id or None)
+        if _accepts_keyword(openai_model, "stats_sink"):
+            model = cast(Callable[[str], str], openai_model(model_id or None, stats_sink=stats_sink))
+        else:
+            # Legacy/experimental transports that predate usage telemetry get
+            # a plain call; the panel then simply shows no token counters.
+            model = cast(Callable[[str], str], openai_model(model_id or None))
     else:
         model = cast(Callable[[str], str], _load_callable(spec, "model"))
-    return scaffolded_provider(model, app=app, max_steps=max_steps)
+    return ModelBinding(
+        provider=scaffolded_provider(model, app=app, max_steps=max_steps),
+        completion_check=completion_auditor(model, app=app),
+    )
+
+
+def load_model(
+    spec: str,
+    *,
+    app: str,
+    max_steps: int = 100,
+    stats_sink: Callable[[object], None] | None = None,
+) -> Callable[[WorkingState], AgentTurn]:
+    """Resolve a model spec to just its decision provider.
+
+    The thin form for callers that only drive actions; ``load_model_binding``
+    is what the CLI uses, because a real run also needs the completion
+    auditor bound to the same transport.
+    """
+    return load_model_binding(
+        spec, app=app, max_steps=max_steps, stats_sink=stats_sink
+    ).provider
+
+
+#: Where the OpenAI key is looked for, in precedence order. The process
+#: environment always wins; a repo-local ``.env`` beats the shared per-user
+#: store so a checkout can be pointed at a different key without touching the
+#: machine's default. Both files are gitignored — a key must never be committed.
+ENV_FILES: tuple[Path, ...] = (Path(".env"), DEFAULT_STORE / "env")
+
+
+def load_api_key() -> bool:
+    """Populate ``OPENAI_API_KEY`` from the first env file that defines it.
+
+    Returns whether a key is available afterwards. An already-exported variable
+    is never overwritten: an explicit ``OPENAI_API_KEY=... computeruse ...`` must
+    beat whatever a file happens to contain, or a user cannot switch keys for a
+    single run.
+
+    Parsing is deliberately minimal (``KEY=value``, quotes stripped, ``#``
+    comments and blank lines ignored) rather than a dotenv dependency: this
+    reads a secret, and a small explicit parser is easier to audit than an
+    import. Unreadable files are skipped — a permissions problem on one
+    location must not stop the next from being tried — and the caller reports
+    the missing key with actionable text.
+    """
+    if os.environ.get("OPENAI_API_KEY"):
+        return True
+    for env_file in ENV_FILES:
+        try:
+            if not env_file.is_file():
+                continue
+            for raw in env_file.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, value = line.partition("=")
+                if name.strip() != "OPENAI_API_KEY":
+                    continue
+                value = value.strip().strip("\"'")
+                if value:
+                    os.environ["OPENAI_API_KEY"] = value
+                    return True
+        except OSError as exc:
+            print(f"warning: could not read {env_file} ({exc})", file=sys.stderr)
+    return False
+
+
+def _accepts_keyword(func: Callable[..., object], keyword: str) -> bool:
+    """True when ``func`` can accept the named keyword argument.
+
+    Inspects ``**kwargs`` or explicit keyword parameters instead of relying on
+    a trial call (which would double-invoke user code); bound methods and
+    builtins without introspectable signatures default to accepting.
+    """
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True
+    params = signature.parameters
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        or (p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) and p.name == keyword)
+        for p in params.values()
+    )
 
 
 def _load_callable(spec: str, kind: str) -> Callable[..., object]:
@@ -230,30 +337,80 @@ def _load_callable(spec: str, kind: str) -> Callable[..., object]:
 
 
 def cli_confirm_handler(turn: AgentTurn) -> bool:
-    """Prompt the user on stderr/stdin for actions that require confirmation."""
+    """Prompt the user on stderr/stdin for actions that require confirmation.
+
+    Reads exactly one line from stdin so the channel works both for an
+    interactive terminal (typing y/N) and for the menu launcher's piped
+    channel (the panel's Approve/Deny buttons write the answer — M6). Unlike
+    ``input()``, ``readline()`` does not echo a prompt to stdout, which would
+    leak into the panel's log stream. EOF (pipe closed / stopped run) is a
+    denial — fail-closed (Law 5).
+    """
     print(
         f"\n⚠️  CONFIRMATION REQUIRED: Agent wants to perform [{turn.action.type}] for goal: {turn.sub_goal!r}",
         file=sys.stderr,
     )
     print(f"   Payload: {turn.action.model_dump(exclude_none=True)}", file=sys.stderr)
     try:
-        ans = input("Approve and execute this action? (y/N): ").strip().lower()
-        return ans in ("y", "yes")
+        line = sys.stdin.readline()
     except (EOFError, KeyboardInterrupt):
         return False
+    return line.strip().lower() in ("y", "yes")
 
 
-def build_config(args: argparse.Namespace, *, goal: str, activate_named_app: bool) -> AgentConfig:
+def resolve_verify(args: argparse.Namespace) -> bool:
+    """Resolve the effective ``--verify`` value (explicit flag wins).
+
+    An explicit ``--verify``/``--no-verify`` is honored as-is. Otherwise the
+    pixel witness defaults ON for real LLM runs: it is the only witness that
+    sees a purely visual change, and pairing it with the accessibility witness
+    is what lets a genuine miss be called a miss (two independent witnesses
+    must agree before an action is declared failed). Demo and simulated runs
+    default OFF — they are exercising the wiring, not a real display, and the
+    capture pair is pure cost there.
+    """
+    if args.verify is not None:
+        return args.verify
+    return bool(args.real and args.model is not None)
+
+
+def build_config(
+    args: argparse.Namespace,
+    *,
+    goal: str,
+    activate_named_app: bool,
+    app_inferred: bool = False,
+    stats_sink: Callable[[object], None] | None = None,
+) -> AgentConfig:
     """Compose the CLI's args into the single immutable config the agent runs.
 
-    ``activate_named_app`` is True only when the user *named* the app (via
-    ``--app``) *and* the run uses the real backend.
+    ``activate_named_app`` is True when the resolved app (user-named via
+    ``--app`` *or* inferred from the goal) should be brought to the front on
+    a real backend. ``app_inferred`` marks a goal-inferred app: its
+    activation failure (e.g. the app is not installed) must not abort the
+    run — the agent proceeds on the frontmost app and adapts (autonomy over
+    hard failure).
     """
+    completion_check: Callable[[WorkingState, str], CompletionVerdict] | None = None
     if args.model is not None:
-        provider = load_model(args.model, app=args.app or "unknown", max_steps=args.max_steps)
+        binding = load_model_binding(
+            args.model,
+            app=args.app or "unknown",
+            max_steps=args.max_steps,
+            stats_sink=stats_sink,
+        )
+        provider = binding.provider
+        # Only a real model can audit its own completion claim against the
+        # screen; a scripted provider's "success" is the test's own fixture
+        # and must be taken at face value.
+        completion_check = binding.completion_check
     else:
         provider = load_provider(args.provider, goal)
-    confirm_handler = cli_confirm_handler if sys.stdin.isatty() else None
+    confirm_handler = (
+        cli_confirm_handler
+        if sys.stdin.isatty() or os.environ.get("COMPUTERUSE_MENU") == "1"
+        else None
+    )
     return AgentConfig(
         goal=goal,
         app=args.app,
@@ -262,16 +419,19 @@ def build_config(args: argparse.Namespace, *, goal: str, activate_named_app: boo
         store_dir=Path(args.store),
         autonomy_level=AutonomyLevel(args.level),
         confirm_handler=confirm_handler,
-        enable_visual_verification=args.verify,
+        enable_visual_verification=resolve_verify(args),
         enable_vision=getattr(args, "vision", True),
-        # OBSERVE precondition: only a *user-named* app on a *real* backend is
-        # activated (the simulated backend never touches the host — Law 1). An
-        # auto-discovered app is never activated: discovery already names the
-        # frontmost app, and activating it again would be a no-op at best.
+        # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
+        # on a *real* backend is activated (the simulated backend never touches
+        # the host — Law 1). An auto-discovered app is never activated:
+        # discovery already names the frontmost app, and activating it again
+        # would be a no-op at best.
         activate_app_on_start=activate_named_app and args.app is not None,
+        tolerate_activation_failure=app_inferred,
         # Ctrl-C at any moment reclaims control (Law 5 fail-safe); polled live
         # between steps via the signal predicate.
         kill_switch=KillSwitch(monitor=None, signal_predicate=install_sigint_catcher()),
+        completion_check=completion_check,
         max_steps=args.max_steps,
         enable_planning=getattr(args, "plan", False),
     )
@@ -347,21 +507,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             "drive the real model.",
             file=sys.stderr,
         )
+    if args.verify is None and resolve_verify(args):
+        # Verification now defaults ON for real LLM runs: a miss must be
+        # caught and folded into the model's next decision, or the agent
+        # keeps clicking the same wrong spot (the observed failure mode).
+        print(
+            "note: --verify auto-enabled for this real run (a click that "
+            "misses is caught and reported to the agent); pass --no-verify "
+            "to disable.",
+            file=sys.stderr,
+        )
     if (
         args.real
         and args.model is not None
         and getattr(args, "vision", True)
-        and not args.verify
+        and not resolve_verify(args)
     ):
-        # The user's real-run complaint: vision (screenshot to the VLM) is on
-        # but --verify (pre/post pixel diff) is off, so a click that misses
-        # its target is never caught — the agent keeps acting on a wrong
-        # assumption. These are independent switches; say so loudly.
+        # Vision (screenshot to the VLM) is on but the pixel witness is off.
+        # Verification still runs against the accessibility surface, but a
+        # purely visual change has no second witness — and an action is only
+        # declared failed when two independent witnesses agree, so misses in
+        # visual-only UI go unreported. These are independent switches; say so.
         print(
             "warning: --vision is on but --verify is off: the agent sees the "
-            "screen but actions are NOT pixel-verified. A click that lands on "
-            "the wrong element goes unnoticed. Pass --verify with --real to "
-            "enable closed-loop verification.",
+            "screen, but actions are verified only against the accessibility "
+            "surface. A miss in purely visual UI has no second witness and "
+            "will not be reported. Pass --verify with --real for the full "
+            "closed loop.",
             file=sys.stderr,
         )
     driver_process: subprocess.Popen[bytes] | None = None
@@ -370,17 +542,65 @@ def main(argv: Sequence[str] | None = None) -> int:
         # cleared first); only without --driver do we attach to a running one.
         if args.driver is not None:
             driver_process = spawn_driver(args.driver, args.socket, real=args.real)
-        # Remember whether the user *named* an app: only a named app on a
-        # real backend is brought to the front before the run (see
-        # build_config).
+        # Autonomous app resolution: the goal may carry an explicit `[App
+        # Name]` prefix, or name the target implicitly ("Excel'de aç",
+        # "YouTube'da arat"). Resolve it here so the provider sees the
+        # cleaned goal (no bracket wrapper) and the run can bring the right
+        # app to the front without the user passing --app — autonomy by
+        # design, not by configuration.
+        explicit_app, cleaned_goal = extract_goal_app(args.goal)
+        args.goal = cleaned_goal
         named_app = args.app is not None
-        # OBSERVE before DECIDE: if no app was named, discover the frontmost
-        # one from the driver so the provider (and its scaffold prompt) names
-        # the real app from the first turn.
+        app_inferred_from_goal = explicit_app is not None
         if args.app is None:
-            args.app = discover_app(args.socket)
+            # The running-app list disambiguates service goals ("YouTube'da"
+            # -> the running browser) but never restricts the result: `open
+            # -a` can launch a not-running app. Best-effort by contract — a
+            # probe failure degrades to inference without the list.
+            running_apps: tuple[str, ...] = ()
+            try:
+                with ActuationClient(args.socket, connect_retries=1) as client:
+                    running_apps = client.list_apps()
+            except Exception as exc:  # noqa: BLE001 - inference is best-effort
+                print(
+                    f"warning: could not list running apps ({exc}); inferring without them",
+                    file=sys.stderr,
+                )
+            inferred_app = explicit_app or infer_target_app(args.goal, running_apps)
+            if inferred_app is not None:
+                args.app = inferred_app
+                app_inferred_from_goal = True
+            else:
+                # OBSERVE before DECIDE: no explicit or inferable app —
+                # discover the frontmost one so the provider (and its scaffold
+                # prompt) names the real app from the first turn.
+                args.app = discover_app(args.socket)
+        # Live usage telemetry: every successful model call reports its token
+        # usage and per-call latency; each report is streamed to stderr as a
+        # compact "st :" line the menu panel parses into its header counters
+        # (token + elapsed), keeping the transport decoupled from the UI.
+        run_started_at = time.monotonic()
+        run_tokens: dict[str, int] = {"total": 0}
+        run_calls = 0
+
+        def stats_sink(call: object) -> None:
+            nonlocal run_calls
+            run_calls += 1
+            tokens = getattr(call, "total_tokens", 0)
+            run_tokens["total"] += tokens if isinstance(tokens, int) else 0
+            elapsed = time.monotonic() - run_started_at
+            print(
+                f"st : tok_total={run_tokens['total']} elapsed={elapsed:.1f}s calls={run_calls}",
+                file=sys.stderr,
+                flush=True,
+            )
+
         config = build_config(
-            args, goal=args.goal, activate_named_app=named_app and args.real
+            args,
+            goal=args.goal,
+            activate_named_app=args.real and (named_app or app_inferred_from_goal),
+            app_inferred=app_inferred_from_goal and not named_app,
+            stats_sink=stats_sink,
         )
         result = Agent(config).run()
 
@@ -428,6 +648,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The provider repeated one action with no progress (Law 2 guard): the
         # run ended by design, not by accident — say so plainly.
         print(f"stuck loop: {exc}", file=sys.stderr)
+        return 1
+    except UnrecoverableFailureError as exc:
+        # The recovery ladder ran out: the agent could not get past one
+        # obstacle. Report the classified failure rather than a traceback —
+        # the kind names what to fix (consent, a wrong app, a dead driver).
+        print(f"unrecoverable failure ({exc.failure.kind.value}): {exc}", file=sys.stderr)
         return 1
     except MaxStepsError as exc:
         # The loop hit its step budget without a finish; the user sees why

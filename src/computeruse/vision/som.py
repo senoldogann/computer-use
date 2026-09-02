@@ -1,11 +1,19 @@
-"""Set-of-Marks (SoM) Visual Grounding Annotator (Law 1.2 / ADR-2 / Phase 4).
+"""Set-of-Marks (SoM) Visual Grounding Annotator (Law 1.2 / ADR-2).
 
-Draws numbered bounding box badges ([1], [2], [3]...) over interactive AX elements
-directly onto the screenshot before feeding it to the multimodal vision model.
+Overlays emerald bounding rectangles and corner badges over interactive AX
+elements directly onto the screenshot before feeding it to the multimodal
+vision model. The badges are *plain colored squares* — the model matches the
+highlighted region to the AX summary list; no digits are drawn (the legacy
+"numbered badges" wording was wrong — L8).
+
+Status: this module is currently exercised by its unit tests only; wiring it
+into the OODA OBSERVE pipeline (annotating the screenshot the provider sees)
+is an explicit next step, not yet implemented — the module's docstring must
+not overclaim.
 
 Benefits:
 - Eliminates coordinate hallucinations on high-resolution Retina displays.
-- Allows weak and strong models to refer directly to element indices.
+- Lets weak and strong models refer to visually grounded element regions.
 - Pure pixel transformations with zero external heavy dependencies.
 """
 
@@ -34,9 +42,14 @@ class MarkElement:
 
 
 def parse_ax_elements_to_marks(ui_elements: tuple[str, ...]) -> tuple[MarkElement, ...]:
-    """Extract bounding boxes and roles from compact AX element summaries (pure)."""
+    """Extract bounding boxes and roles from compact AX element summaries (pure).
+
+    All provided summaries are processed — the caller (agent.py) already caps
+    the list at ``AX_MAX_ELEMENTS`` (64), so a second, undocumented 30-element
+    slice here would silently drop marks 31-64 (L8).
+    """
     marks: list[MarkElement] = []
-    for i, summary in enumerate(ui_elements[:30], start=1):
+    for i, summary in enumerate(ui_elements, start=1):
         match = _AX_BOX_PATTERN.search(summary)
         if not match:
             continue

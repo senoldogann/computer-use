@@ -102,7 +102,7 @@ fn accept_loop(listener: UnixListener, backend: Arc<dyn Backend>) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let backend = Arc::clone(&backend);
+                let backend = connection_backend(&backend);
                 std::thread::spawn(move || {
                     if let Err(e) = handle_conn(stream, backend.as_ref()) {
                         eprintln!("[driver] connection error: {e}");
@@ -114,10 +114,26 @@ fn accept_loop(listener: UnixListener, backend: Arc<dyn Backend>) {
     }
 }
 
+/// The backend one connection should serve from.
+///
+/// The real backend is *shared*: there is one host, one event source, and one
+/// set of consents. The simulated backend is a fixture whose state (focus,
+/// field values, frontmost app) models a single client's session — sharing it
+/// across connections would let one caller's clicks silently rewrite what
+/// another caller observes, which is precisely the non-determinism a fixture
+/// exists to eliminate.
+fn connection_backend(shared: &Arc<dyn Backend>) -> Arc<dyn Backend> {
+    if shared.is_real() {
+        Arc::clone(shared)
+    } else {
+        Arc::new(SimulatedBackend::default())
+    }
+}
+
 /// Build the active backend based on the `--real` flag (macOS only).
 fn make_backend(real: bool) -> Result<Box<dyn Backend>, BackendError> {
     if !real {
-        return Ok(Box::new(SimulatedBackend));
+        return Ok(Box::new(SimulatedBackend::default()));
     }
     #[cfg(target_os = "macos")]
     {
@@ -143,10 +159,10 @@ fn handle_conn(stream: UnixStream, backend: &dyn Backend) -> io::Result<()> {
             break;
         }
         let response = dispatch(&line, backend);
-        let Ok(mut payload) = serde_json::to_string(&response) else {
-            // Serialization of our own enum cannot fail; treat as a hard IO err.
-            return Err(io::Error::other("response serialization failed"));
-        };
+        // Manual wire serialization: serde's char-by-char validation costs
+        // ~1s for a 40MB screenshot payload; to_wire_string special-cases it
+        // (memcpy-speed, byte-identical — pinned by a protocol unit test).
+        let mut payload = response.to_wire_string();
         payload.push('\n');
         writer.write_all(payload.as_bytes())?;
         writer.flush()?;
@@ -198,8 +214,14 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                 Err(BackendError(message)) => Response::Error { message },
             };
         }
+        Request::ListApps => {
+            return match backend.list_apps() {
+                Ok(apps) => Response::ListApps { apps },
+                Err(BackendError(message)) => Response::Error { message },
+            };
+        }
         Request::AxSnapshot(params) => {
-            return match backend.ax_snapshot(params.pid, params.max_depth) {
+            return match backend.ax_snapshot(params.pid, params.max_depth, params.max_nodes) {
                 Ok(root) => Response::AxSnapshot { root },
                 Err(BackendError(message)) => Response::Error { message },
             };
@@ -213,12 +235,13 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
         Request::Screenshot(params) => {
             return match backend.capture(params.display_id) {
                 Ok(frame) => Response::Screenshot {
-                    display_id: frame.display_id,
-                    format: "bgra8",
-                    width: frame.width,
-                    height: frame.height,
-                    scale: frame.scale,
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(&frame.bgra),
+                        display_id: frame.display_id,
+                        format: "bgra8",
+                        width: frame.width,
+                        height: frame.height,
+                        scale: frame.scale,
+                        data_base64: base64::engine::general_purpose::STANDARD
+                            .encode(&frame.bgra),
                 },
                 Err(BackendError(message)) => Response::Error { message },
             };

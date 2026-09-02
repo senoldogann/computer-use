@@ -31,13 +31,19 @@ recorded there as ADR-1 and ADR-2:
 
 ```
 src/computeruse/
+├── __main__.py    # `uv run python -m computeruse` entry point
 ├── agent.py       # top-level composition: driver + sensor + guard + memory + skills
 ├── cli.py         # `python -m computeruse` — spawns driver, runs one goal
 ├── orchestrator/
-│   ├── schemas.py   # 9 Pydantic action contracts (discriminated union)
-│   ├── loop.py      # OODA: decide_step + OBSERVE/ORIENT + DISTILL (on_complete)
+│   ├── schemas.py   # 11 Pydantic action contracts (discriminated union)
+│   ├── loop.py      # Autonomy cycle: decide_step + observe/validate/act/verify/recover
+│   ├── evidence.py  # Expected postconditions + multi-witness verdicts (pure)
+│   ├── failures.py  # Failure taxonomy + bounded recovery ladder (pure)
 │   ├── prompts.py   # Law 2.1: weak-model scaffolding (prompt + parse + retry)
+│   ├── planner.py   # Phase 3: hierarchical goal decomposition + session checkpoints
 │   └── client.py    # typed JSON-RPC client to the Rust driver
+├── providers/
+│   └── openai.py    # `--model openai` transport (stdlib urllib; no SDK dep)
 ├── skills/
 │   ├── schemas.py   # SkillSummary (Stage 1) + SkillDefinition (Stage 2)
 │   ├── registry.py  # two-stage search/load over the on-disk store
@@ -53,15 +59,22 @@ src/computeruse/
     ├── ax.py          # ADR-2 primary: AXElement tree + find_elements grounding
     ├── coordinates.py # ADR-2: pure retina/DPI scale + multi-display mapping
     ├── diff.py        # ADR-2: regional visual-diff core (anti-aliasing-safe)
-    └── capture.py     # ADR-2: driver response -> ScreenCapture + BGRA->luma
+    ├── capture.py     # ADR-2: driver response -> ScreenCapture + BGRA->luma
+    ├── som.py         # Set-of-Marks annotator (unit-tested; not yet wired in)
+    └── focus.py       # focused-app discovery + activation
 driver/              # Rust actuation micro-driver (Unix-socket JSON-RPC)
-                     #   backend.rs: Backend trait + SimulatedBackend (+capture, +ax)
-                     #   ax.rs     : real macOS AXUIElement tree traversal (ADR-2)
-                     #   quartz.rs : real macOS CGEvent backend + CGDisplay capture
-                     #   bezier.rs : pure cubic-Bezier trajectory planning
+                     #   main.rs    : socket accept loop (driver binary)
+                     #   protocol.rs: JSON-RPC request/response enums
+                     #   backend.rs : Backend trait + SimulatedBackend (+capture, +ax)
+                     #   ax.rs      : real macOS AXUIElement tree traversal (ADR-2)
+                     #   quartz.rs  : real macOS CGEvent backend + CGDisplay capture
+                     #   bezier.rs  : pure cubic-Bezier trajectory planning
+                     #   hotkey.rs  : kill-switch event tap (Command+Shift+Escape)
+                     #   indicator.rs: menu-bar status item + cursor halo
+                     #   menu.rs    : menu-bar launcher (panel + agent subprocess)
+                     #   bin/menu.rs: `actuation-menu` binary entry
 tests/
-├── smoke/           # contract-drift tests driving the real compiled driver
-└── (unit/)          # pure data transformation tests
+└── smoke/           # all tests: contract-drift + pure-data + end-to-end (no separate unit/ dir)
 ```
 
 ## Contract guarantees
@@ -128,8 +141,8 @@ icon (the spawned driver runs halo-only).
 **Human presence & kinematics (Law 1, Law 5.2):** mouse movements are cubic
 Beziers with distance-adaptive duration (a long sweep is never a teleport),
 clicks carry a natural post-click pause, and typing follows a cadence. While
-the driver runs under `--real` on macOS, a sea-blue status icon appears in the
-menu bar and a translucent sea-blue halo follows the cursor — so the user
+the driver runs under `--real` on macOS, an emerald status icon appears in the
+menu bar and a translucent emerald halo follows the cursor — so the user
 always sees where the agent is acting. Kill-switch: Command+Shift+Escape, or
 just grab the mouse.
 
@@ -149,10 +162,14 @@ Working & tested:
   mouse/keyboard/scroll/type — so the pure Bezier planner is unit-tested and
   the physical connector is interchangeable. Distance-adaptive movement
   duration, post-click pauses, and `mouse_drag` carries `duration_ms`.
-- Law 2 self-correction: a stuck-loop guard aborts a run after 5 identical
-  actions with no progress (corrective error injected at the 3rd), and
-  `max_steps` ends a run loudly instead of silently.
-- Law 5.2 visibility: an AppKit menu-bar status icon + translucent sea-blue
+- Law 2 self-correction: a stuck-loop guard refuses the 4th identical action
+  taken with nothing changing on screen (corrective hint injected before it),
+  and both that refusal and every other failure enter a bounded **recovery
+  ladder** — RETRY, then ALTERNATE (change the method), then REPLAN (abandon
+  the tactic and unmount misleading skills), then ABORT. One obstacle can
+  never consume a whole run, and no single failure ends a run that could still
+  recover. `max_steps` ends a run loudly instead of silently.
+- Law 5.2 visibility: an AppKit menu-bar status icon + translucent emerald
   cursor halo while the real driver is active; app activation (`--app` brings
   the target to the front).
 - Law 5 kill-switch: a pure mouse-shake detector + an `OodaRunner` gate that
@@ -161,17 +178,34 @@ Working & tested:
   `vision/coordinates.py`, fully unit-tested without a display.
 - ADR-2 visual-diff core: `vision/diff.py` implements an anti-aliasing-safe,
   downsample-then-compare regional diff (mean + moved-fraction signals) that
-  feeds the OODA ORIENT step with an "unchanged / changed / noise" verdict.
+  serves as *one* of the verification witnesses, with an
+  "unchanged / changed / noise" verdict.
 - ADR-2 capture connector: the driver's `screenshot` RPC returns a typed
   BGRA8 frame (real `CGDisplayCreateImage` in Quartz, deterministic
   checkerboard in simulation, Screen-Recording-consent gated) that
   `vision/capture.py` decodes to luma — OODA OBSERVE finally has a sensor,
   and the global-point → display-px → pixel-luma mapping is tested end to end.
-- Law 2 visual self-correction: `OodaRunner` accepts a `sensor` and the ORIENT
-  step captures before/after every click, diffs the target region, and folds
-  `VisualVerificationFailedError` (with mean/changed-fraction diagnostics)
-  into `last_error` — an ACKed click that landed on nothing is now caught and
-  surfaced to the next provider turn, without polluting `completed_steps`.
+- Law 2 evidence-based verification: every action declares an expected
+  postcondition (`orchestrator/evidence.py`) and independent witnesses report
+  on it — the AX surface, the focused field's AXValue, the frontmost app, and
+  (with `--verify`) a pixel diff. One confirming witness outweighs silent
+  ones; a witness that cannot speak is INCONCLUSIVE and never fails an action;
+  a *direct* denial is conclusive alone while two *circumstantial* ones must
+  agree. Only then is `VerificationFailedError` folded into `last_error`,
+  without polluting `completed_steps`. A single fragile signal can no longer
+  invent a failure, and an ACKed click that landed on nothing is still caught.
+- One coordinate space: `ScreenMap` (`vision/coordinates.py`) owns both
+  directions between the model's screenshot map and logical screen points, so
+  AX rects and model coordinates are always comparable and a conversion can
+  never be applied backwards.
+- Goal-completion audit: a claimed success is re-checked against the *current*
+  screen by a narrowly-scoped second read (goal + claim + screenshot, without
+  the actor's own reasoning). A rejected claim folds back as an ordinary
+  recoverable error, so a hallucinated success cannot end a run.
+- Focus and staleness gates: one live window read before every positional
+  action catches the target app losing focus (re-asserted once, then reported)
+  and the host moving on during the model's turn (rejected once, then yielded
+  so an animated page cannot block forever).
 - Law 3 RETRIEVE wiring (OODA step 3): `OodaRunner` takes `skill_scan`
   (Stage 1: ranked summaries for a query) and `skill_loader` (Stage 2: full
   definition by id). Each turn it scans with the goal and mounts the top
@@ -306,7 +340,8 @@ Working & tested:
   a regression test.
 **Not yet implemented:** nothing structural — the 6 laws, the 8 OODA steps,
 all three memory tiers, both ADR-2 grounding halves, and the three Law 5.2
-kill channels are implemented and tested. Natural next frontiers: vision
-input to the model (feeding real screenshots into the prompt via a
-multimodal-capable model), multi-agent orchestration, and a fine-tuned
+kill channels are implemented and tested. Multimodal vision input is live
+(screenshots feed the model via `screenshot_b64` + the OpenAI image_url
+route). Natural next frontiers: wiring the Set-of-Marks annotator into the
+OODA OBSERVE pipeline, multi-agent orchestration, and a fine-tuned
 skill-following model.

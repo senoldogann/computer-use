@@ -37,7 +37,7 @@ use core_graphics::window::{
     kCGWindowListOptionOnScreenOnly, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
 
-use crate::backend::{BackendError, FocusedWindow, HostElement};
+use crate::backend::{BackendError, FocusedWindow, HostElement, NodeBudget};
 
 // AX C API (ApplicationServices framework). Declared directly — the
 // `accessibility` crate adds its own API surface; these seven symbols are
@@ -125,13 +125,30 @@ fn size_attribute(element: CFTypeRef, name: &str) -> CGSize {
         .unwrap_or(CGSize::new(0.0, 0.0))
 }
 
-/// Traverse one element into a HostElement, capping depth like the simulated
-/// backend so a deep app cannot balloon the RPC response (same budget rule).
-fn build_tree(element: CFTypeRef, depth: u8, max_depth: u8) -> HostElement {
+/// Traverse one element into a HostElement, capping depth and total nodes
+/// like the simulated backend so a deep app cannot balloon the RPC response
+/// (same budget rule: web-first — page content is visited before chrome).
+///
+/// ``in_web`` tracks whether this element already lives inside an
+/// ``AXWebArea`` subtree; children inherit it, so every node below a page
+/// element spends from the same web pool. The per-pool ``NodeBudget`` stops
+/// descent in a pool once it is spent — an exhausted pool drops the
+/// remaining siblings entirely (no empty leaves), bounding both the walk
+/// time and the response size. Children are ordered web-first BEFORE
+/// recursing, mirroring the orchestrator's summary ordering, so the budget
+/// lands on the actionable page content first.
+fn build_tree(
+    element: CFTypeRef,
+    depth: u8,
+    max_depth: u8,
+    in_web: bool,
+    budget: &mut NodeBudget,
+) -> HostElement {
     let role = string_attribute(element, "AXRole")
         // Drop the ubiquitous "AX" prefix so roles read "Button", "Window".
         .map(|r| r.trim_start_matches("AX").to_string())
         .unwrap_or_default();
+    let node_is_web = in_web || role == "WebArea";
     // Many apps (Chrome's omnibox included) leave AXTitle empty and put the
     // human label in AXDescription; fall back so the element still has a
     // name a provider can reason about ("address bar", "search field").
@@ -165,8 +182,24 @@ fn build_tree(element: CFTypeRef, depth: u8, max_depth: u8) -> HostElement {
                     children_attr.as_CFTypeRef() as CFArrayRef,
                 )
             };
+            // Web-first: collect role-tagged children so page content
+            // (AXWebArea subtrees) is visited before chrome (tab strip,
+            // omnibox, toolbar). The AXRole read here is cheap and bounds
+            // the ordering decision to one attribute per direct child.
+            let mut tagged: Vec<(String, CFTypeRef)> = Vec::new();
             for child in array.iter() {
-                children.push(build_tree(child.as_CFTypeRef(), depth + 1, max_depth));
+                let role = string_attribute(child.as_CFTypeRef(), "AXRole").unwrap_or_default();
+                tagged.push((role, child.as_CFTypeRef()));
+            }
+            tagged.sort_by_key(|(role, _)| role != "AXWebArea");
+            for (child_role, child) in tagged {
+                let child_is_web = node_is_web || child_role == "AXWebArea";
+                // Budget gate BEFORE recursing: an exhausted pool drops the
+                // rest of the siblings — never emit stubs to pad the payload.
+                if !budget.spend(child_is_web) {
+                    break;
+                }
+                children.push(build_tree(child, depth + 1, max_depth, node_is_web, budget));
             }
         }
     }
@@ -321,6 +354,55 @@ fn frontmost_window_owner() -> Option<(i32, String)> {
     None
 }
 
+/// Distinct owner names of on-screen normal windows (``CGWindowListCopyWindowInfo``).
+///
+/// Same source and filtering as :func:`frontmost_window_owner`, but collects
+/// every layer-0 window's owner name (deduplicated, in front-to-back order of
+/// first appearance). This is the driver's answer to "which apps is the user
+/// actually running" — used for autonomous target-app inference — and needs no
+/// consent: owner names (unlike window titles) are always available.
+pub fn window_owner_names() -> Vec<String> {
+    let windows = match copy_window_info(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    ) {
+        Some(windows) => windows,
+        None => return Vec::new(),
+    };
+    let (layer_key, name_key) = unsafe {
+        (
+            CFString::wrap_under_get_rule(kCGWindowLayer),
+            CFString::wrap_under_get_rule(kCGWindowOwnerName),
+        )
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for window in windows.iter() {
+        let window = unsafe {
+            CFDictionary::<CFString, CFType>::wrap_under_get_rule(*window as CFDictionaryRef)
+        };
+        let Some(layer) = window.find(&layer_key) else {
+            continue;
+        };
+        // Layer 0 = normal application windows; skip the menu bar, Dock, etc.
+        if layer.downcast::<CFNumber>().and_then(|n| n.to_i32()) != Some(0) {
+            continue;
+        }
+        let Some(name) = window.find(&name_key) else {
+            continue;
+        };
+        let Some(name) = name.downcast::<CFString>() else {
+            continue;
+        };
+        let name = name.to_string();
+        if name.is_empty() || !seen.insert(name.clone()) {
+            continue;
+        }
+        names.push(name);
+    }
+    names
+}
+
 /// Current cursor position in global logical points (a probe CGEvent).
 ///
 /// ``CGEvent::new`` with no prior event yields the *current* location — the
@@ -335,7 +417,7 @@ fn cursor_position() -> Result<(f64, f64), BackendError> {
 }
 
 /// Snapshot the accessibility tree of the app with the given pid.
-pub fn ax_snapshot(pid: u32, max_depth: u8) -> Result<HostElement, BackendError> {
+pub fn ax_snapshot(pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElement, BackendError> {
     // The same Accessibility consent that gates event posting also gates AX
     // reads; without it every attribute copy returns kAXErrorAPIDisabled.
     if !trusted() {
@@ -356,7 +438,13 @@ pub fn ax_snapshot(pid: u32, max_depth: u8) -> Result<HostElement, BackendError>
     // the traversal finishes — a raw ref here would leak one app element per
     // snapshot on a polling loop.
     let app = unsafe { CFType::wrap_under_create_rule(app_ref) };
-    Ok(build_tree(app.as_CFTypeRef(), 0, max_depth))
+    // The app root itself is always emitted (it does not spend the budget);
+    // every descendant spends from the web-first two-pool budget, so the
+    // walk and the response stay bounded on heavy pages (YouTube-size trees
+    // are tens of thousands of nodes; the orchestrator needs ~dozens).
+    let mut budget = NodeBudget::new(max_nodes);
+    let root = build_tree(app.as_CFTypeRef(), 0, max_depth, false, &mut budget);
+    Ok(root)
 }
 
 /// May this process read the accessibility tree (consent check)?

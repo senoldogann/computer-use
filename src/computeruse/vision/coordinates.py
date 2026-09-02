@@ -159,3 +159,52 @@ class CoordinateOutOfBoundsError(ValueError):
     OODA loop can surface *why* an action failed rather than quietly clicking
     a neighbouring UI element.
     """
+
+
+@dataclass(frozen=True)
+class ScreenMap:
+    """Bidirectional map between the model's image space and screen points.
+
+    The VLM never sees the real display: it sees a downscaled screenshot map
+    (``downscale_to_max_side``). Two coordinate spaces therefore coexist every
+    turn, and mixing them up is the single most expensive mistake in a
+    computer-use agent — a 3x error silently clicks the wrong element (or gets
+    rejected as out of bounds) with no diagnostic that names the cause.
+
+    This type is the *only* authority on that conversion. It owns both spaces
+    at once, so a caller can never apply the factor in the wrong direction:
+    :meth:`to_screen` is what the actuation gate uses on model coordinates, and
+    :meth:`to_image` is what perception (AX summaries) uses before the model
+    ever reads them. Pure, no I/O.
+    """
+
+    #: Display size in logical points — the space the driver actuates in.
+    logical: Size
+    #: Screenshot-map size in image pixels — the space the model reports in.
+    image: Size
+
+    def __post_init__(self) -> None:
+        if self.logical.width <= 0 or self.logical.height <= 0:
+            raise ValueError(f"logical size must be positive, got {self.logical}")
+        if self.image.width <= 0 or self.image.height <= 0:
+            raise ValueError(f"image size must be positive, got {self.image}")
+
+    @property
+    def points_per_pixel(self) -> float:
+        """Logical screen points per image pixel (aspect is preserved)."""
+        return self.logical.width / self.image.width
+
+    @property
+    def is_identity(self) -> bool:
+        """True when image space and screen space coincide (no conversion)."""
+        return self.image.width == self.logical.width and self.image.height == self.logical.height
+
+    def to_screen(self, point: Point) -> Point:
+        """Map a model-reported image-space point to logical screen points."""
+        factor = self.points_per_pixel
+        return Point(point.x * factor, point.y * factor)
+
+    def to_image(self, point: Point) -> Point:
+        """Map a logical screen point (e.g. an AX rect) into image space."""
+        factor = self.points_per_pixel
+        return Point(point.x / factor, point.y / factor)

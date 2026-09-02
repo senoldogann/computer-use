@@ -28,6 +28,15 @@ def test_activate_app_ack() -> None:
     assert payload.get("ok") == "ack"
 
 
+def test_list_apps_returns_running_apps() -> None:
+    """The running-app list round-trips (autonomous target-app inference)."""
+    payload = rpc_call({"method": "list_apps"})
+    assert payload.get("ok") == "list_apps"
+    apps = payload.get("apps")
+    assert isinstance(apps, list)
+    assert "Safari" in apps, "simulated fixture must report its running apps"
+
+
 def test_malformed_method_rejected() -> None:
     payload = rpc_call({"method": "teleport", "params": {}})
     assert payload.get("ok") == "error"
