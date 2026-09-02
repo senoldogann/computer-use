@@ -287,8 +287,15 @@ class ActuationClient:
         assert self._sock is not None, "client not connected; call connect() first"
         return self._sock
 
-    def capture(self, display_id: int = 0) -> ScreenCapture:
-        """Capture the display through the driver and return a typed frame.
+    def capture(self, display_id: int = 0, window_pid: int | None = None) -> ScreenCapture:
+        """Capture the screen through the driver and return a typed frame.
+
+        ``window_pid`` photographs that application's frontmost window instead
+        of the display, occluded or not. That is what lets an agent work in an
+        app the user has left behind another one: a display capture would show
+        it the foreground, so it would reason about one window while acting on
+        another. The frame carries the window's own origin, so the existing
+        coordinate map converts off it unchanged.
 
         ``display_id == 0`` means the main display. This is the OBSERVE step's
         sensor: the raw pixels are decoded (and diffed) by the pure vision
@@ -297,9 +304,12 @@ class ActuationClient:
         with the driver's own message, so the ORIENT step can fold the real
         reason into ``last_error`` instead of a generic parse failure.
         """
+        params: dict[str, object] = {"display_id": display_id}
+        if window_pid is not None:
+            params["pid"] = window_pid
         response = self.request(
             "screenshot",
-            {"display_id": display_id},
+            params,
             timeout_seconds=CAPTURE_TIMEOUT_SECONDS,
         )
         if response.get("ok") != "screenshot":
@@ -381,6 +391,25 @@ class ActuationClient:
                 )
             apps.append(name)
         return tuple(apps)
+
+    def app_pid(self, app: str) -> int | None:
+        """The pid of a running application, by the name the user would type.
+
+        Background mode needs the *target* app's pid, and the only pid the loop
+        otherwise knows is the frontmost one — which in this mode is by
+        definition the wrong app. Without this, perception followed whatever
+        the user had in front: a run aimed at Calculator photographed Chrome,
+        found no calculator in it, and correctly reported it could not proceed.
+
+        ``None`` means nothing matches that name or bundle id, which is an
+        ordinary answer — the app may simply not be running.
+        """
+        response = self.request("app_pid", {"app": app})
+        if response.get("ok") != "app_pid":
+            message = str(response.get("message", "unknown driver error"))
+            raise DriverRpcError(method="app_pid", driver_message=message)
+        pid = response.get("pid")
+        return int(pid) if isinstance(pid, int) else None
 
     def ax_press(self, pid: int, x: float, y: float) -> bool:
         """Ask the element at a point inside an app to activate itself.

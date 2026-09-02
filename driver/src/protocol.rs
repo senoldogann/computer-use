@@ -26,6 +26,7 @@ pub enum Request {
     Screenshot(ScreenshotParams),
     AxSnapshot(AxSnapshotParams),
     AxPress(AxPressParams),
+    AppPid(AppPidParams),
     ActivateApp(ActivateAppParams),
     ClipboardPaste(ClipboardPasteParams),
 }
@@ -39,6 +40,12 @@ pub struct AxPressParams {
     pub pid: u32,
     pub x: i64,
     pub y: i64,
+}
+
+/// Resolve a running application's pid from the name the user would type.
+#[derive(Debug, Deserialize)]
+pub struct AppPidParams {
+    pub app: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +98,11 @@ pub struct TypeTextParams {
 pub struct ScreenshotParams {
     /// Empty captures the full main display.
     pub display_id: u32,
+    /// Photograph this application's frontmost window instead of the whole
+    /// display. Absent means the display, which is what every caller wanted
+    /// before an agent could act on a window the user keeps behind another.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +148,12 @@ pub enum Response {
     HotkeyState {
         /// Whether the user pressed the global kill combo (Law 5.2).
         tripped: bool,
+    },
+    AppPid {
+        /// The running app's pid, or null when nothing matches that name or
+        /// bundle id — an ordinary answer, not an error: the app may simply
+        /// not be running yet.
+        pid: Option<i32>,
     },
     AxPress {
         /// Whether an accessibility element accepted the press. `false` means

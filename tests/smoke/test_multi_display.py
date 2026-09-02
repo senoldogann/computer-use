@@ -25,6 +25,7 @@ from computeruse.security.autonomy import AutonomyLevel
 from computeruse.vision.ax import summaries_within
 from computeruse.vision.capture import (
     ScreenCapture,
+    downscale_to_max_side,
     screen_map_of,
     to_logical_resolution,
     verify_capture_region,
@@ -294,3 +295,29 @@ def test_the_agent_captures_the_configured_display(tmp_path: Path) -> None:
         agent_module.ActuationClient = original  # type: ignore[assignment]
     assert requested, "the sensor must have been used"
     assert set(requested) == {2}, "every capture must target the configured display"
+
+
+def test_a_window_frame_carries_its_own_origin() -> None:
+    """Window capture reuses the offset machinery displays already use.
+
+    Background mode photographs the target window rather than the display,
+    because a display capture shows the agent whatever the *user* has in front
+    while it acts on something else. The frame's origin is then the window's,
+    so a coordinate read off it converts back to a clickable point unchanged.
+    """
+    window = ScreenCapture(
+        display_id=0,
+        width=460,
+        height=816,
+        scale=2.0,
+        origin_x=311.0,
+        origin_y=453.0,
+        data=bytes(460 * 816 * 4),
+    )
+    mapped = downscale_to_max_side(to_logical_resolution(window))
+    smap = screen_map_of(to_logical_resolution(window), mapped)
+    # The window's own top-left is where its content starts, not the screen's.
+    assert smap.to_screen(Point(0, 0)) == Point(311.0, 453.0)
+    centre = smap.to_screen(Point(mapped.width / 2, mapped.height / 2))
+    assert 311.0 < centre.x < 311.0 + 230.0
+    assert 453.0 < centre.y < 453.0 + 408.0
