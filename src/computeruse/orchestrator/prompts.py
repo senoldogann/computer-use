@@ -314,7 +314,13 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # can follow a known workflow instead of re-deriving it from scratch.
         lines.append(f"Mounted skill: {state.skill.skill_id} — {state.skill.description}")
         if state.skill.steps:
-            lines.append("Skill steps:")
+            lines.append(
+                "A route that reached this goal before — a HINT, not a script. It carries no "
+                "coordinates, because those only meant anything on the screen that recorded them. "
+                "Follow it where the current screen agrees, skip steps already satisfied, and "
+                "abandon it the moment what you see disagrees with it. Always re-derive every "
+                "target from the CURRENT screen."
+            )
             lines.extend(f"{index}. {step}" for index, step in enumerate(state.skill.steps, 1))
     if state.completed_steps:
         total = len(state.completed_steps)
