@@ -38,6 +38,13 @@ DEFAULT_SEARXNG_URL: Final[str] = "http://127.0.0.1:8888"
 #: prompt, not what the engine can return.
 MAX_RESULTS: Final[int] = 8
 MAX_PAGE_CHARS: Final[int] = 20_000
+#: Below this many characters, an extract is not a short page — it is a page
+#: whose text never arrived. Measured against real sites: Wikipedia yields
+#: 20,000 characters and Hacker News 3,793, while Reddit yields 6, because its
+#: markup is a shell that JavaScript fills in later. Returning those 6
+#: characters as though they were the article is the worst possible answer, so
+#: the floor exists to turn a silent wrong result into a usable one.
+MIN_PAGE_CHARS: Final[int] = 200
 REQUEST_TIMEOUT_SECONDS: Final[float] = 20.0
 
 #: Identify honestly. An agent that hides what it is gets treated as a scraper,
@@ -138,8 +145,12 @@ def fetch_page(url: str, *, max_chars: int = MAX_PAGE_CHARS) -> str:
         raise WebError(f"refusing to fetch a non-HTTP(S) URL: {url!r}")
     html = _get(url)
     text = html_to_text(html)
-    if not text:
-        raise WebError(f"no readable text found at {url}")
+    if len(text) < MIN_PAGE_CHARS:
+        raise WebError(
+            f"{url} returned almost no readable text ({len(text)} characters) — its "
+            "content is built by JavaScript that this fetch does not run. Open the "
+            "page on screen and read it there instead; that is what the browser is for."
+        )
     return text[:max_chars]
 
 

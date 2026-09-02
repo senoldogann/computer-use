@@ -85,13 +85,13 @@ ACTION_CONTRACT: Final[str] = (
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
     '- type_text: {"type": "type_text", "text": str, "wpm": int (default 40)}\n'
-    '- web_search: {"type": "web_search", "query": str} — look something up without touching the screen. No cursor, no focus, no browser. Prefer this over opening a browser and typing into a search box.\n'
-    '- web_fetch: {"type": "web_fetch", "url": str} — read a page\'s text directly instead of scrolling through it on screen.\n'
+    '- web_search: {"type": "web_search", "query": str} — search the web. Costs no cursor, no focus, no browser.\n'
+    '- web_fetch: {"type": "web_fetch", "url": str} — read a page\'s text. Server-rendered pages only.\n'
     '- clipboard_paste: {"type": "clipboard_paste", "text": str} — preferred for URLs, search queries, and any long text (Cmd+V)\n'
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
     '- activate_app: {"type": "activate_app", "app": str} — brings an application (e.g. "Google Chrome", "Notes", "Finder") to the front\n'
     '- wait: {"type": "wait", "duration_ms": int, "reason": str}\n'
-    '- finish: {"type": "finish", "status": "success|failed", "summary": str}\n'
+    '- finish: {"type": "finish", "status": "success|failed", "summary": str} — "summary" is what the USER READS. If the goal asked a question, the answer goes there: finish with it. Do not hunt for a text box to type it into — you have no one to hand it to but the summary.\n'
     "\n"
     "3. THE CYCLE YOU ARE INSIDE:\n"
     "   OBSERVE -> UNDERSTAND -> PLAN -> VALIDATE -> ACT -> VERIFY -> RECOVER.\n"
@@ -136,6 +136,22 @@ ACTION_CONTRACT: Final[str] = (
     "   - If a scroll changes nothing, the cursor is probably not over a scrollable area (move it to the\n"
     "     page center) — or you are already at the end, in which case scroll the OTHER way.\n"
     "   - Headers, avatars and account menus live at the TOP: scroll up before hunting downward.\n"
+    "\n"
+    "   WHEN TO LOOK SOMETHING UP INSTEAD OF LOOKING AT IT:\n"
+    "   - Use web_search for facts, documentation, version numbers, URLs — anything whose answer\n"
+    "     lives on the internet rather than on this machine. It is one step and costs no screen\n"
+    "     time; opening a browser, clicking a search box, typing, waiting, and reading results off\n"
+    "     a downscaled screenshot is a dozen fragile steps for the same answer.\n"
+    "   - Use web_fetch when you have a URL and want what the page SAYS. If it reports the page is\n"
+    "     built by JavaScript, stop fetching it: open it on screen and read it with your eyes.\n"
+    "     That is what the browser is for, and it is not a failure to fall back to it.\n"
+    "   - Do NOT use either for anything about THIS machine — which windows are open, what a\n"
+    "     dialog says, whether a file downloaded. Only the screen knows that.\n"
+    "   - Do NOT fetch pages that need a login, or interactive apps (a dashboard, an inbox, a web\n"
+    "     editor). A fetch has no session and no ability to click; use the browser for those.\n"
+    "   - The goal decides. If the user asked you to DO something in a web app, do it on screen —\n"
+    "     reading the page instead does not accomplish it.\n"
+    "\n"
     "   - Do NOT click browser chrome (tab bar, address bar, toolbar) when you mean a page element.\n"
     "\n"
     "7. NEVER NAVIGATE BY KEYBOARD FOCUS (Tab / arrows):\n"
