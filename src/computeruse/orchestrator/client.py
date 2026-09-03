@@ -20,7 +20,7 @@ import logging
 import os
 import socket
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Final, Self, cast
 
 from computeruse.orchestrator.schemas import (
@@ -182,11 +182,19 @@ class ActuationClient:
         connect_retries: int = 3,
         retry_delay_seconds: float = 0.2,
         recv_timeout_seconds: float = 10.0,
+        recover: Callable[[], None] | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._connect_retries = connect_retries
         self._retry_delay_seconds = retry_delay_seconds
         self._recv_timeout_seconds = recv_timeout_seconds
+        # Called once per :meth:`connect` when the socket cannot be reached,
+        # before the last attempt. The driver runs in its own process by
+        # design (ADR-1), and a socket that has stopped answering usually means
+        # that process is gone — no number of reconnects fixes that, so
+        # something has to be allowed to bring it back. ``None`` keeps the old
+        # behaviour for callers that attach to a driver they do not own.
+        self._recover = recover
         self._sock: socket.socket | None = None
         # Persistent read buffer: a single `recv()` may carry *two* response
         # lines (or a partial line). Keeping leftover bytes here (instead of a
@@ -204,7 +212,15 @@ class ActuationClient:
         return self._sock is not None
 
     def connect(self) -> None:
-        """Open the Unix socket with exponential backoff (Law 6.2)."""
+        """Open the Unix socket with exponential backoff (Law 6.2).
+
+        The last attempt is preceded by the recovery hook when one is
+        configured, because by then the evidence says the problem is not
+        timing: a socket that refused two spaced-out attempts is usually a
+        socket whose server has exited, and retrying a third time changes
+        nothing unless something restarts it first.
+        """
+        recovered = False
         for attempt in range(1, self._connect_retries + 1):
             try:
                 self._sock = self._connect_once()
@@ -220,6 +236,17 @@ class ActuationClient:
                     wait,
                 )
                 time.sleep(wait)
+                if (
+                    self._recover is not None
+                    and not recovered
+                    and attempt >= self._connect_retries - 1
+                ):
+                    # Once per connect, never in a loop: the hook either brought
+                    # a driver back or raised its own terminal error, and a
+                    # second call would only spawn processes faster than they
+                    # can fail.
+                    recovered = True
+                    self._recover()
         raise DriverConnectionError(self._socket_path, self._connect_retries)
 
     def _connect_once(self) -> socket.socket:

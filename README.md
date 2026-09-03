@@ -18,14 +18,22 @@ recorded there as ADR-1 and ADR-2:
   runtime cost is irrelevant here.
 - **Rust** owns actuation as a **separate process** speaking typed JSON-RPC
   over a Unix socket. Python never imports the driver — if a CGEvent tap hangs
-  the OS layer, only the driver process dies, and the orchestrator restarts it.
+  the OS layer, only the driver process dies, and the orchestrator restarts
+  it — bounded (`orchestrator/supervisor.py`), and only for a driver the run
+  itself spawned.
 
 ## ADR-2 — Accessibility-first grounding, pixels as verifier
 
 - Primary localization = macOS Accessibility API (exact per-element
   coordinates/role/state, stable across DPI/theme).
-- Screenshots/OCR/vision-diff **verify** candidate coordinates before acting.
-  Pixel-first OCR is only the fallback for apps with no AX tree.
+- Screenshots and the regional vision-diff **verify** candidate coordinates
+  before acting.
+- **Not yet built:** the OCR grounding fallback ADR-2 specifies for apps with
+  no AX tree. Marks are derived from AX elements alone, so in a window that
+  exposes none (games, VMs, remote desktop, a canvas, some Electron apps) the
+  agent has no indexed targets and can only read coordinates off the
+  screenshot. This is the largest open gap in perception, not an omission from
+  this list.
 
 ## Repository map
 
@@ -41,6 +49,7 @@ src/computeruse/
 │   ├── failures.py  # Failure taxonomy + bounded recovery ladder (pure)
 │   ├── prompts.py   # Law 2.1: weak-model scaffolding (prompt + parse + retry)
 │   ├── planner.py   # Phase 3: hierarchical goal decomposition + session checkpoints
+│   ├── supervisor.py# ADR-1: bounded respawn of a driver that died mid-run
 │   └── client.py    # typed JSON-RPC client to the Rust driver
 ├── providers/
 │   └── openai.py    # `--model openai` transport (stdlib urllib; no SDK dep)
@@ -60,7 +69,7 @@ src/computeruse/
     ├── coordinates.py # ADR-2: pure retina/DPI scale + multi-display mapping
     ├── diff.py        # ADR-2: regional visual-diff core (anti-aliasing-safe)
     ├── capture.py     # ADR-2: driver response -> ScreenCapture + BGRA->luma
-    ├── som.py         # Set-of-Marks annotator (unit-tested; not yet wired in)
+    ├── som.py         # Set-of-Marks annotator (live: marks every OBSERVE frame)
     └── focus.py       # focused-app discovery + activation
 driver/              # Rust actuation micro-driver (Unix-socket JSON-RPC)
                      #   main.rs    : socket accept loop (driver binary)

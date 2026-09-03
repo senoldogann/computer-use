@@ -119,6 +119,11 @@ class AgentConfig:
     settle_interval_s: float = SETTLE_INTERVAL_S
     max_steps: int = 100
     connect_retries: int = 3
+    # ADR-1 resilience: called when the driver socket stops answering, to give
+    # whoever owns the driver process a chance to bring it back before the run
+    # is declared handless. ``None`` for callers attached to a driver they did
+    # not start — restarting someone else's process is not theirs to do.
+    driver_recover: Callable[[], None] | None = None
     # Phase 3: when True, the goal is decomposed into sub-goals and the loop
     # advances through them (a ``finish`` marks the current sub-goal done).
     # Session checkpoints are written under ``store_dir/checkpoints`` so an
@@ -368,6 +373,7 @@ class Agent:
         with ActuationClient(
             self._config.socket_path,
             connect_retries=self._config.connect_retries,
+            recover=self._config.driver_recover,
         ) as client:
             # OBSERVE precondition: when the caller named a specific app,
             # bring it forward before any probe — otherwise the focused

@@ -112,6 +112,32 @@ static MCP_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 /// Whether the panel floats at the bottom-center (Claude style) or near the status item.
 static FLOATING_BOTTOM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// True while an agent child process is running; cleared by the reaper the
+/// moment `wait()` returns.
+///
+/// The stop watchdog reads this rather than probing the pid with `kill(pid, 0)`,
+/// because a pid is only meaningful until the OS reclaims it: a child that
+/// exits and is reaped inside the grace window frees its number, and escalating
+/// to SIGKILL on a recycled pid would kill a stranger's process. Only one agent
+/// runs at a time (the launcher refuses a second), so one flag is the whole
+/// state.
+static CHILD_ALIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// How long a stopped agent gets to shut itself down before it is killed.
+///
+/// Not politeness. SIGINT is what the orchestrator's kill-switch listens for,
+/// and catching it is what writes the failed episode and its retrospective —
+/// Law 4.1 requires a run ended by takeover to be *recorded*, and SIGKILL
+/// cannot be caught, so the previous straight-to-SIGKILL stop threw away
+/// everything the run had learned. Five seconds is long enough for the loop to
+/// unwind its current step and flush that to disk, short enough that a user
+/// who pressed Stop never wonders whether it worked.
+const STOP_GRACE_SECONDS: u64 = 5;
+
+/// How often the watchdog re-checks, so a run that unwinds in 200ms is not
+/// reported as stopped five seconds later.
+const STOP_POLL_MS: u64 = 100;
+
 fn mcp_config_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/me".to_string());
     PathBuf::from(home).join(".computeruse").join("mcp.json")
@@ -946,6 +972,7 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8) {
         s.exit = None;
         s.signalled = false;
     }
+    CHILD_ALIVE.store(true, core::sync::atomic::Ordering::SeqCst);
     if let Some(reader) = stdout {
         std::thread::spawn(move || pump_lines(BufReader::new(reader), true));
     }
@@ -954,6 +981,9 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8) {
     }
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
+        // Cleared before the exit code is published: the stop watchdog must
+        // never see a reaped pid as still running.
+        CHILD_ALIVE.store(false, core::sync::atomic::Ordering::SeqCst);
         let mut g = SHARED.lock().unwrap();
         g.exit = Some(code);
     });
@@ -1001,12 +1031,42 @@ fn stop_agent() {
             let mut s = SHARED.lock().unwrap();
             s.child_stdin = None;
             drop(s);
-            // SAFETY: immediately terminate the child process and its entire process group
+            // SIGINT first, never SIGKILL: the orchestrator installs a SIGINT
+            // catcher that trips its kill switch, and *that* path is what
+            // records the interrupted run as a failed episode carrying a
+            // retrospective (Law 4.1). SIGKILL cannot be caught, so it ends the
+            // process with everything the run learned still in memory.
+            // SAFETY: signalling the child's process group and the child.
             unsafe {
-                libc::killpg(pid as i32, libc::SIGKILL);
-                libc::kill(pid as i32, libc::SIGKILL);
+                libc::killpg(pid as i32, libc::SIGINT);
+                libc::kill(pid as i32, libc::SIGINT);
             }
-            push_dim("— agent stopped by user —".to_string());
+            push_dim("— stopping agent, saving what it learned —".to_string());
+            // The escalation runs off the UI thread: this is called from a
+            // message handler, and waiting out the grace period here would
+            // freeze the panel for as long as the agent takes to unwind.
+            std::thread::spawn(move || {
+                let polls = STOP_GRACE_SECONDS * 1000 / STOP_POLL_MS;
+                for _ in 0..polls {
+                    std::thread::sleep(std::time::Duration::from_millis(STOP_POLL_MS));
+                    if !CHILD_ALIVE.load(core::sync::atomic::Ordering::SeqCst) {
+                        push_dim("— agent stopped by user —".to_string());
+                        return;
+                    }
+                }
+                // Out of grace. A run that ignored SIGINT is wedged somewhere
+                // it cannot return from, and the user asked for the machine
+                // back — which outranks the retrospective.
+                // SAFETY: CHILD_ALIVE is still set, so this pid is the child's
+                // and has not been recycled.
+                unsafe {
+                    libc::killpg(pid as i32, libc::SIGKILL);
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                push_err(format!(
+                    "agent did not stop within {STOP_GRACE_SECONDS}s; killed"
+                ));
+            });
         }
         None => push_dim("nothing running to stop".to_string()),
     }

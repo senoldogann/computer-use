@@ -66,6 +66,7 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
+from computeruse.orchestrator.supervisor import supervisor_for
 from computeruse.providers.openai import (
     DEFAULT_MODEL,
     ModelCallStats,
@@ -534,6 +535,7 @@ def build_config(
     app_inferred: bool = False,
     stats_sink: Callable[[object], None] | None = None,
     budget_guard: Callable[[], None] | None = None,
+    driver_recover: Callable[[], None] | None = None,
 ) -> AgentConfig:
     """Compose the CLI's args into the single immutable config the agent runs.
 
@@ -595,6 +597,7 @@ def build_config(
         trace_dir=Path(args.trace_dir) if args.trace_dir is not None else None,
         trace_screenshots=getattr(args, "trace_screenshots", False),
         budget_guard=budget_guard,
+        driver_recover=driver_recover,
     )
 
 
@@ -650,7 +653,9 @@ def spawn_driver(binary: str, socket_path: str, *, real: bool) -> subprocess.Pop
     raise RuntimeError(f"driver did not create socket {socket_path} in time: {detail}")
 
 
-def _run_autonomous_session(args: argparse.Namespace) -> int:
+def _run_autonomous_session(
+    args: argparse.Namespace, *, driver_recover: Callable[[], None] | None
+) -> int:
     """Work unattended until the session's bounds are reached.
 
     The agent's own memory is what it works from, so the stores are opened once
@@ -714,6 +719,7 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
             app_inferred=proposal.app is not None,
             stats_sink=stats_sink,
             budget_guard=None if budget.is_unset else budget_guard,
+            driver_recover=driver_recover,
         )
         if proposal.app is not None:
             config = replace(config, app=proposal.app)
@@ -807,11 +813,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
     driver_process: subprocess.Popen[bytes] | None = None
+    # ADR-1 promises the driver can die without taking the run with it, and
+    # that promise is only kept by something that brings it back. Supervision
+    # exists exactly when we started the process: a driver we merely attached
+    # to belongs to whoever launched it, and respawning it behind their back
+    # would leave two drivers fighting over one socket.
+    driver_recover: Callable[[], None] | None = None
     try:
         # When a driver binary is given we always spawn it (stale sockets are
         # cleared first); only without --driver do we attach to a running one.
         if args.driver is not None:
-            driver_process = spawn_driver(args.driver, args.socket, real=args.real)
+            driver_binary = args.driver
+            driver_socket = args.socket
+            driver_real = args.real
+
+            def _spawn_driver_again() -> subprocess.Popen[bytes]:
+                return spawn_driver(driver_binary, driver_socket, real=driver_real)
+
+            driver_process = _spawn_driver_again()
+            driver_recover = supervisor_for(
+                _spawn_driver_again, driver_process
+            ).ensure_alive
         # Autonomous app resolution: the goal may carry an explicit `[App
         # Name]` prefix, or name the target implicitly ("Excel'de aç",
         # "YouTube'da arat"). Resolve it here so the provider sees the
@@ -823,7 +845,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # later is the point: running any of it on an absent goal is what
         # crashed the first attempt.
         if args.autonomous is not None:
-            return _run_autonomous_session(args)
+            return _run_autonomous_session(args, driver_recover=driver_recover)
 
         explicit_app, cleaned_goal = extract_goal_app(args.goal)
         args.goal = cleaned_goal
@@ -905,6 +927,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             app_inferred=app_inferred_from_goal and not named_app,
             stats_sink=stats_sink,
             budget_guard=None if budget.is_unset else budget_guard,
+            driver_recover=driver_recover,
         )
         result = Agent(config).run()
 
