@@ -374,3 +374,69 @@ def test_runner_refuses_a_destructive_button_the_model_described_as_routine() ->
     with pytest.raises(PermissionConfirmationRequired):
         runner.run(goal="finish the signup flow")
     assert executed == [], "a destructive control must never reach the driver"
+
+
+# --- SEC-01: an MCP call is read, not taken on trust ------------------------
+
+
+def _tool_turn(sub_goal: str, tool: str, arguments: dict[str, object]) -> AgentTurn:
+    return AgentTurn(
+        thought="use it",
+        sub_goal=sub_goal,
+        action=CallTool(type="call_tool", tool=tool, arguments=arguments),
+    )
+
+
+def test_a_shell_command_in_tool_arguments_is_destructive() -> None:
+    """The reported hole: the payload was never read at all.
+
+    ``classify_risk`` looked only at the model's own ``sub_goal``, so a call
+    that ran ``rm -rf /`` under an innocent description scored ``Risk.NONE``
+    and executed unattended at full autonomy.
+    """
+    turn = _tool_turn("organize the folder", "bash", {"command": "rm -rf /"})
+    assert classify_risk(turn) is Risk.DESTRUCTIVE
+    assert decide_permission(AutonomyLevel.FULL, classify_risk(turn)) is (
+        PermissionDecision.CONFIRM
+    )
+
+
+def test_a_command_nested_inside_tool_arguments_is_still_found() -> None:
+    """Reading only the top level would miss the same call spelled as a list."""
+    turn = _tool_turn("tidy up", "exec", {"exec": {"argv": ["rm", "-rf", "/"]}})
+    assert classify_risk(turn) is Risk.DESTRUCTIVE
+
+
+def test_a_destructive_tool_name_is_enough_on_its_own() -> None:
+    """A tool name is a short identifier the server chose, not model prose."""
+    turn = _tool_turn("clean the workspace", "delete_file", {"path": "/tmp/x"})
+    assert classify_risk(turn) is Risk.DESTRUCTIVE
+
+
+def test_a_tool_call_that_matches_nothing_floors_at_routine() -> None:
+    """Someone else's program with side effects we cannot see is not benign.
+
+    Guarded mode asks about it; full autonomy still runs it, so the MCP
+    storefront keeps working unattended.
+    """
+    turn = _tool_turn("check the file", "files.read", {"path": "/tmp/notes.txt"})
+    assert classify_risk(turn) is Risk.ROUTINE
+    assert decide_permission(AutonomyLevel.FULL, Risk.ROUTINE) is PermissionDecision.ALLOW
+    assert decide_permission(AutonomyLevel.GUARDED, Risk.ROUTINE) is (
+        PermissionDecision.CONFIRM
+    )
+
+
+def test_a_document_body_that_mentions_deleting_is_not_a_deletion() -> None:
+    """The false positive that once stopped a full-autonomy run dead.
+
+    An MCP tool that takes a document body will be handed prose about deleting
+    and shutting things down. Flagging that is the same category error as
+    reading a note's text as a shell command.
+    """
+    body = (
+        "Today the vendor announced an automated shutdown capability that can "
+        "delete stale records without operator involvement. "
+    ) * 4
+    turn = _tool_turn("save the summary", "notes.create", {"body": body})
+    assert classify_risk(turn) is not Risk.DESTRUCTIVE

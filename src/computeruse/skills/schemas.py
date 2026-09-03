@@ -41,11 +41,19 @@ WORKFLOW_NOISE_WORDS: Final[frozenset[str]] = frozenset(
 #: Everything a keyword must not be, for tagging and for search alike.
 UNINFORMATIVE_WORDS: Final[frozenset[str]] = STOP_WORDS | WORKFLOW_NOISE_WORDS
 
+#: What a skill id may be. A skill id becomes a filename in the store, so this
+#: is a security boundary and not merely a naming convention: no separators, no
+#: dot-dot, nothing that could climb out of the directory. Named here — rather
+#: than repeated inline — because the *model* also emits skill ids
+#: (``LoadSkill``), and the two definitions drifting apart is exactly how
+#: ``load_skill`` with ``"../../etc/passwd"`` once passed validation.
+SKILL_ID_PATTERN: Final[str] = r"^[a-z0-9][a-z0-9._-]*$"
+
 
 class SkillSummary(BaseModel):
     """Stage-1 payload: the only thing that lives in the agent context."""
 
-    skill_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    skill_id: str = Field(pattern=SKILL_ID_PATTERN)
     description: str = Field(min_length=1, max_length=200)
     app: str
     uses: int = Field(default=0, ge=0)
@@ -60,7 +68,7 @@ class SkillSummary(BaseModel):
 class SkillDefinition(BaseModel):
     """Stage-2 payload: full body loaded on demand into active context."""
 
-    skill_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    skill_id: str = Field(pattern=SKILL_ID_PATTERN)
     description: str
     app: str
     tags: tuple[str, ...] = Field(default=(), description="Search keywords.")

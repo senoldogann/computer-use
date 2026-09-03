@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 
 from computeruse.orchestrator.loop import (
+    MARK_DRIFT_TOLERANCE_PX,
     AxProbeResult,
     OodaRunner,
     UnknownMarkError,
     WorkingState,
+    mark_still_current,
     resolve_mark,
 )
 from computeruse.orchestrator.prompts import state_context
@@ -260,3 +262,61 @@ def test_the_prompt_numbers_elements_the_way_marks_are_numbered() -> None:
     marks = parse_ax_elements_to_marks(summaries)
     third = next(mark for mark in marks if mark.index == 3)
     assert "Third" in third.label, "the un-parseable line must still consume its index"
+
+
+# --- SEC-02: a mark index only means something inside its own frame ---------
+
+
+def test_mark_still_current_accepts_a_control_that_barely_moved() -> None:
+    """A row above growing shifts a button a few points; it is the same button."""
+    decided = parse_ax_elements_to_marks(('Button "Cancel" at (300, 200) 80x30',))[0]
+    live = parse_ax_elements_to_marks(('Button "Cancel" at (300, 212) 80x30',))
+    assert mark_still_current(decided, live, tolerance=MARK_DRIFT_TOLERANCE_PX)
+
+
+def test_mark_still_current_rejects_a_control_that_moved_away() -> None:
+    decided = parse_ax_elements_to_marks(('Button "Cancel" at (300, 200) 80x30',))[0]
+    live = parse_ax_elements_to_marks(('Button "Cancel" at (300, 480) 80x30',))
+    assert not mark_still_current(decided, live, tolerance=MARK_DRIFT_TOLERANCE_PX)
+
+
+def test_mark_still_current_rejects_a_different_control_at_the_same_place() -> None:
+    """The reported failure, reduced to its core.
+
+    A notification arrives between two actions of one batch and the element
+    list is renumbered; slot 2 now holds "Delete All" where the model chose
+    "Cancel". Position alone would call that unchanged.
+    """
+    decided = parse_ax_elements_to_marks(('Button "Cancel" at (300, 200) 80x30',))[0]
+    live = parse_ax_elements_to_marks(('Button "Delete All" at (300, 200) 80x30',))
+    assert not mark_still_current(decided, live, tolerance=MARK_DRIFT_TOLERANCE_PX)
+
+
+def test_a_batch_resolves_marks_against_the_frame_it_was_decided_from() -> None:
+    """Renumbering between actions must not retarget the ones already chosen.
+
+    Two marks at decision time; the second action's screen has them in the
+    opposite order. Resolving against the *live* list would send click 2 to
+    what is now slot 2 — a different control at a different point.
+    """
+    decided = parse_ax_elements_to_marks(
+        (
+            'Button "Save" at (100, 100) 60x20',
+            'Button "Cancel" at (300, 200) 80x30',
+        )
+    )
+    reordered = parse_ax_elements_to_marks(
+        (
+            'Button "Cancel" at (300, 200) 80x30',
+            'Button "Save" at (100, 100) 60x20',
+        )
+    )
+    action = ClickMark(type="click_mark", mark=2)
+    from_decision = resolve_mark(action, decided)
+    from_live = resolve_mark(action, reordered)
+    assert isinstance(from_decision, MouseClick)
+    assert isinstance(from_live, MouseClick)
+    # Same index, two frames, two different controls — which is exactly why the
+    # runner pins the decision frame for the whole batch.
+    assert (from_decision.x, from_decision.y) == (300, 200)
+    assert (from_live.x, from_live.y) == (100, 100)

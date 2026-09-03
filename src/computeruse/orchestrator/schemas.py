@@ -14,6 +14,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from computeruse.skills.schemas import SKILL_ID_PATTERN
+
 Modifier = Literal["command", "shift", "alt", "control"]
 
 
@@ -94,8 +96,18 @@ class ActivateApp(BaseModel):
 
 
 class LoadSkill(BaseModel):
+    """Stage-2 mount request — the one action whose payload names a file.
+
+    ``skill_id`` carries the store's id pattern for the same reason the stored
+    models do, and it is the copy that matters most: this is the id a *model*
+    produces, downstream of every screen-derived string the run has read. The
+    constraint was missing here while both stored models enforced it, so
+    ``{"type": "load_skill", "skill_id": "../../etc/passwd"}`` validated
+    cleanly and reached a path join.
+    """
+
     type: Literal["load_skill"]
-    skill_id: str
+    skill_id: str = Field(pattern=SKILL_ID_PATTERN)
 
 
 class Wait(BaseModel):

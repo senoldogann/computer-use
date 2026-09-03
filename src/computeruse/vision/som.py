@@ -49,6 +49,19 @@ class MarkElement:
     role: str
 
 
+def mark_identity(mark: MarkElement) -> str:
+    """What names this element across frames, coordinates removed (pure).
+
+    ``label`` is the whole AX summary line, geometry included — ``Button
+    "Cancel" at (300, 200) 80x30``. That is the right thing to show a model and
+    the wrong thing to compare two frames with: an element that shifted twelve
+    points is the same element with a different label. Cutting the coordinate
+    tail leaves the part that actually identifies it, so position can be judged
+    separately by whoever cares about it.
+    """
+    return _AX_BOX_PATTERN.sub("", mark.label).strip().casefold()
+
+
 def parse_ax_elements_to_marks(ui_elements: tuple[str, ...]) -> tuple[MarkElement, ...]:
     """Extract bounding boxes and roles from compact AX element summaries (pure).
 

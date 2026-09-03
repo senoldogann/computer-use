@@ -166,6 +166,13 @@ def classify_failure(exc: BaseException, action: Action | None) -> Failure:
         "SemanticVerificationFailedError": FailureKind.TEXT_PLACEMENT,
         "FocusLostError": FailureKind.FOCUS,
         "StaleObservationError": FailureKind.STALE,
+        # A mark that no longer describes what the model picked is the same
+        # problem as a stale observation, and wants the same answer: the frame
+        # this decision came from is gone, so decide again from the live one.
+        "StaleMarkError": FailureKind.STALE,
+        # A mark index that was never in the list is the model naming something
+        # that does not exist — a contract miss, not a screen that moved.
+        "UnknownMarkError": FailureKind.MODEL_CONTRACT,
         "StuckLoopError": FailureKind.REPETITION,
         "DriverRpcError": FailureKind.DRIVER_REJECTED,
         "DriverConnectionError": FailureKind.DRIVER_UNAVAILABLE,

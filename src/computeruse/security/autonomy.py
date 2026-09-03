@@ -22,12 +22,14 @@ non-:data:`~PermissionDecision.ALLOW` result raises a typed error there.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final
+from typing import Final, cast
 
 from computeruse.orchestrator.schemas import (
     AgentTurn,
+    CallTool,
     ClipboardPaste,
     Finish,
     LoadSkill,
@@ -238,7 +240,17 @@ class AutonomyPolicy:
         title and comment count" and stopped dead on the word "confirm" —
         exactly the failure the paragraph above describes, in the same place,
         two actions later. ``call_tool`` is deliberately *not* here: an MCP
-        tool is someone else's program and can do anything a program can.
+        tool is someone else's program and can do anything a program can — and
+        for a long time saying so was the whole of the defence. The tool name
+        and its arguments were never read, so classification fell back to the
+        model's own prose and ``CallTool(tool="bash", arguments={"command":
+        "rm -rf /"})`` under the sub-goal "organize the folder" scored
+        :attr:`Risk.NONE` and ran unattended. The call is now read the way a
+        click is: the tool's *name* joins the intent words, its argument values
+        are searched for commands and for destructive verbs, and a call that
+        matches nothing at all still floors at :attr:`Risk.ROUTINE` rather than
+        :attr:`Risk.NONE`, because "someone else's program" is the definition
+        of routine-but-stateful.
 
         ``target_label`` is the accessibility title of the control actually
         under the pointer, and it is what makes the guard a safety mechanism
@@ -256,6 +268,11 @@ class AutonomyPolicy:
             subject = f"{subject} {target_label}".lower()
         if isinstance(turn.action, PressHotkey):
             subject = f"{subject} {turn.action.key}".lower()
+        if isinstance(turn.action, CallTool):
+            # The tool's name is a short identifier the server chose
+            # (``delete_file``, ``send_message``), never prose — token matching
+            # it is exactly as safe as matching a control's accessibility title.
+            subject = f"{subject} {turn.action.tool}".lower()
 
         words = _intent_words(subject)
         if words & self.destructive_markers:
@@ -266,6 +283,18 @@ class AutonomyPolicy:
             turn.action.text, self.typed_commands
         ):
             return Risk.DESTRUCTIVE
+        if isinstance(turn.action, CallTool):
+            if _arguments_are_destructive(
+                turn.action.arguments, self.typed_commands, self.destructive_markers
+            ):
+                return Risk.DESTRUCTIVE
+            if words & self.routine_markers:
+                return Risk.ROUTINE
+            # Nothing matched, and that is not the same as nothing happening: a
+            # tool this policy has never heard of is a third-party program with
+            # side effects the orchestrator cannot see. Guarded mode asks about
+            # it; full autonomy still runs it.
+            return Risk.ROUTINE
         if words & self.routine_markers:
             return Risk.ROUTINE
         return Risk.NONE
@@ -311,6 +340,68 @@ def _looks_like_a_command(text: str, commands: frozenset[str]) -> bool:
         if first and _intent_words(first[0]) & commands:
             return True
         if len(line) <= COMMAND_LENGTH_MAX and leading & commands:
+            return True
+    return False
+
+
+#: How deep to walk a tool's arguments looking for strings. MCP servers nest
+#: their parameters a level or two ({"file": {"path": ...}}); nothing
+#: legitimate hides a shell command eight levels down, and a bound means a
+#: hostile server cannot make classification recurse forever.
+ARGUMENT_WALK_MAX_DEPTH: Final[int] = 6
+
+
+def _argument_strings(value: object, *, depth: int) -> tuple[str, ...]:
+    """Every string reachable inside a tool's arguments (pure).
+
+    Values arrive as ``dict[str, object]`` off the wire, so the payload that
+    matters — the shell line, the SQL, the recipient — can be a bare string, an
+    element of a list, or a field of a nested object. Reading only the top
+    level would classify ``{"command": "rm -rf /"}`` and miss
+    ``{"exec": {"argv": ["rm", "-rf", "/"]}}``, which is the same call.
+    """
+    if depth > ARGUMENT_WALK_MAX_DEPTH:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, dict):
+        return tuple(
+            found
+            for item in cast(dict[str, object], value).values()
+            for found in _argument_strings(item, depth=depth + 1)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            found
+            for item in cast(Sequence[object], value)
+            for found in _argument_strings(item, depth=depth + 1)
+        )
+    return ()
+
+
+def _arguments_are_destructive(
+    arguments: dict[str, object],
+    commands: frozenset[str],
+    markers: frozenset[str],
+) -> bool:
+    """Does a tool call's payload ask for something destructive (pure)?
+
+    Two rules, because the payload carries two different kinds of danger and
+    they need different tests:
+
+    * A **shell command** is caught by :func:`_looks_like_a_command`, the same
+      test typed text gets — ``{"command": "rm -rf /"}`` is a command line
+      whether a person typed it or a model passed it as a parameter.
+    * A **destructive verb** ("delete", "pay", "send") only counts inside a
+      *short* value. An MCP tool that takes a document body will be handed
+      prose that talks about deleting things, and flagging that is the same
+      false positive that once stopped a full-autonomy run dead on the word
+      "shutdown" appearing inside a news summary.
+    """
+    for text in _argument_strings(arguments, depth=0):
+        if _looks_like_a_command(text, commands):
+            return True
+        if len(text) <= COMMAND_LENGTH_MAX and _intent_words(text.lower()) & markers:
             return True
     return False
 

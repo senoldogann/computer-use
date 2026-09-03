@@ -123,6 +123,7 @@ from computeruse.vision.focus import FocusedWindow, window_summary
 from computeruse.vision.som import (
     MarkElement,
     annotate_set_of_marks,
+    mark_identity,
     parse_ax_elements_to_marks,
 )
 
@@ -455,6 +456,38 @@ def resolve_mark(action: Action, marks: tuple[MarkElement, ...]) -> Action:
                 click_count=action.click_count,
             )
     raise UnknownMarkError(requested=action.mark, available=len(marks))
+
+
+#: How far a control may have moved between the frame the model decided from
+#: and the frame an action actuates against while still counting as the same
+#: control. A button that shifted a few points because a row above it grew is
+#: the same button; one that moved half an inch belongs to a different layout.
+MARK_DRIFT_TOLERANCE_PX: Final[int] = 24
+
+
+def mark_still_current(
+    mark: MarkElement, current: tuple[MarkElement, ...], *, tolerance: int
+) -> bool:
+    """Does the live frame still show this element where the model saw it (pure)?
+
+    A batch is chosen from one screenshot and actuated across several, so by
+    the time the third action runs, the mark list has been renumbered — an
+    index means nothing across frames. What survives a re-observation is the
+    *element*: its label, and roughly where it sits. This asks whether the
+    control the model picked is still there, which is the only question that
+    makes a stale index safe to act on.
+    """
+    wanted = mark_identity(mark)
+    centre_x = mark.rect.origin.x + mark.rect.size.width / 2
+    centre_y = mark.rect.origin.y + mark.rect.size.height / 2
+    for candidate in current:
+        if mark_identity(candidate) != wanted:
+            continue
+        other_x = candidate.rect.origin.x + candidate.rect.size.width / 2
+        other_y = candidate.rect.origin.y + candidate.rect.size.height / 2
+        if abs(other_x - centre_x) <= tolerance and abs(other_y - centre_y) <= tolerance:
+            return True
+    return False
 
 
 def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REPEAT_TOLERANCE_PX) -> bool:
@@ -1101,6 +1134,16 @@ class OodaRunner:
             # re-observes and asks the model for the next decision.
             batch = decision.actions or [decision.action]
             finished = False
+            # The marks the model actually chose from. Mark numbers are an
+            # index into ONE frame's element list, and ``_observe`` below
+            # renumbers that list from scratch — so resolving a later action
+            # against the refreshed marks silently retargets it. Measured on
+            # the reported case: a batch of [ClickMark(1), ClickMark(2)] where
+            # mark 2 was "Cancel" at decision time actuated whatever the
+            # notification that arrived in between had pushed into slot 2.
+            # Pinning the list here is what makes "[2]" keep meaning the
+            # control the model was looking at.
+            decision_marks = self._observation.marks
             for batch_index, batch_action in enumerate(batch):
                 if batch_index > 0:
                     # Mid-batch: the previous action changed the screen, so
@@ -1115,7 +1158,9 @@ class OodaRunner:
                 single = decision.model_copy(
                     update={"action": batch_action, "actions": None}
                 )
-                state, finished, stop_batch = self._execute_one(state, single, goal)
+                state, finished, stop_batch = self._execute_one(
+                    state, single, goal, marks=decision_marks
+                )
                 self._last_state = state
                 if finished or stop_batch:
                     break
@@ -1157,9 +1202,19 @@ class OodaRunner:
         )
 
     def _execute_one(
-        self, state: WorkingState, decision: AgentTurn, goal: str
+        self,
+        state: WorkingState,
+        decision: AgentTurn,
+        goal: str,
+        *,
+        marks: tuple[MarkElement, ...],
     ) -> tuple[WorkingState, bool, bool]:
         """Run one action through VALIDATE -> ACT -> VERIFY -> RECOVER (shell).
+
+        ``marks`` is the element list of the frame the *model* decided from,
+        which is not necessarily the frame this action actuates against: a
+        batch spans several. Mark indices are only meaningful within their own
+        frame, so this is the list a ``click_mark`` resolves through.
 
         Returns ``(state, finished, stop_batch)``:
 
@@ -1184,9 +1239,29 @@ class OodaRunner:
         # it a second time would send the click a third of the way up the
         # display. ``map_action_to_screen`` leaves a ``click_mark``
         # untouched precisely so this ordering is safe.
-        decision = decision.model_copy(
-            update={"action": resolve_mark(decision.action, self._observation.marks)}
-        )
+        #
+        # Resolution can fail two ways, and neither may end the run: the model
+        # can name a mark that never existed, and a pinned mark can describe a
+        # control the screen no longer shows. Both are ordinary recoverable
+        # failures — the ladder's STALE guidance ("decide again from the new
+        # screenshot") is exactly the right answer — so they go through
+        # ``_register_failure`` rather than propagating out of the loop, which
+        # is what an unhandled ``UnknownMarkError`` used to do.
+        try:
+            decision = decision.model_copy(
+                update={"action": self._resolve_mark_for(decision.action, marks)}
+            )
+        except (UnknownMarkError, StaleMarkError) as exc:
+            # Traced with the mark the model actually emitted rather than a
+            # resolved click: what a reader needs here is which index it named
+            # and why that index no longer names anything.
+            outcome = decide_step(state, decision)
+            self._trace_step(
+                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}"
+            )
+            hint = self._register_failure(exc, decision.action, goal)
+            LOGGER.warning("ooda mark resolution failed: %s", hint)
+            return replace(outcome.state, last_error=hint), False, True
         # Law 5.1 VALIDATE: the permission guard sees every proposed action
         # *before* it becomes physical, and can hard-stop a dangerous move.
         # Deliberately outside the recovery handler: a policy denial is the
@@ -1316,6 +1391,34 @@ class OodaRunner:
             skill=self._skill,
         )
         return state, False, False
+
+    def _resolve_mark_for(
+        self, action: Action, marks: tuple[MarkElement, ...]
+    ) -> Action:
+        """Turn a mark selection into a click, refusing a mark that has moved.
+
+        ``marks`` is the decision frame's list; ``self._observation.marks`` is
+        the live one, and mid-batch they are different lists with different
+        numbering. Resolving through the decision frame keeps "[2]" meaning the
+        control the model was looking at, and checking the result against the
+        live frame keeps it from clicking a coordinate the layout has since
+        given to something else. A mark that fails either test raises, and the
+        caller routes that into the recovery ladder.
+        """
+        if not isinstance(action, ClickMark):
+            return action
+        resolved = resolve_mark(action, marks)
+        live = self._observation.marks
+        if live is marks or not live:
+            # Same frame (the common single-action case), or nothing live to
+            # check against — the pinned list is all the evidence there is.
+            return resolved
+        chosen = next(mark for mark in marks if mark.index == action.mark)
+        if not mark_still_current(
+            chosen, live, tolerance=MARK_DRIFT_TOLERANCE_PX
+        ):
+            raise StaleMarkError(mark=action.mark, label=chosen.label)
+        return resolved
 
     def _trace_step(
         self,
@@ -2564,6 +2667,29 @@ class UnknownMarkError(RuntimeError):
             f"current AX element list ({listed}). The list is re-derived every "
             "turn, so re-read it and use a number it actually shows — or click "
             "a coordinate from the screenshot if the target is not listed"
+        )
+
+
+class StaleMarkError(RuntimeError):
+    """A batched ``click_mark`` names a control the screen no longer shows there.
+
+    Only reachable mid-batch, and it is the failure the batch mechanism exists
+    to make safe. The model picks its marks from one frame; each action after
+    the first actuates against a later one. When the element behind a pinned
+    index has moved or gone — a sheet opened, a notification pushed the row
+    down, the list reloaded — the honest answer is that the rest of the batch
+    was chosen against a screen that no longer exists, so it must be re-decided
+    rather than actuated at a coordinate that now belongs to something else.
+    """
+
+    def __init__(self, *, mark: int, label: str) -> None:
+        self.mark = mark
+        self.label = label
+        super().__init__(
+            f"click_mark {mark} was chosen for {label!r}, but that element is "
+            "no longer at that position on the current screen — the screen "
+            "changed after the frame this batch was decided from. Re-read the "
+            "element list and choose again from what is on screen now"
         )
 
 
