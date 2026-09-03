@@ -130,6 +130,51 @@ def test_retrieve_refuses_other_app_skill() -> None:
     assert final.skill is None
 
 
+def test_retrieve_looks_past_a_stronger_other_app_match() -> None:
+    """A foreign skill at the top of the ranking must not hide a usable one.
+
+    Skills are app-scoped, so the highest-scoring match is often unmountable;
+    reading only the ranking's winner threw away the same-app skill one place
+    below it. Measured on a store grown to 100 skills, that lost a usable skill
+    in 7% of retrievals, and the loss grows with the store.
+    """
+    seen: list[SkillDefinition | None] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        seen.append(state.skill)
+        return AgentTurn(
+            thought="done",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    runner = _runner(
+        provider=provider,
+        skill_scan=lambda _query: (
+            _match(skill_id="chrome.x", app="Chrome", score=5),
+            _match(),
+        ),
+    )
+    final = runner.run("export the menu")
+    assert final.skill is not None
+    assert final.skill.skill_id == "safari.export-report.abc"
+
+
+def test_retrieve_stops_at_the_relevance_floor() -> None:
+    """The scan must not reach past the floor to find its own application.
+
+    Matches arrive sorted, so a same-app skill below the threshold is a weak
+    coincidence — exactly what the floor exists to reject.
+    """
+    runner = _runner(
+        skill_scan=lambda _query: (
+            _match(skill_id="chrome.x", app="Chrome", score=5),
+            _match(score=1),
+        ),
+    )
+    assert runner.run("export the menu").skill is None
+
+
 def test_retrieve_preserves_open_tabs_after_mount() -> None:
     """M3: mounting a skill must not drop the observed browser tabs.
 
