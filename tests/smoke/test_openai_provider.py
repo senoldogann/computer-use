@@ -166,7 +166,12 @@ def test_openai_transport_drives_the_ooda_loop() -> None:
         execute_physical=lambda _action: None,
     )
     final = runner.run("g")
-    assert final.completed_steps == ("step_0:mouse_click", "step_1:finish")
+    # The label carries what the step was for: a history of bare verbs is no
+    # memory at all, and an agent given one re-does what it has already done.
+    assert final.completed_steps == (
+        "step_0:mouse_click — click the thing",
+        "step_1:finish — workflow complete",
+    )
     # The distilled trajectory excludes the orchestrator-internal finish.
     assert [a.type for a in runner.executed_trajectory] == ["mouse_click"]
     assert final.last_error is None

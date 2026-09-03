@@ -222,6 +222,11 @@ def _first_mountable(
 # the same intent, while genuinely different targets (tested) stay distinct.
 STUCK_REPEAT_TOLERANCE_PX: Final[int] = 32
 
+#: How much of a sub-goal is kept in the step history. Long enough to say what
+#: the step was for, short enough that ten of them stay a summary rather than
+#: a transcript.
+SUB_GOAL_LABEL_MAX_CHARS: Final[int] = 80
+
 
 @dataclass(frozen=True)
 class AxProbeResult:
@@ -656,6 +661,16 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
     action = decision.action
     route = _route_for(action)
     step_label = f"step_{state.step_index}:{action.type}"
+    if decision.sub_goal:
+        # What the step was *for*, not just which verb it used. The history a
+        # model was given read "step_29:mouse_click", which is no memory at
+        # all: measured on a real run, the agent opened the first story's
+        # comments page, went back, and opened it again — writing "opening
+        # that link advances the required review of the first story" at step
+        # 31, because nothing it could see said it had already been there five
+        # times. Its own stated intent is the cheapest true record of that,
+        # and it costs one line per step.
+        step_label = f"{step_label} — {decision.sub_goal[:SUB_GOAL_LABEL_MAX_CHARS]}"
     next_state = WorkingState(
         goal=state.goal,
         completed_steps=state.completed_steps,

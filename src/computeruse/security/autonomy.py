@@ -33,6 +33,8 @@ from computeruse.orchestrator.schemas import (
     PressHotkey,
     TypeText,
     Wait,
+    WebFetch,
+    WebSearch,
 )
 from computeruse.security.permissions import (
     PermissionConfirmationRequired,
@@ -229,6 +231,14 @@ class AutonomyPolicy:
         run). The markers describe UI controls the agent might press, not the
         English the model narrates in.
 
+        Searching and fetching join that list for the same reason and were
+        missing from it: they read, over the network, and press nothing. The
+        omission cost a live run, which asked to fetch a page "to confirm its
+        title and comment count" and stopped dead on the word "confirm" —
+        exactly the failure the paragraph above describes, in the same place,
+        two actions later. ``call_tool`` is deliberately *not* here: an MCP
+        tool is someone else's program and can do anything a program can.
+
         ``target_label`` is the accessibility title of the control actually
         under the pointer, and it is what makes the guard a safety mechanism
         rather than an honesty check on the model's narration. The markers name
@@ -238,7 +248,7 @@ class AutonomyPolicy:
         :attr:`Risk.NONE` and ran unattended. The screen does not get a vote on
         how it is described.
         """
-        if isinstance(turn.action, (Finish, Wait, LoadSkill)):
+        if isinstance(turn.action, (Finish, Wait, LoadSkill, WebSearch, WebFetch)):
             return Risk.NONE
         subject = turn.sub_goal.lower()
         if target_label:
