@@ -142,7 +142,7 @@ def test_non_text_content_is_named_rather_than_dropped() -> None:
 
     Silence would read as an empty answer, which is a different fact entirely.
     """
-    result = {
+    result: dict[str, object] = {
         "content": [
             {"type": "text", "text": "before"},
             {"type": "image", "data": "...", "mimeType": "image/png"},
@@ -230,3 +230,43 @@ def test_these_records_are_declared_unhashable() -> None:
         hash(McpTool(server="s", name="n", description="d", input_schema={}))
     with pytest.raises(TypeError, match="McpServerConfig"):
         hash(McpServerConfig(name="s", command="c"))
+
+
+def test_mcp_catalog_read_write_remove_cycle(tmp_path: Path) -> None:
+    """Test pure catalog config file management: reading, writing, removing servers."""
+    from computeruse.mcp.catalog import (
+        CURATED_CATALOG,
+        read_mcp_config,
+        remove_mcp_server,
+        serialize_catalog,
+        write_mcp_server,
+    )
+
+    cfg_file = tmp_path / "mcp.json"
+    assert read_mcp_config(cfg_file) == {}
+
+    # Write a server
+    write_mcp_server(
+        server_id="filesystem",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        env={"CUSTOM_KEY": "val"},
+        config_path=cfg_file,
+    )
+    servers = read_mcp_config(cfg_file)
+    assert "filesystem" in servers
+    assert servers["filesystem"]["command"] == "npx"
+
+    # Remove the server
+    removed = remove_mcp_server("filesystem", config_path=cfg_file)
+    assert removed is True
+    assert read_mcp_config(cfg_file) == {}
+
+    # Removing non-existent returns False
+    assert remove_mcp_server("filesystem", config_path=cfg_file) is False
+
+    # Verify catalog serialization
+    serialized = serialize_catalog()
+    assert len(serialized) == len(CURATED_CATALOG)
+    assert any(item["id"] == "filesystem" for item in serialized)
+    assert any(item["id"] == "memory" for item in serialized)

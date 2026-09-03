@@ -25,9 +25,12 @@ use actuation_driver::bezier::{human_move_duration, plan_trajectory, point};
 use actuation_driver::protocol::{Request, Response};
 
 fn main() {
-    let mut args = env::args().skip(1);
-    let socket_path = args.next().unwrap_or_else(|| "/tmp/actuation-driver.sock".to_string());
-    let real = args.any(|a| a == "--real");
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    let real = raw_args.iter().any(|a| a == "--real");
+    let socket_path = raw_args
+        .into_iter()
+        .find(|a| a != "--real")
+        .unwrap_or_else(|| "/tmp/actuation-driver.sock".to_string());
 
     // Construct the backend. On failure (e.g. no Accessibility consent) we log
     // the precise reason and exit non-zero so the orchestrator sees the driver

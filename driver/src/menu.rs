@@ -31,7 +31,7 @@ use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject
 use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageRep, NSColor,
-    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSWindow, NSWindowButton,
+    NSImage, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSWindow, NSWindowButton,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
@@ -98,6 +98,33 @@ static PANEL_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
 /// Pointer to the actual status item so context menu can anchor under it.
 static STATUS_ITEM_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Pointer to the webview so native menu actions can trigger JS callbacks.
+static WEBVIEW_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Active autonomy level (3 = Full Autonomy, 2 = Guarded Mode).
+static AUTONOMY_LEVEL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(3);
+
+/// Whether MCP servers are active for agent runs.
+static MCP_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Whether the panel floats at the bottom-center (Claude style) or near the status item.
+static FLOATING_BOTTOM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+fn mcp_config_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/me".to_string());
+    PathBuf::from(home).join(".computeruse").join("mcp.json")
+}
+
+fn read_mcp_servers_json() -> String {
+    let path = mcp_config_path();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        content
+    } else {
+        "{\"mcpServers\":{}}".to_string()
+    }
+}
 
 /// Frontmost app captured just before the panel activates, so a run can target
 /// whatever the user was using (a typed app field wins over this).
@@ -188,6 +215,10 @@ pub fn run() -> ! {
         (&*panel as *const NSWindow).cast_mut().cast(),
         core::sync::atomic::Ordering::SeqCst,
     );
+    WEBVIEW_PTR.store(
+        (&*webview as *const WKWebView).cast_mut().cast(),
+        core::sync::atomic::Ordering::SeqCst,
+    );
 
     // The status item's click target: handles both left click (toggle) and right click (quit menu).
     let target = ScriptTarget::alloc(mtm);
@@ -250,6 +281,55 @@ define_class!(
             toggle_panel_ui();
         }
 
+        #[unsafe(method(toggleFloatingMode:))]
+        fn toggle_floating_mode(&self, _sender: *mut AnyObject) {
+            let current = FLOATING_BOTTOM.load(core::sync::atomic::Ordering::SeqCst);
+            FLOATING_BOTTOM.store(!current, core::sync::atomic::Ordering::SeqCst);
+            let ptr = PANEL_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let panel = unsafe { &*(ptr as *const NSWindow) };
+                reposition_panel(panel);
+            }
+            let wv_ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !wv_ptr.is_null() {
+                let wv = unsafe { &*(wv_ptr as *const WKWebView) };
+                let js = format!("if(window.onPositionModeChanged)window.onPositionModeChanged({});", !current);
+                call_js(wv, &js);
+            }
+        }
+
+        #[unsafe(method(toggleMcpServer:))]
+        fn toggle_mcp_server(&self, _sender: *mut AnyObject) {
+            let current = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
+            MCP_ENABLED.store(!current, core::sync::atomic::Ordering::SeqCst);
+            let wv_ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !wv_ptr.is_null() {
+                let wv = unsafe { &*(wv_ptr as *const WKWebView) };
+                let js = format!("if(window.onMcpToggled)window.onMcpToggled({});", !current);
+                call_js(wv, &js);
+            }
+        }
+
+        #[unsafe(method(setFullAutonomy:))]
+        fn set_full_autonomy(&self, _sender: *mut AnyObject) {
+            AUTONOMY_LEVEL.store(3, core::sync::atomic::Ordering::SeqCst);
+            let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let wv = unsafe { &*(ptr as *const WKWebView) };
+                call_js(wv, "if(window.setAutonomyLevel)window.setAutonomyLevel(3);");
+            }
+        }
+
+        #[unsafe(method(setGuardedAutonomy:))]
+        fn set_guarded_autonomy(&self, _sender: *mut AnyObject) {
+            AUTONOMY_LEVEL.store(2, core::sync::atomic::Ordering::SeqCst);
+            let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let wv = unsafe { &*(ptr as *const WKWebView) };
+                call_js(wv, "if(window.setAutonomyLevel)window.setAutonomyLevel(2);");
+            }
+        }
+
         #[unsafe(method(quitApp:))]
         fn quit_app(&self, _sender: *mut AnyObject) {
             std::process::exit(0);
@@ -273,6 +353,69 @@ fn show_context_menu(mtm: MainThreadMarker) {
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
+    let target = ScriptTarget::alloc(mtm);
+    let target: Retained<ScriptTarget> = unsafe { msg_send![target, init] };
+    let target_ptr: *mut ScriptTarget = Retained::into_raw(target);
+
+    let is_full = AUTONOMY_LEVEL.load(core::sync::atomic::Ordering::SeqCst) == 3;
+    let full_item = unsafe {
+        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Full Autonomy (Tam Otonomi)"),
+            Some(sel!(setFullAutonomy:)),
+            &NSString::from_str(""),
+        );
+        let _: () = msg_send![&*item, setState: if is_full { 1isize } else { 0isize }];
+        let _: () = msg_send![&*item, setTarget: target_ptr];
+        item
+    };
+    menu.addItem(&full_item);
+
+    let guarded_item = unsafe {
+        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Guarded Mode (Denetimli)"),
+            Some(sel!(setGuardedAutonomy:)),
+            &NSString::from_str(""),
+        );
+        let _: () = msg_send![&*item, setState: if !is_full { 1isize } else { 0isize }];
+        let _: () = msg_send![&*item, setTarget: target_ptr];
+        item
+    };
+    menu.addItem(&guarded_item);
+
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    let is_bottom = FLOATING_BOTTOM.load(core::sync::atomic::Ordering::SeqCst);
+    let float_item = unsafe {
+        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Floating Pill (Dock Üstü)"),
+            Some(sel!(toggleFloatingMode:)),
+            &NSString::from_str(""),
+        );
+        let _: () = msg_send![&*item, setState: if is_bottom { 1isize } else { 0isize }];
+        let _: () = msg_send![&*item, setTarget: target_ptr];
+        item
+    };
+    menu.addItem(&float_item);
+
+    let is_mcp = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
+    let mcp_item = unsafe {
+        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(if is_mcp { "MCP Sunucuları (Açık)" } else { "MCP Sunucuları (Kapalı)" }),
+            Some(sel!(toggleMcpServer:)),
+            &NSString::from_str(""),
+        );
+        let _: () = msg_send![&*item, setState: if is_mcp { 1isize } else { 0isize }];
+        let _: () = msg_send![&*item, setTarget: target_ptr];
+        item
+    };
+    menu.addItem(&mcp_item);
+
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
     let toggle_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -281,9 +424,6 @@ fn show_context_menu(mtm: MainThreadMarker) {
             &NSString::from_str(""),
         )
     };
-    let target = ScriptTarget::alloc(mtm);
-    let target: Retained<ScriptTarget> = unsafe { msg_send![target, init] };
-    let target_ptr: *mut ScriptTarget = Retained::into_raw(target);
     unsafe {
         let _: () = msg_send![&*toggle_item, setTarget: target_ptr];
     }
@@ -360,7 +500,7 @@ fn toggle_panel_ui() {
     if panel.isVisible() {
         panel.orderOut(None);
     } else {
-        position_near_status_item(panel);
+        reposition_panel(panel);
         panel.makeKeyAndOrderFront(None);
         if !panel.isVisible() {
             eprintln!("[menu] WARNING: panel not visible after makeKeyAndOrderFront");
@@ -392,7 +532,7 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
         let bridge: Retained<ScriptBridge> = msg_send![bridge, init];
         let name = NSString::from_str("bridge");
         let _: () = controller.addScriptMessageHandler_name(ProtocolObject::from_ref(&*bridge), &name);
-        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(440.0, 620.0));
+        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
         let webview = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
         let html = NSString::from_str(include_str!("../assets/menu.html"));
         let base = NSURL::fileURLWithPath(&NSString::from_str("/"));
@@ -402,7 +542,7 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
 }
 
 fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
-    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(440.0, 620.0));
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
     // Titled | FullSizeContentView: the title bar is hidden (transparent) so
     // the panel reads as floating glass, but the window stays *key* so the
     // user can actually type into the embedded web page.
@@ -418,14 +558,12 @@ fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
             false,
         )
     };
-    unsafe { panel.setReleasedWhenClosed(false) };
+    unsafe {
+        panel.setReleasedWhenClosed(false);
+        // Float gracefully above regular windows (NSFloatingWindowLevel = 3).
+        let _: () = msg_send![&*panel, setLevel: 3isize];
+    };
     panel.setTitlebarAppearsTransparent(true);
-    // Hide the native traffic lights (close / minimize / zoom) and the title:
-    // the panel is its own floating-glass chrome — the HTML toolbar carries
-    // the brand flush left and the user toggles the panel from the status
-    // item, so the window buttons only add visual noise. Titled stays (not
-    // Borderless) so the window still becomes *key* and the webview accepts
-    // text input without a custom canBecomeKeyWindow subclass.
     panel.setTitleVisibility(NSWindowTitleVisibility::Hidden);
     for button in [
         NSWindowButton::CloseButton,
@@ -433,8 +571,6 @@ fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
         NSWindowButton::ZoomButton,
     ] {
         if let Some(btn) = panel.standardWindowButton(button) {
-            // SAFETY: setHidden: is inherited from NSView; the button is a
-            // live subview of the window's titlebar for its whole lifetime.
             unsafe {
                 let _: () = msg_send![&*btn, setHidden: true];
             }
@@ -443,15 +579,34 @@ fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
     panel.setOpaque(false);
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
     panel.setHasShadow(true);
-    // The whole header is a drag region, exactly like a modern macOS app's
-    // title bar — grab anywhere on the top edge and the panel follows.
-    // Controls keep normal hit-testing.
     panel.setMovableByWindowBackground(true);
-    // Don't hide when the agent activates a target app mid-run — the streaming
-    // summary must stay on screen for the whole run.
     panel.setHidesOnDeactivate(false);
     panel.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces);
     panel
+}
+
+fn position_bottom_center(panel: &NSWindow) {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let (screen_w, dock_y) = if let Some(screen) = NSScreen::mainScreen(mtm) {
+        let vf = screen.visibleFrame();
+        (screen.frame().size.width, vf.origin.y)
+    } else {
+        use core_graphics::display::CGDisplay;
+        let b = CGDisplay::main().bounds();
+        (b.size.width, 80.0)
+    };
+    let panel_w = 480.0;
+    let x = (screen_w - panel_w) / 2.0;
+    let y = dock_y + 20.0;
+    panel.setFrameOrigin(CGPoint::new(x, y));
+}
+
+fn reposition_panel(panel: &NSWindow) {
+    if FLOATING_BOTTOM.load(core::sync::atomic::Ordering::SeqCst) {
+        position_bottom_center(panel);
+    } else {
+        position_near_status_item(panel);
+    }
 }
 
 fn position_near_status_item(panel: &NSWindow) {
@@ -460,9 +615,8 @@ fn position_near_status_item(panel: &NSWindow) {
     let width = screen.size.width;
     let height = screen.size.height;
     let menu_bar: f64 = 24.0;
-    // Top-right, just under the menu bar. AppKit grows Y from the bottom, so
-    // "top" = height - menu_bar - panel_height.
-    let origin = CGPoint::new(width - 440.0 - 12.0, height - menu_bar - 620.0 - 8.0);
+    // Top-right, just under the menu bar.
+    let origin = CGPoint::new(width - 480.0 - 12.0, height - menu_bar - 640.0 - 8.0);
     panel.setFrameOrigin(origin);
 }
 
@@ -542,7 +696,98 @@ fn handle_script_message(message: &WKScriptMessage) {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .or_else(|| CAPTURED_APP.lock().unwrap().clone());
-            run_agent(&goal, app.as_deref());
+            let level = value
+                .get("level")
+                .and_then(serde_json::Value::as_u64)
+                .map(|v| v as u8)
+                .unwrap_or_else(|| AUTONOMY_LEVEL.load(core::sync::atomic::Ordering::SeqCst));
+            AUTONOMY_LEVEL.store(level, core::sync::atomic::Ordering::SeqCst);
+            run_agent(&goal, app.as_deref(), level);
+        }
+        Some("set_level") => {
+            if let Some(level) = value.get("level").and_then(serde_json::Value::as_u64) {
+                AUTONOMY_LEVEL.store(level as u8, core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        Some("get_mcp") => {
+            let json_str = read_mcp_servers_json();
+            let enabled = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
+            let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let wv = unsafe { &*(ptr as *const WKWebView) };
+                let js = format!("if(window.onMcpLoaded)window.onMcpLoaded({json_str},{enabled});");
+                call_js(wv, &js);
+            }
+        }
+        Some("save_mcp") => {
+            if let Some(id) = value.get("id").and_then(serde_json::Value::as_str) {
+                let path = mcp_config_path();
+                let mut doc: serde_json::Value = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_else(|| serde_json::json!({"mcpServers": {}}));
+                if !doc.get("mcpServers").is_some_and(|v| v.is_object()) {
+                    doc["mcpServers"] = serde_json::json!({});
+                }
+                let mut server_obj = serde_json::json!({
+                    "command": value.get("command").and_then(serde_json::Value::as_str).unwrap_or("npx"),
+                    "args": value.get("args").cloned().unwrap_or_else(|| serde_json::json!([])),
+                });
+                if let Some(env_obj) = value.get("env") {
+                    if env_obj.is_object() && !env_obj.as_object().unwrap().is_empty() {
+                        server_obj["env"] = env_obj.clone();
+                    }
+                }
+                doc["mcpServers"][id] = server_obj;
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(formatted) = serde_json::to_string_pretty(&doc) {
+                    let _ = std::fs::write(&path, formatted);
+                }
+                let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+                if !ptr.is_null() {
+                    let wv = unsafe { &*(ptr as *const WKWebView) };
+                    let js = format!("if(window.onMcpSaved)window.onMcpSaved('{id}');");
+                    call_js(wv, &js);
+                }
+            }
+        }
+        Some("delete_mcp") => {
+            if let Some(id) = value.get("id").and_then(serde_json::Value::as_str) {
+                let path = mcp_config_path();
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(servers) = doc.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+                            servers.remove(id);
+                            if let Ok(formatted) = serde_json::to_string_pretty(&doc) {
+                                let _ = std::fs::write(&path, formatted);
+                            }
+                        }
+                    }
+                }
+                let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+                if !ptr.is_null() {
+                    let wv = unsafe { &*(ptr as *const WKWebView) };
+                    let js = format!("if(window.onMcpDeleted)window.onMcpDeleted('{id}');");
+                    call_js(wv, &js);
+                }
+            }
+        }
+        Some("set_mcp_enabled") => {
+            if let Some(enabled) = value.get("enabled").and_then(serde_json::Value::as_bool) {
+                MCP_ENABLED.store(enabled, core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        Some("set_position_mode") => {
+            if let Some(bottom) = value.get("bottom").and_then(serde_json::Value::as_bool) {
+                FLOATING_BOTTOM.store(bottom, core::sync::atomic::Ordering::SeqCst);
+                let ptr = PANEL_PTR.load(core::sync::atomic::Ordering::SeqCst);
+                if !ptr.is_null() {
+                    let panel = unsafe { &*(ptr as *const NSWindow) };
+                    reposition_panel(panel);
+                }
+            }
         }
         Some("stop") => stop_agent(),
         Some("confirm") => {
@@ -583,6 +828,8 @@ fn agent_args(
     driver_bin: &str,
     socket: &str,
     store: &str,
+    level: u8,
+    mcp: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -602,15 +849,18 @@ fn agent_args(
         "--store".to_string(),
         store.to_string(),
         "--level".to_string(),
-        "3".to_string(),
+        level.to_string(),
     ];
+    if mcp {
+        args.push("--mcp".to_string());
+    }
     if let Some(app_name) = app {
         args.extend(["--app".to_string(), app_name.to_string()]);
     }
     args
 }
 
-fn run_agent(goal: &str, app: Option<&str>) {
+fn run_agent(goal: &str, app: Option<&str>, level: u8) {
     // Guard: never double-run while one is in flight.
     let already = SHARED.lock().unwrap().child_pid.is_some();
     if already {
@@ -663,7 +913,8 @@ fn run_agent(goal: &str, app: Option<&str>) {
         cmd.process_group(0);
     }
     let driver_bin_str = driver_bin.to_string_lossy().into_owned();
-    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store));
+    let mcp = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
+    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp));
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
     cmd.env("OPENAI_API_KEY", key.expect("checked above"));
@@ -1042,17 +1293,18 @@ mod tests {
 
     #[test]
     fn agent_always_uses_the_real_model() {
-        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store");
+        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true);
         assert!(
             argv.windows(2).any(|w| w == ["--model", "openai"]),
             "launcher must pass --model openai, never the demo provider"
         );
+        assert!(argv.iter().any(|a| a == "--mcp"), "must pass --mcp when enabled");
     }
 
     #[test]
     fn agent_passes_required_flags_and_target_app() {
         let argv =
-            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store");
+            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false);
         for required in ["--goal", "--real", "--model", "--driver", "--socket", "--store"] {
             assert!(
                 argv.iter().any(|a| a == required),
@@ -1060,6 +1312,7 @@ mod tests {
             );
         }
         assert!(argv.windows(2).any(|w| w == ["--app", "Google Chrome"]));
+        assert!(!argv.iter().any(|a| a == "--mcp"), "must not pass --mcp when disabled");
     }
 
     #[test]
