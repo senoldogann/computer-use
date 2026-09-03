@@ -9,12 +9,14 @@ handed to something that follows instructions.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
 
 from computeruse.mcp.protocol import (
     PROTOCOL_VERSION,
+    McpError,
     McpServerConfig,
     flatten_content,
 )
@@ -172,3 +174,59 @@ def test_an_unknown_tool_is_answered_not_raised() -> None:
 def test_the_client_announces_the_version_it_speaks() -> None:
     """Version negotiation starts with the client stating its own."""
     assert PROTOCOL_VERSION == "2025-06-18"
+
+
+# --- what a hung or dishonest server does ------------------------------------
+
+
+def test_a_silent_server_times_out_instead_of_hanging_forever() -> None:
+    """A blocking pipe read cannot be interrupted by a timer.
+
+    The first implementation set a threading.Timer and checked its flag
+    between lines, which never runs again once `readline()` blocks. A server
+    that accepted a request and went quiet hung the agent with no step
+    completing — so the between-step budget guard never fired either.
+    """
+    from computeruse.mcp.protocol import HANDSHAKE_TIMEOUT_SECONDS, McpClient
+
+    client = McpClient(McpServerConfig(name="silent", command="sleep", args=("120",)))
+    started = time.monotonic()
+    with pytest.raises(McpError, match="did not answer"):
+        client.start(env={"PATH": "/usr/bin:/bin"})
+    client.close()
+    # It gave up on its own deadline rather than on the sleep finishing.
+    assert time.monotonic() - started < HANDSHAKE_TIMEOUT_SECONDS + 10
+
+
+def test_an_echoed_request_is_not_accepted_as_a_response() -> None:
+    """An id match alone does not make a message a response.
+
+    JSON-RPC requires a response to carry `result` or `error`, and a message
+    with `method` is a request the server is making of us. Matching on the id
+    alone let `cat` complete the handshake: it echoed the initialize request
+    back unchanged, the id matched, and an empty result was read as success.
+    """
+    from computeruse.mcp.protocol import McpClient
+
+    client = McpClient(McpServerConfig(name="echo", command="cat"))
+    with pytest.raises(McpError):
+        client.start(env={"PATH": "/usr/bin:/bin"})
+    client.close()
+
+
+def test_the_tool_description_is_rendered_once(tmp_path: Path) -> None:
+    """It was re-sanitised on every observation to produce the same string."""
+    registry = McpRegistry(())
+    first = registry.describe()
+    assert registry.describe() is first
+
+
+def test_these_records_are_declared_unhashable() -> None:
+    """frozen=True advertises hashability the dict fields cannot honour, and
+    the raised error names `dict` rather than the class the caller used."""
+    from computeruse.mcp.protocol import McpTool
+
+    with pytest.raises(TypeError, match="McpTool"):
+        hash(McpTool(server="s", name="n", description="d", input_schema={}))
+    with pytest.raises(TypeError, match="McpServerConfig"):
+        hash(McpServerConfig(name="s", command="c"))

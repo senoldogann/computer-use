@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from typing import Final
 
 from computeruse.memory.episodic import EpisodicStore
+from computeruse.orchestrator.budget import BudgetExceededError
+from computeruse.orchestrator.loop import KillSwitchTripped
 from computeruse.skills.registry import SkillRegistry, is_demoted
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -242,6 +244,14 @@ def run_autonomously(
     A failing run ends that goal, not the session. The point of running
     unattended is to accumulate attempts, and the first goal proposed being
     impossible is not a reason to stop trying the rest.
+
+    Two things end everything instead. A human reclaiming the machine, and the
+    session's budget running out — the ceiling belongs to the session, so the
+    next goal would exceed it before taking a step.
+    ``KillSwitchTripped`` used to be swallowed by the same handler that
+    forgives an impossible goal, so tripping the emergency hotkey stopped one
+    run and the session took the cursor back after resting — the precise
+    inversion of what a kill switch promises.
     """
     attempted = 0
     while attempted < limits.max_runs and not stop():
@@ -266,6 +276,15 @@ def run_autonomously(
         attempted += 1
         try:
             execute(proposal)
+        except KillSwitchTripped:
+            LOGGER.warning("autonomous: human reclaimed control; ending session")
+            raise
+        except BudgetExceededError:
+            # The ceiling is the session's, so the next goal would exceed it
+            # immediately; continuing would spend the run count on runs that
+            # cannot start.
+            LOGGER.warning("autonomous: budget exhausted; ending session")
+            raise
         except Exception as exc:  # noqa: BLE001 - one goal failing is not the session failing
             LOGGER.warning("autonomous run failed: %s", exc)
         if attempted < limits.max_runs and not stop():

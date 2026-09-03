@@ -679,31 +679,33 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
             idle_seconds=idle,
         )
 
+    # Usage accumulates across the whole session, not per run. The flags read
+    # as the session's ceiling — main() refuses to start an unattended session
+    # without one, on the grounds that a process nobody is watching needs a
+    # bound — so charging each run the full amount would let `--autonomous 10
+    # --max-cost 5` spend fifty dollars against a limit the user wrote as five.
+    session_started_at = time.monotonic()
+    tokens = {"total": 0}
+    cost = {"usd": 0.0}
+
+    def stats_sink(call: object) -> None:
+        tokens["total"] += int(getattr(call, "total_tokens", 0) or 0)
+        cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
+
+    def budget_guard() -> None:
+        reason = budget_verdict(
+            budget,
+            RunUsage(
+                elapsed_seconds=time.monotonic() - session_started_at,
+                total_tokens=tokens["total"],
+                cost_usd=cost["usd"],
+            ),
+        )
+        if reason is not None:
+            raise BudgetExceededError(reason)
+
     def execute(proposal: GoalProposal) -> None:
         attempted_goals.append(proposal.goal)
-        # Each unattended run gets the full ceiling rather than a share of one.
-        # The session's own bound is its run count; a budget that shrank as the
-        # session went on would make the last goal fail for reasons that have
-        # nothing to do with the goal.
-        started_at = time.monotonic()
-        tokens = {"total": 0}
-        cost = {"usd": 0.0}
-
-        def stats_sink(call: object) -> None:
-            tokens["total"] += int(getattr(call, "total_tokens", 0) or 0)
-            cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
-
-        def budget_guard() -> None:
-            reason = budget_verdict(
-                budget,
-                RunUsage(
-                    elapsed_seconds=time.monotonic() - started_at,
-                    total_tokens=tokens["total"],
-                    cost_usd=cost["usd"],
-                ),
-            )
-            if reason is not None:
-                raise BudgetExceededError(reason)
 
         config = build_config(
             args,

@@ -154,6 +154,12 @@ class McpRegistry:
         self._configs = configs
         self._clients: dict[str, McpClient] = {}
         self._tools: dict[str, McpTool] = {}
+        # Rendered once. The description is recomputed only when the tool set
+        # changes, which is at startup; it was previously re-sanitised on every
+        # observation, so a per-character pass over forty names and forty
+        # descriptions ran on every step of every run to produce the same
+        # string each time.
+        self._described: tuple[str, ...] | None = None
 
     @property
     def tools(self) -> tuple[McpTool, ...]:
@@ -179,6 +185,7 @@ class McpRegistry:
             self._clients[config.name] = client
             for tool in discovered:
                 self._tools[tool.qualified_name] = tool
+            self._described = None
             LOGGER.info(
                 "MCP server %r ready with %d tool(s)", config.name, len(discovered)
             )
@@ -190,6 +197,8 @@ class McpRegistry:
         as its descriptions, and a name is just as capable of carrying a
         sentence that reads like an instruction.
         """
+        if self._described is not None:
+            return self._described
         lines: list[str] = []
         for tool in self.tools[:MAX_ADVERTISED_TOOLS]:
             name = sanitize_for_prompt(tool.qualified_name, limit=80)
@@ -203,7 +212,8 @@ class McpRegistry:
             lines.append(
                 f"(+{len(self._tools) - MAX_ADVERTISED_TOOLS} more tools not listed)"
             )
-        return tuple(lines)
+        self._described = tuple(lines)
+        return self._described
 
     def call(
         self,

@@ -2203,13 +2203,13 @@ class OodaRunner:
                     )
                 outcome = self.mcp.call(action.tool, action.arguments)
                 status = "failed" if outcome.failed else "returned"
-                # A tool's output is written by another program, so it is
-                # fenced the same way screen text is: it is data the model
-                # reads, never instructions it obeys.
-                return (
-                    f"call_tool {action.tool} {status}:\n"
-                    f"<observed_data>\n{outcome.text}\n</observed_data>"
-                )
+                # Deliberately NOT fenced here. This string becomes
+                # ``tool_result``, which the prompt renders inside the one
+                # observed-data block that sanitises everything in it. Writing
+                # the tags by hand at this call site is what let a server
+                # return the closing tag and escape the block — the choke point
+                # exists so no call site has to remember.
+                return f"call_tool {action.tool} {status}:\n{outcome.text}"
         except WebError as exc:
             LOGGER.warning("ooda tool %s failed: %s", action.type, exc)
             return f"{action.type} failed: {exc}"

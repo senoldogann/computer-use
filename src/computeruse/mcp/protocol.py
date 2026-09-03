@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Final, cast
 
@@ -71,6 +73,13 @@ class McpServerConfig:
     args: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=lambda: cast("dict[str, str]", {}))
 
+    # `frozen=True` generates a __hash__, which advertises hashability this
+    # type cannot honour: the dict field makes hashing raise, and it raises
+    # naming `dict` rather than this class, so the caller learns nothing about
+    # where the problem is. Declaring it unhashable moves the failure to the
+    # right place and the right message.
+    __hash__ = None  # type: ignore[assignment]
+
 
 @dataclass(frozen=True)
 class McpTool:
@@ -87,6 +96,11 @@ class McpTool:
     name: str
     description: str
     input_schema: dict[str, object]
+
+    # Unhashable for the same reason as McpServerConfig: a dict field cannot
+    # be hashed, and inheriting a generated __hash__ only defers the error to
+    # a caller who will be told the wrong type is at fault.
+    __hash__ = None  # type: ignore[assignment]
 
     @property
     def qualified_name(self) -> str:
@@ -122,6 +136,13 @@ class McpClient:
         self._next_id = 1
         self._lock = threading.Lock()
         self._server_info: dict[str, object] = {}
+        # A blocking pipe read cannot be interrupted by a timer, so the read
+        # lives on its own thread and the requester waits on a queue instead.
+        # Without this the timeout was decorative: a server that accepted a
+        # request and went silent left `readline()` blocked forever, and the
+        # deadline check between lines never ran again.
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._reader: threading.Thread | None = None
 
     @property
     def name(self) -> str:
@@ -151,7 +172,30 @@ class McpClient:
                 f"could not start MCP server {self._config.name!r} "
                 f"({self._config.command}): {exc}"
             ) from exc
+        self._reader = threading.Thread(
+            target=self._pump_lines, name=f"mcp-{self._config.name}", daemon=True
+        )
+        self._reader.start()
         self._handshake()
+
+    def _pump_lines(self) -> None:
+        """Read the server's stdout forever, handing each line to the queue.
+
+        Daemon and unsynchronised on purpose: it owns the only read of that
+        pipe, so nothing can race it, and a ``None`` marks end-of-stream so a
+        waiting requester learns the server is gone instead of timing out.
+        """
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        try:
+            for line in process.stdout:
+                self._lines.put(line)
+        except (OSError, ValueError):
+            # The pipe closed under us, which is end-of-stream by another name.
+            pass
+        finally:
+            self._lines.put(None)
 
     def _handshake(self) -> None:
         """initialize, check the version, then say we are ready."""
@@ -294,55 +338,74 @@ class McpClient:
         method: str,
         timeout: float,
     ) -> dict[str, object]:
-        """Read until the answer to *this* request arrives.
+        """Wait for the answer to *this* request, or give up.
 
         A server may interleave its own notifications and logging with
         responses, so anything without our id is skipped rather than mistaken
-        for the answer. The deadline is enforced by the reader thread the
-        caller set up, not here, because a blocking pipe read cannot be
-        interrupted by a timer.
+        for the answer.
+
+        The deadline is a real one because the blocking read happens on the
+        reader thread and this waits on a queue. It is measured against the
+        whole call rather than each line, or a server emitting a steady drip of
+        notifications could hold a request open indefinitely without ever
+        answering it.
         """
-        assert process.stdout is not None
-        deadline = threading.Event()
-        timer = threading.Timer(timeout, deadline.set)
-        timer.daemon = True
-        timer.start()
-        try:
-            while True:
-                if deadline.is_set():
-                    raise McpError(
-                        f"MCP server {self._config.name!r} did not answer {method!r} "
-                        f"within {timeout:.0f}s"
-                    )
-                line = process.stdout.readline()
-                if not line:
-                    raise McpError(
-                        f"MCP server {self._config.name!r} closed its output during {method!r}"
-                    )
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    # Servers occasionally print to stdout despite the
-                    # transport reserving it. Skipping is kinder than failing
-                    # the call over someone else's stray print statement.
-                    LOGGER.debug("non-JSON line from MCP server %r: %r", self._config.name, line[:200])
-                    continue
-                if not isinstance(message, dict):
-                    continue
-                envelope = cast("dict[str, object]", message)
-                if envelope.get("id") != request_id:
-                    continue
-                error = envelope.get("error")
-                if isinstance(error, dict):
-                    detail = cast("dict[str, object]", error)
-                    raise McpError(
-                        f"MCP server {self._config.name!r} refused {method!r}: "
-                        f"{detail.get('message', 'unknown error')}"
-                    )
-                result = envelope.get("result")
-                return cast("dict[str, object]", result) if isinstance(result, dict) else {}
-        finally:
-            timer.cancel()
+        del process  # the reader thread owns the pipe
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise McpError(
+                    f"MCP server {self._config.name!r} did not answer {method!r} "
+                    f"within {timeout:.0f}s"
+                )
+            try:
+                line = self._lines.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            if line is None:
+                raise McpError(
+                    f"MCP server {self._config.name!r} closed its output during {method!r}"
+                )
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                # Servers occasionally print to stdout despite the transport
+                # reserving it. Skipping is kinder than failing the call over
+                # someone else's stray print statement.
+                LOGGER.debug(
+                    "non-JSON line from MCP server %r: %r", self._config.name, line[:200]
+                )
+                continue
+            if not isinstance(message, dict):
+                continue
+            envelope = cast("dict[str, object]", message)
+            if envelope.get("id") != request_id:
+                continue
+            # An id match is not enough to call something a response. JSON-RPC
+            # requires a response to carry `result` or `error`, and a message
+            # with `method` is a request the server is making of us. Accepting
+            # on the id alone made an echo server complete the handshake:
+            # `cat` returned the initialize request unchanged, the id matched,
+            # and an empty result was reported as success.
+            if "method" in envelope:
+                continue
+            if "result" not in envelope and "error" not in envelope:
+                LOGGER.debug(
+                    "MCP server %r sent id %s with neither result nor error",
+                    self._config.name,
+                    request_id,
+                )
+                continue
+            error = envelope.get("error")
+            if isinstance(error, dict):
+                detail = cast("dict[str, object]", error)
+                raise McpError(
+                    f"MCP server {self._config.name!r} refused {method!r}: "
+                    f"{detail.get('message', 'unknown error')}"
+                )
+            result = envelope.get("result")
+            return cast("dict[str, object]", result) if isinstance(result, dict) else {}
 
 
 def flatten_content(result: dict[str, object]) -> str:
