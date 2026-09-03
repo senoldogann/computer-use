@@ -130,6 +130,51 @@ def test_retrieve_refuses_other_app_skill() -> None:
     assert final.skill is None
 
 
+def test_retrieve_looks_past_a_stronger_other_app_match() -> None:
+    """A foreign skill at the top of the ranking must not hide a usable one.
+
+    Skills are app-scoped, so the highest-scoring match is often unmountable;
+    reading only the ranking's winner threw away the same-app skill one place
+    below it. Measured on a store grown to 100 skills, that lost a usable skill
+    in 7% of retrievals, and the loss grows with the store.
+    """
+    seen: list[SkillDefinition | None] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        seen.append(state.skill)
+        return AgentTurn(
+            thought="done",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    runner = _runner(
+        provider=provider,
+        skill_scan=lambda _query: (
+            _match(skill_id="chrome.x", app="Chrome", score=5),
+            _match(),
+        ),
+    )
+    final = runner.run("export the menu")
+    assert final.skill is not None
+    assert final.skill.skill_id == "safari.export-report.abc"
+
+
+def test_retrieve_stops_at_the_relevance_floor() -> None:
+    """The scan must not reach past the floor to find its own application.
+
+    Matches arrive sorted, so a same-app skill below the threshold is a weak
+    coincidence — exactly what the floor exists to reject.
+    """
+    runner = _runner(
+        skill_scan=lambda _query: (
+            _match(skill_id="chrome.x", app="Chrome", score=5),
+            _match(score=1),
+        ),
+    )
+    assert runner.run("export the menu").skill is None
+
+
 def test_retrieve_preserves_open_tabs_after_mount() -> None:
     """M3: mounting a skill must not drop the observed browser tabs.
 
@@ -332,3 +377,42 @@ def test_agent_auto_mounts_matching_skill(tmp_path) -> None:
     result = Agent(config).run()
     assert result.skill is not None and result.skill.skill_id == "safari.export.abc"
     assert result.state.skill is result.skill
+
+
+def test_agent_records_how_the_mounted_skill_fared(tmp_path) -> None:
+    """The reinforcement chain, end to end: mount, run, counter.
+
+    Every link here has a test of its own and the chain has been broken anyway
+    — a run that finished in one step *because* the skill was right returned
+    before reporting, and every counter stayed at zero. Demotion is arithmetic
+    over these two numbers, so a store that cannot count is a store that never
+    withholds a recipe that keeps failing.
+    """
+    store_dir = tmp_path / "store"
+    registry = SkillRegistry(store_dir / "skills")
+    registry.save(_definition("safari.export.abc"))
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        # Nothing is executed at all: the skill was right, so the run is over
+        # before it starts. That is the strongest evidence the recipe works,
+        # and it is the shape that previously reported nothing.
+        return AgentTurn(
+            thought="the mounted skill already answers this",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    config = AgentConfig(
+        goal="export the menu in safari",
+        app="Safari",
+        provider=provider,
+        socket_path=str(SOCKET_PATH),
+        store_dir=store_dir,
+        autonomy_level=AutonomyLevel.GUARDED,
+        enable_visual_verification=False,
+        max_steps=10,
+    )
+    Agent(config).run()
+
+    stored = SkillRegistry(store_dir / "skills").load("safari.export.abc")
+    assert (stored.uses, stored.wins) == (1, 1)
