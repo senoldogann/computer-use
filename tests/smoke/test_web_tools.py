@@ -14,6 +14,8 @@ import pytest
 from computeruse.orchestrator.loop import _route_for
 from computeruse.orchestrator.schemas import WebFetch, WebSearch
 from computeruse.tools.web import (
+    MIN_PAGE_CHARS,
+    SEARXNG_URL_ENV,
     SearchResult,
     WebError,
     _is_http_url,
@@ -60,12 +62,19 @@ def test_only_http_urls_are_fetchable() -> None:
     assert _is_http_url("not a url") is False
 
 
-def test_an_unreachable_search_raises_rather_than_returning_nothing() -> None:
+def test_an_unreachable_search_raises_rather_than_returning_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """"Found nothing" and "never ran" lead to opposite next moves.
 
     Collapsing them into an empty list hides the difference exactly where it
     decides whether the agent should rephrase or fall back to the browser.
+
+    The address is forced to a closed port rather than left at the default: a
+    test that only passes while nothing happens to be listening on 8888 is not
+    a test, and this one duly broke the moment a real instance was started.
     """
+    monkeypatch.setenv(SEARXNG_URL_ENV, "http://127.0.0.1:9")
     with pytest.raises(WebError) as caught:
         search_web("anything", limit=1)
     # The message names the address, because the usual cause is that nothing
@@ -102,3 +111,38 @@ def test_search_results_parse_from_a_searxng_body(monkeypatch: pytest.MonkeyPatc
     assert [h.url for h in hits] == ["https://a.example", "https://b.example"]
     assert hits[0].snippet == "spaced out"
     assert hits[1].title == "https://b.example"
+
+
+def test_a_javascript_shell_fails_loudly_instead_of_returning_nothing() -> None:
+    """Six characters returned as an article is the worst possible answer.
+
+    Measured against real sites: Wikipedia yields 20,000 characters and Hacker
+    News 3,793, while Reddit yields 6 — its markup is a shell that JavaScript
+    fills in later. The agent has a browser and eyes; it only needs to be told
+    that this page requires them.
+    """
+    shell = "<html><head><title>Reddit</title></head><body><div id='root'></div></body></html>"
+    with pytest.raises(WebError) as caught:
+        _fetch_with(shell, "https://www.reddit.com/r/swift/")
+    message = str(caught.value)
+    assert "JavaScript" in message
+    # It must say what to do instead, not merely that it failed.
+    assert "read it there" in message or "on screen" in message
+
+
+def test_a_server_rendered_page_is_returned_whole() -> None:
+    article = "<html><body><p>" + ("word " * 200) + "</p></body></html>"
+    text = _fetch_with(article, "https://example.com/article")
+    assert len(text) > MIN_PAGE_CHARS
+
+
+def _fetch_with(html: str, url: str) -> str:
+    """fetch_page against a fixed body, so the test needs no network."""
+    from computeruse.tools import web
+
+    original = web._get
+    web._get = lambda _u: html  # type: ignore[assignment]
+    try:
+        return web.fetch_page(url)
+    finally:
+        web._get = original  # type: ignore[assignment]

@@ -240,6 +240,13 @@ pub trait Backend: Send + Sync {
     /// accepted the text.
     fn ax_set_value(&self, pid: u32, point: Point, text: &str) -> Result<bool, BackendError>;
 
+    /// Seconds since the user last touched the machine, by any input device.
+    ///
+    /// The signal an unattended agent needs before it acts. Watching the
+    /// cursor alone reads someone typing as absent, and acting then puts the
+    /// agent's keystrokes into their window rather than the target's.
+    fn idle_seconds(&self) -> Result<f64, BackendError>;
+
     /// Returns the frontmost app, its focused window, and the cursor — the
     /// OBSERVE step's window/cursor half (and the pid that feeds
     /// ``ax_snapshot`` when the caller did not name an app).
@@ -595,6 +602,12 @@ impl Backend for SimulatedBackend {
             state.address_value = text.to_string();
         }
         Ok(())
+    }
+
+    fn idle_seconds(&self) -> Result<f64, BackendError> {
+        // The fixture has no user, so it is always idle — which is what lets
+        // an unattended session be exercised offline at all.
+        Ok(3600.0)
     }
 
     fn ax_set_value(&self, _pid: u32, point: Point, text: &str) -> Result<bool, BackendError> {

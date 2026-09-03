@@ -27,6 +27,7 @@ pub enum Request {
     Screenshot(ScreenshotParams),
     AxSnapshot(AxSnapshotParams),
     AxPress(AxPressParams),
+    IdleSeconds,
     AxSetValue(AxSetValueParams),
     AppPid(AppPidParams),
     ActivateApp(ActivateAppParams),
@@ -175,6 +176,10 @@ pub enum Response {
         /// writable this way and the caller should type instead; `true` means
         /// accepted, not that the application reacted.
         wrote: bool,
+    },
+    IdleSeconds {
+        /// Seconds since any input device was last touched.
+        seconds: f64,
     },
     AxPress {
         /// Whether an accessibility element accepted the press. `false` means

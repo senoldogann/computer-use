@@ -49,6 +49,8 @@ class SkillSummary(BaseModel):
     skill_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
     description: str = Field(min_length=1, max_length=200)
     app: str
+    uses: int = Field(default=0, ge=0)
+    wins: int = Field(default=0, ge=0)
     tags: tuple[str, ...] = Field(default=(), description="Search keywords.")
     parameters: tuple[str, ...] = Field(
         default=(), description="Parameter slot names (e.g. ('query', 'url'))."
@@ -67,6 +69,14 @@ class SkillDefinition(BaseModel):
         default=(), description="Parameter slot names (e.g. ('query', 'url'))."
     )
     version: int = Field(default=1, ge=1)
+    #: How the skill has actually fared when reused. Distillation used to be
+    #: the end of a skill's story: it was written once and never judged again,
+    #: so a recipe that led three runs astray was offered to a fourth with the
+    #: same confidence as one that had worked every time. A skill is a claim
+    #: about how to do something, and a claim that keeps failing should stop
+    #: being made.
+    uses: int = Field(default=0, ge=0, description="Runs that mounted this skill.")
+    wins: int = Field(default=0, ge=0, description="Those runs that succeeded.")
     steps: tuple[str, ...] = Field(description="Human-readable ordered steps.")
     # Canonical signature makes the distiller's novelty check cheap: identical
     # action sequences collapse to the same signature without re-analysis.
@@ -85,6 +95,10 @@ def summary_of(definition: SkillDefinition) -> SkillSummary:
         tags=definition.tags,
         parameters=definition.parameters,
         version=definition.version,
+        # The track record is projected too: ranking happens over summaries,
+        # so a skill's history has to travel with the thing being ranked.
+        uses=definition.uses,
+        wins=definition.wins,
     )
 
 

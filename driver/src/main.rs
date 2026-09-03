@@ -312,6 +312,12 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                 Err(error) => Response::Error { message: error.0 },
             };
         }
+        Request::IdleSeconds => {
+            return match backend.idle_seconds() {
+                Ok(seconds) => Response::IdleSeconds { seconds },
+                Err(error) => Response::Error { message: error.0 },
+            };
+        }
         Request::AxPress(params) => {
             return match backend.ax_press(params.pid, point(params.x, params.y)) {
                 Ok(pressed) => Response::AxPress { pressed },

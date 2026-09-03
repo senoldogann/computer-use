@@ -36,6 +36,7 @@ LOGGER: Final = logging.getLogger(__name__)
 # with covering the first actionable page elements.
 AX_MAX_ELEMENTS: Final[int] = 64
 
+from computeruse.mcp import DEFAULT_CONFIG_PATH, McpRegistry, load_server_configs
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.memory.semantic import SemanticStore
@@ -138,6 +139,11 @@ class AgentConfig:
     # On, the agent can work in an application the user has in the background
     # without stealing focus or the pointer.
     background_actuation: bool = False
+    # Connect the MCP servers declared in ~/.computeruse/mcp.json and lend the
+    # agent their tools. Off by default: these are other people's programs,
+    # started as subprocesses, and turning them on should be a decision rather
+    # than a surprise.
+    enable_mcp: bool = False
     # Whether the OBSERVE screenshot is annotated with the AX element boxes
     # (Set-of-Marks). ``click_mark`` itself does not depend on this — it reads
     # the element list, which exists with vision off entirely.
@@ -290,6 +296,7 @@ class Agent:
             trajectory: Trajectory,
             outcome: EpisodeOutcome,
             retrospective: str | None,
+            mounted_skill_id: str | None,
         ) -> None:
             # A failed run is remembered but never distilled. Both halves
             # matter: a workflow that did not work must not become a skill the
@@ -297,6 +304,18 @@ class Agent:
             # steps before hitting a wall is exactly the trace worth keeping
             # (Law 4.1 failure retrospectives).
             nonlocal distilled
+            # Reinforcement: a mounted skill is a claim about how to do this,
+            # and the run just tested it. Recording the verdict is what turns
+            # the store from a pile of recipes into one that gets better —
+            # a skill that keeps failing is eventually withheld.
+            if mounted_skill_id is not None:
+                skills_registry.record_outcome(
+                    mounted_skill_id, succeeded=outcome == "success"
+                )
+            if not trajectory.steps:
+                # Nothing ran, so there is nothing to remember or distil — the
+                # skill's verdict above is the whole point of this call.
+                return
             if outcome == "success":
                 # Distill against known history FIRST, then remember — so the
                 # fresh run is novel, and any future identical run is a
@@ -622,6 +641,24 @@ class Agent:
 
                 on_sub_goal_complete_cb = _on_sub_goal_complete
 
+            # MCP servers are other people's programs started as subprocesses,
+            # so connecting them is a decision the caller makes explicitly. One
+            # that fails to start is logged and skipped inside the registry:
+            # a broken optional integration must not stop the run.
+            mcp: McpRegistry | None = None
+            if self._config.enable_mcp:
+                configs = load_server_configs()
+                if configs:
+                    mcp = McpRegistry(configs)
+                    mcp.start()
+                    LOGGER.info(
+                        "MCP: %d tool(s) from %d server(s)", len(mcp.tools), len(configs)
+                    )
+                else:
+                    LOGGER.info(
+                        "MCP requested but no servers configured in %s", DEFAULT_CONFIG_PATH
+                    )
+
             runner = OodaRunner(
                 provider=self._config.provider,
                 execute_physical=client.send,
@@ -657,6 +694,7 @@ class Agent:
                 app_is_pinned=self._config.app is not None,
                 on_complete=on_complete,
                 quiet_press=quiet_press if self._config.background_actuation else None,
+                mcp=mcp,
                 quiet_type=quiet_type if self._config.background_actuation else None,
                 completion_check=self._config.completion_check,
                 knowledge=knowledge,

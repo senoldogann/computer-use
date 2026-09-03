@@ -448,6 +448,24 @@ class ActuationClient:
             raise DriverRpcError(method="ax_set_value", driver_message=message)
         return bool(response.get("wrote", False))
 
+    def idle_seconds(self) -> float | None:
+        """Seconds since the user last touched any input device.
+
+        Reads the HID system's own idle clock, which needs no Input Monitoring
+        consent — that permission would let a program see *what* was pressed,
+        which an idle check has no business knowing. Returns ``None`` when the
+        driver does not offer it, so an older driver degrades to the sampled
+        heuristic rather than reporting a machine as free.
+        """
+        try:
+            response = self.request("idle_seconds", {})
+        except DriverRpcError:
+            return None
+        if response.get("ok") != "idle_seconds":
+            return None
+        seconds = response.get("seconds")
+        return float(seconds) if isinstance(seconds, (int, float)) else None
+
     def ax_press(self, pid: int, x: float, y: float) -> bool:
         """Ask the element at a point inside an app to activate itself.
 

@@ -24,16 +24,31 @@ import importlib
 import inspect
 import logging
 import os
+import random
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
 from computeruse.agent import Agent, AgentConfig
+from computeruse.autonomous import (
+    DEFAULT_IDLE_SECONDS as AUTONOMOUS_IDLE_SECONDS,
+)
+from computeruse.autonomous import (
+    DEFAULT_REST_SECONDS as AUTONOMOUS_REST_SECONDS,
+)
+from computeruse.autonomous import (
+    GoalProposal,
+    MachineActivity,
+    SessionLimits,
+    propose_goal,
+    run_autonomously,
+)
+from computeruse.memory.episodic import EpisodicStore
 from computeruse.orchestrator.budget import (
     BudgetExceededError,
     RunBudget,
@@ -66,6 +81,7 @@ from computeruse.security.autonomy import (
     PermissionDeniedError,
 )
 from computeruse.security.killswitch import KillSwitch, install_sigint_catcher
+from computeruse.skills.registry import SkillRegistry
 from computeruse.vision.apps import extract_goal_app, infer_target_app
 
 DEFAULT_SOCKET = "/tmp/actuation-driver.sock"
@@ -79,7 +95,36 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         prog="computeruse",
         description="Autonomous physical computer-use agent (macOS).",
     )
-    parser.add_argument("--goal", required=True, help="The task to accomplish.")
+    parser.add_argument(
+        "--goal",
+        default=None,
+        help="The task to accomplish. Required unless --autonomous is given, in "
+        "which case the agent chooses its own work from memory.",
+    )
+    parser.add_argument(
+        "--autonomous",
+        type=int,
+        default=None,
+        metavar="RUNS",
+        help="Work unattended: wait for the machine to be free, choose a goal "
+        "from memory, and do it, up to RUNS times. Requires at least one hard "
+        "budget (--deadline-seconds, --max-tokens or --max-cost): an unattended "
+        "process without a bound is not autonomy, it is a leak.",
+    )
+    parser.add_argument(
+        "--idle-seconds",
+        type=float,
+        default=AUTONOMOUS_IDLE_SECONDS,
+        help="How still the machine must be before the agent treats it as free "
+        f"(default: {AUTONOMOUS_IDLE_SECONDS:.0f}).",
+    )
+    parser.add_argument(
+        "--rest-seconds",
+        type=float,
+        default=AUTONOMOUS_REST_SECONDS,
+        help="How long to wait between unattended runs "
+        f"(default: {AUTONOMOUS_REST_SECONDS:.0f}).",
+    )
     parser.add_argument(
         "--app",
         default=None,
@@ -115,6 +160,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "the cursor, so the agent can work in an app you keep in the background "
         "without stealing focus or the pointer. Falls back to an ordinary click "
         "wherever an element declines.",
+    )
+    parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Connect the MCP servers declared in ~/.computeruse/mcp.json and "
+        "lend the agent their tools. Off by default: these are other people's "
+        "programs, started as subprocesses.",
     )
     parser.add_argument("--socket", default=DEFAULT_SOCKET, help="Driver Unix socket path.")
     parser.add_argument(
@@ -526,6 +578,7 @@ def build_config(
         enable_set_of_marks=getattr(args, "marks", True),
         display_id=getattr(args, "display", 0),
         background_actuation=getattr(args, "background", False),
+        enable_mcp=getattr(args, "mcp", False),
         # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
         # on a *real* backend is activated (the simulated backend never touches
         # the host — Law 1). An auto-discovered app is never activated:
@@ -597,6 +650,91 @@ def spawn_driver(binary: str, socket_path: str, *, real: bool) -> subprocess.Pop
     raise RuntimeError(f"driver did not create socket {socket_path} in time: {detail}")
 
 
+def _run_autonomous_session(args: argparse.Namespace) -> int:
+    """Work unattended until the session's bounds are reached.
+
+    The agent's own memory is what it works from, so the stores are opened once
+    here and consulted before each run rather than snapshotted at the start:
+    a run that distils a skill or records a failure should change what the next
+    goal is, which is the entire point of doing this repeatedly.
+    """
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    skills = SkillRegistry(store / "skills")
+    episodes = EpisodicStore(store / "episodes")
+    rng = random.Random()
+    attempted_goals: list[str] = []
+    budget = RunBudget(
+        deadline_seconds=args.deadline_seconds,
+        max_tokens=args.max_tokens,
+        max_cost_usd=args.max_cost,
+    )
+
+    def observe() -> MachineActivity:
+        with ActuationClient(args.socket, connect_retries=2) as client:
+            window = client.focused_window()
+            idle = client.idle_seconds()
+        return MachineActivity(
+            cursor=(window.cursor_x, window.cursor_y),
+            frontmost=window.app_name,
+            idle_seconds=idle,
+        )
+
+    def execute(proposal: GoalProposal) -> None:
+        attempted_goals.append(proposal.goal)
+        # Each unattended run gets the full ceiling rather than a share of one.
+        # The session's own bound is its run count; a budget that shrank as the
+        # session went on would make the last goal fail for reasons that have
+        # nothing to do with the goal.
+        started_at = time.monotonic()
+        tokens = {"total": 0}
+        cost = {"usd": 0.0}
+
+        def stats_sink(call: object) -> None:
+            tokens["total"] += int(getattr(call, "total_tokens", 0) or 0)
+            cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
+
+        def budget_guard() -> None:
+            reason = budget_verdict(
+                budget,
+                RunUsage(
+                    elapsed_seconds=time.monotonic() - started_at,
+                    total_tokens=tokens["total"],
+                    cost_usd=cost["usd"],
+                ),
+            )
+            if reason is not None:
+                raise BudgetExceededError(reason)
+
+        config = build_config(
+            args,
+            goal=proposal.goal,
+            activate_named_app=False,
+            app_inferred=proposal.app is not None,
+            stats_sink=stats_sink,
+            budget_guard=None if budget.is_unset else budget_guard,
+        )
+        if proposal.app is not None:
+            config = replace(config, app=proposal.app)
+        result = Agent(config).run()
+        print(f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps")
+
+    done = run_autonomously(
+        SessionLimits(
+            max_runs=args.autonomous,
+            idle_seconds=args.idle_seconds,
+            rest_seconds=args.rest_seconds,
+        ),
+        observe=observe,
+        propose=lambda: propose_goal(skills, episodes, rng=rng),
+        execute=execute,
+        stop=lambda: False,
+    )
+    print(f"autonomous  : {done} run(s) attempted")
+    for goal in attempted_goals:
+        print(f"  - {goal}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     # Live step visibility: the runner logs every executed physical action at
@@ -605,6 +743,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     # happens". Stream the runner's lines to stderr so the run is observable
     # while the final summary block still lands on stdout at the end.
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+    if args.autonomous is None and not args.goal:
+        print("error: --goal is required unless --autonomous is given", file=sys.stderr)
+        return 2
+    if args.autonomous is not None:
+        if args.autonomous < 1:
+            print("error: --autonomous needs a positive run count", file=sys.stderr)
+            return 2
+        # An unattended process without a bound is not autonomy, it is a leak,
+        # and a bound reached by forgetting a flag is not a bound. The run
+        # count alone is not enough: one run can spend indefinitely.
+        if (
+            args.deadline_seconds is None
+            and args.max_tokens is None
+            and args.max_cost is None
+        ):
+            print(
+                "error: --autonomous requires at least one of --deadline-seconds, "
+                "--max-tokens or --max-cost. Nobody is watching an unattended run, "
+                "so its ceiling has to be set before it starts.",
+                file=sys.stderr,
+            )
+            return 2
     if args.model is None and args.provider == DEMO_PROVIDER:
         # The demo provider does two fixed clicks then finishes — deliberately
         # so the stack runs end-to-end without an LLM. On a *real* host that
@@ -656,6 +816,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # cleaned goal (no bracket wrapper) and the run can bring the right
         # app to the front without the user passing --app — autonomy by
         # design, not by configuration.
+        # Unattended work chooses its own goal per run, so none of the
+        # goal-shaped setup below applies to it. Dispatching here rather than
+        # later is the point: running any of it on an absent goal is what
+        # crashed the first attempt.
+        if args.autonomous is not None:
+            return _run_autonomous_session(args)
+
         explicit_app, cleaned_goal = extract_goal_app(args.goal)
         args.goal = cleaned_goal
         named_app = args.app is not None

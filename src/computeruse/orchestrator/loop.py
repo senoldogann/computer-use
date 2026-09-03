@@ -42,6 +42,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
+from computeruse.mcp import McpRegistry
 from computeruse.orchestrator.budget import BudgetExceededError
 from computeruse.orchestrator.evidence import (
     ActionExpectation,
@@ -68,6 +69,7 @@ from computeruse.orchestrator.schemas import (
     Action,
     ActivateApp,
     AgentTurn,
+    CallTool,
     ClickMark,
     ClipboardPaste,
     Finish,
@@ -250,6 +252,10 @@ class WorkingState:
     #: screen at once (a calculator covers the page whose number it used), and
     #: without a record of what the machine showed, such a goal is unprovable.
     observed_trail: tuple[str, ...] = ()
+    #: Tools borrowed from MCP servers, described one per line. Empty when
+    #: none are configured, which is how the prompt knows not to offer the
+    #: action at all rather than advertise something that cannot work.
+    mcp_tools: tuple[str, ...] = ()
     #: What the last non-physical tool returned — search hits, a page's text,
     #: or the reason it could not answer. Held for exactly one turn: it is an
     #: answer to the question the model just asked, and carrying it further
@@ -314,7 +320,7 @@ def _route_for(action: Action) -> Routing:
     # Tools reach the world without the host's input devices, so they are
     # routed away from the driver entirely: no coordinate gate, no focus guard,
     # no cursor to give back to the user afterwards.
-    if action.type in ("web_search", "web_fetch"):
+    if action.type in ("web_search", "web_fetch", "call_tool"):
         return "internal_tool"
     if action.type == "wait":
         return "internal_wait"
@@ -763,8 +769,12 @@ class OodaRunner:
     # on a failure — the trajectory says what was tried, the retrospective says
     # why it stopped. The caller decides what to do with each outcome (Law 3.1
     # only ever wanted a *successful* flow distilled into a skill).
+    #: Called once a run ends, with the trajectory, its outcome, a
+    #: retrospective, and the id of the skill that was mounted (``None`` when
+    #: none was). The skill id is what lets a caller record how a recipe
+    #: actually fared, which distillation alone never did.
     on_complete: (
-        Callable[[Trajectory, EpisodeOutcome, str | None], None] | None
+        Callable[[Trajectory, EpisodeOutcome, str | None, str | None], None] | None
     ) = None
     # Goal-completion auditor (VERIFY, terminal): given the final state and the
     # model's own summary, decide whether the goal is *observably* satisfied.
@@ -773,6 +783,10 @@ class OodaRunner:
     #: directly, returning whether it accepted. When it declines, the ordinary
     #: synthetic click runs instead, so this can only ever add reach.
     quiet_press: Callable[[Point], bool] | None = None
+    #: Tools borrowed from MCP servers, when any are configured. ``None`` means
+    #: the capability is absent, which the model is told rather than left to
+    #: discover by calling something that cannot work.
+    mcp: McpRegistry | None = None
     #: Optional quiet text path: put a value into the target app's focused
     #: element, returning whether it was accepted. Without it, background mode
     #: covers clicks only — typing falls back to the global event stream, the
@@ -1789,6 +1803,7 @@ class OodaRunner:
         active_window = window_summary(window) if window is not None else state.active_window
         return replace(
             state,
+            mcp_tools=self.mcp.describe() if self.mcp is not None else (),
             active_window=active_window,
             ui_elements=ui_elements,
             open_tabs=open_tabs,
@@ -1991,7 +2006,16 @@ class OodaRunner:
         become a skill; that is the caller's call, and the retrospective is
         passed so it can make it.
         """
-        if self.on_complete is None or not self._executed:
+        # Two different questions were behind one guard. "Is there a
+        # trajectory worth remembering?" is answered by whether anything ran.
+        # "How did the mounted skill fare?" is not: a run that finished in one
+        # step *because* the skill was right executed nothing, and that is the
+        # strongest evidence the recipe works — which the caller never received,
+        # so every counter stayed at zero. Measured: a second run mounted a
+        # distilled skill, finished immediately, and recorded uses=0.
+        if self.on_complete is None:
+            return
+        if not self._executed and self._skill is None:
             return
         self.on_complete(
             Trajectory(
@@ -2002,6 +2026,7 @@ class OodaRunner:
             ),
             outcome,
             retrospective,
+            self._skill.skill_id if self._skill is not None else None,
         )
 
     @property
@@ -2170,6 +2195,21 @@ class OodaRunner:
             if isinstance(action, WebFetch):
                 text = fetch_page(action.url)
                 return f"web_fetch {action.url}:\n{text}"
+            if isinstance(action, CallTool):
+                if self.mcp is None:
+                    return (
+                        "call_tool is unavailable: no MCP servers are configured. "
+                        "Use the screen or the web tools instead."
+                    )
+                outcome = self.mcp.call(action.tool, action.arguments)
+                status = "failed" if outcome.failed else "returned"
+                # A tool's output is written by another program, so it is
+                # fenced the same way screen text is: it is data the model
+                # reads, never instructions it obeys.
+                return (
+                    f"call_tool {action.tool} {status}:\n"
+                    f"<observed_data>\n{outcome.text}\n</observed_data>"
+                )
         except WebError as exc:
             LOGGER.warning("ooda tool %s failed: %s", action.type, exc)
             return f"{action.type} failed: {exc}"

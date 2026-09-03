@@ -9,12 +9,15 @@ on-disk store.
 
 from __future__ import annotations
 
+import logging
+
 import re
 
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition, SkillSummary, summary_of
 
@@ -25,6 +28,38 @@ class RelevanceMatch:
 
     summary: SkillSummary
     score: int
+
+
+#: Three is deliberate: one failure is easily the screen's fault rather than
+#: the recipe's, two could be coincidence, and a recipe that has now sent three
+#: runs down the wrong path is worse than no recipe at all.
+LOGGER: Final = logging.getLogger(__name__)
+
+#: Failures with nothing to show for them, after which a skill is withheld.
+DEMOTE_AFTER_FAILURES: Final[int] = 3
+
+
+def is_demoted(summary: SkillSummary) -> bool:
+    """Has this skill earned its way out of the store (pure)?
+
+    Only a record of pure failure demotes. A skill that has worked even once
+    keeps being offered however often it has since missed — the failures are
+    then far more likely to be about the screen it met than the route it
+    describes.
+    """
+    return summary.wins == 0 and summary.uses >= DEMOTE_AFTER_FAILURES
+
+
+def track_record_bonus(summary: SkillSummary) -> int:
+    """How much a skill's history moves it up the ranking (pure).
+
+    Deliberately small, and capped. A proven skill should win a tie against an
+    unproven one; it should not beat a skill that actually matches the query,
+    or the store would ossify around whatever happened to be tried first.
+    """
+    if summary.uses == 0:
+        return 0
+    return 1 if summary.wins > 0 else -1
 
 
 def _content_tokens(text: str) -> frozenset[str]:
@@ -78,6 +113,11 @@ def search(
                 score += 1
             if token in description_tokens:
                 score += 1
+        if is_demoted(summary):
+            # Withheld entirely rather than ranked last: an actively harmful
+            # recipe offered as a fallback is still offered.
+            continue
+        score += track_record_bonus(summary)
         if score >= min_score:
             matches.append(RelevanceMatch(summary=summary, score=score))
     # Deterministic ordering: score desc, then id asc (stability across runs).
@@ -120,6 +160,33 @@ class SkillRegistry:
         if not path.is_file():
             raise KeyError(f"no skill with id {skill_id!r} in {self._store_dir}")
         return _read_definition(path)
+
+    def record_outcome(self, skill_id: str, *, succeeded: bool) -> None:
+        """Remember how a mounted skill fared on the run that used it.
+
+        Without this the counters stay at zero and the ranking that reads them
+        is dead code — which is exactly what distillation was before: a skill
+        was written once and never judged again.
+
+        Missing or unreadable skills are ignored rather than raised on: a run
+        has already finished by the time this is called, and failing its
+        bookkeeping would turn a completed task into an error. A skill can be
+        genuinely gone — deleted between mounting and finishing — which is why
+        a missing key is caught alongside a broken file.
+        """
+        try:
+            definition = self.load(skill_id)
+        except (KeyError, OSError, ValueError) as exc:
+            LOGGER.debug("cannot record outcome for skill %r: %s", skill_id, exc)
+            return
+        self.save(
+            definition.model_copy(
+                update={
+                    "uses": definition.uses + 1,
+                    "wins": definition.wins + (1 if succeeded else 0),
+                }
+            )
+        )
 
     def save(self, definition: SkillDefinition) -> None:
         """Persist a skill definition as its id-named JSON file.
