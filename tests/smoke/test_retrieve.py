@@ -377,3 +377,42 @@ def test_agent_auto_mounts_matching_skill(tmp_path) -> None:
     result = Agent(config).run()
     assert result.skill is not None and result.skill.skill_id == "safari.export.abc"
     assert result.state.skill is result.skill
+
+
+def test_agent_records_how_the_mounted_skill_fared(tmp_path) -> None:
+    """The reinforcement chain, end to end: mount, run, counter.
+
+    Every link here has a test of its own and the chain has been broken anyway
+    — a run that finished in one step *because* the skill was right returned
+    before reporting, and every counter stayed at zero. Demotion is arithmetic
+    over these two numbers, so a store that cannot count is a store that never
+    withholds a recipe that keeps failing.
+    """
+    store_dir = tmp_path / "store"
+    registry = SkillRegistry(store_dir / "skills")
+    registry.save(_definition("safari.export.abc"))
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        # Nothing is executed at all: the skill was right, so the run is over
+        # before it starts. That is the strongest evidence the recipe works,
+        # and it is the shape that previously reported nothing.
+        return AgentTurn(
+            thought="the mounted skill already answers this",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    config = AgentConfig(
+        goal="export the menu in safari",
+        app="Safari",
+        provider=provider,
+        socket_path=str(SOCKET_PATH),
+        store_dir=store_dir,
+        autonomy_level=AutonomyLevel.GUARDED,
+        enable_visual_verification=False,
+        max_steps=10,
+    )
+    Agent(config).run()
+
+    stored = SkillRegistry(store_dir / "skills").load("safari.export.abc")
+    assert (stored.uses, stored.wins) == (1, 1)
