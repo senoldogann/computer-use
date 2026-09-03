@@ -147,6 +147,46 @@ def test_openai_model_missing_choices_is_explicit() -> None:
         model("p")
 
 
+def test_a_cut_off_reply_says_so_instead_of_looking_malformed() -> None:
+    """Truncation and malformation need different answers from the model.
+
+    `type_text` and `clipboard_paste` carry their payload inside the decision
+    object, so a long piece of writing can exhaust the completion budget and
+    come back as a half-finished JSON string. Reported as a contract violation
+    it reads as "you formatted this wrong", and the model re-sends the same
+    too-long object: measured on "research the AI news and write me a summary
+    in Notes", four consecutive invalid decisions, every one of them exactly at
+    the limit, and the run gave up without typing a word.
+    """
+    opener, _ = _fake_opener(
+        _FakeResponse(
+            json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {"content": '{"thought": "writing the su'},
+                            "finish_reason": "length",
+                        }
+                    ]
+                }
+            )
+        )
+    )
+    model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
+    with pytest.raises(OpenAIError, match="cut off"):
+        model("p")
+
+
+def test_the_completion_budget_fits_a_piece_of_writing() -> None:
+    """A cap sized for a click makes every writing goal impossible."""
+    opener, sent = _fake_opener(
+        _FakeResponse(json.dumps({"choices": [{"message": {"content": "ok"}}]}))
+    )
+    model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
+    model("p")
+    assert sent[0]["body"]["max_completion_tokens"] >= 2048  # type: ignore[index]
+
+
 def test_openai_model_missing_content_is_explicit() -> None:
     opener, _ = _fake_opener(_FakeResponse(json.dumps({"choices": [{"message": {}}]})))
     model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
@@ -166,7 +206,12 @@ def test_openai_transport_drives_the_ooda_loop() -> None:
         execute_physical=lambda _action: None,
     )
     final = runner.run("g")
-    assert final.completed_steps == ("step_0:mouse_click", "step_1:finish")
+    # The label carries what the step was for: a history of bare verbs is no
+    # memory at all, and an agent given one re-does what it has already done.
+    assert final.completed_steps == (
+        "step_0:mouse_click — click the thing",
+        "step_1:finish — workflow complete",
+    )
     # The distilled trajectory excludes the orchestrator-internal finish.
     assert [a.type for a in runner.executed_trajectory] == ["mouse_click"]
     assert final.last_error is None

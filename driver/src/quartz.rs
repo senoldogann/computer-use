@@ -492,6 +492,10 @@ impl Backend for QuartzBackend {
         crate::ax::focused_window()
     }
 
+    fn app_window(&self, pid: u32) -> Result<FocusedWindow, BackendError> {
+        crate::ax::app_window(pid)
+    }
+
     fn list_apps(&self) -> Result<Vec<String>, BackendError> {
         // On-screen window owners: what the user is actually running, without
         // Accessibility/Screen Recording consent (owner names are public).

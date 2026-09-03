@@ -9,17 +9,20 @@ on-disk store.
 
 from __future__ import annotations
 
-import logging
-
-import re
-
 import json
+import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition, SkillSummary, summary_of
+from computeruse.skills.schemas import (
+    UNINFORMATIVE_WORDS,
+    SkillDefinition,
+    SkillSummary,
+    summary_of,
+)
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import Final
 
 from computeruse.orchestrator.schemas import (
     AgentTurn,
@@ -33,6 +34,8 @@ from computeruse.orchestrator.schemas import (
     PressHotkey,
     TypeText,
     Wait,
+    WebFetch,
+    WebSearch,
 )
 from computeruse.security.permissions import (
     PermissionConfirmationRequired,
@@ -229,6 +232,14 @@ class AutonomyPolicy:
         run). The markers describe UI controls the agent might press, not the
         English the model narrates in.
 
+        Searching and fetching join that list for the same reason and were
+        missing from it: they read, over the network, and press nothing. The
+        omission cost a live run, which asked to fetch a page "to confirm its
+        title and comment count" and stopped dead on the word "confirm" —
+        exactly the failure the paragraph above describes, in the same place,
+        two actions later. ``call_tool`` is deliberately *not* here: an MCP
+        tool is someone else's program and can do anything a program can.
+
         ``target_label`` is the accessibility title of the control actually
         under the pointer, and it is what makes the guard a safety mechanism
         rather than an honesty check on the model's narration. The markers name
@@ -238,30 +249,70 @@ class AutonomyPolicy:
         :attr:`Risk.NONE` and ran unattended. The screen does not get a vote on
         how it is described.
         """
-        if isinstance(turn.action, (Finish, Wait, LoadSkill)):
+        if isinstance(turn.action, (Finish, Wait, LoadSkill, WebSearch, WebFetch)):
             return Risk.NONE
         subject = turn.sub_goal.lower()
         if target_label:
             subject = f"{subject} {target_label}".lower()
         if isinstance(turn.action, PressHotkey):
             subject = f"{subject} {turn.action.key}".lower()
-        elif isinstance(turn.action, (TypeText, ClipboardPaste)):
-            subject = f"{subject} {turn.action.text}".lower()
 
-        # Normalize punctuation before tokenizing so `delete-file`, `delete_file`,
-        # and `delete.` are treated as the same intent marker.
-        normalized = re.sub(r"[^\w\-]+", " ", subject, flags=re.UNICODE)
-        words = set(normalized.replace("-", " ").replace("_", " ").split())
-        # Tokenise on whitespace so `rm` matches the *word* `rm`, never the
-        # letters inside `confi rm-dialog`. This is the difference between a
-        # deliberate `rm -rf ~` and prose that merely contains the sequence.
+        words = _intent_words(subject)
         if words & self.destructive_markers:
             return Risk.DESTRUCTIVE
         if words & self.typed_commands:
             return Risk.DESTRUCTIVE
+        if isinstance(turn.action, (TypeText, ClipboardPaste)) and _looks_like_a_command(
+            turn.action.text, self.typed_commands
+        ):
+            return Risk.DESTRUCTIVE
         if words & self.routine_markers:
             return Risk.ROUTINE
         return Risk.NONE
+
+
+def _intent_words(subject: str) -> set[str]:
+    """Whole words of a phrase, punctuation folded (pure).
+
+    Tokenised on whitespace so `rm` matches the *word* `rm`, never the letters
+    inside `confi rm-dialog`, and normalised first so `delete-file`,
+    `delete_file` and `delete.` are one marker.
+    """
+    normalized = re.sub(r"[^\w\-]+", " ", subject, flags=re.UNICODE)
+    return set(normalized.replace("-", " ").replace("_", " ").split())
+
+
+#: Longest text still short enough to be something a person types at a prompt.
+#: Above this the payload is prose, and prose is where a command word appears
+#: as a *subject* rather than as an instruction.
+COMMAND_LENGTH_MAX: Final[int] = 200
+
+
+def _looks_like_a_command(text: str, commands: frozenset[str]) -> bool:
+    """Is this typed payload a command, or prose that mentions one (pure)?
+
+    Folding the whole payload into the subject was the third instance of one
+    mistake: the markers describe things being *done*, and a long piece of
+    writing merely talks about them. Measured on a live run of "research the
+    AI news and write me a summary in Notes", the agent produced a correct
+    1,575-character summary whose first bullet reported an "automated shutdown"
+    capability — and pasting that article into a note was classified as issuing
+    a shutdown command, so an unattended run at full autonomy stopped to ask
+    permission and then died waiting.
+
+    A command lives at the start of a line, so a line beginning with one counts
+    however long the payload is. Short text counts wherever the word falls,
+    because `echo hi; rm -rf ~` is a command line whichever half you read.
+    """
+    lowered = text.lower()
+    for line in lowered.splitlines():
+        leading = _intent_words(line)
+        first = line.strip().split()
+        if first and _intent_words(first[0]) & commands:
+            return True
+        if len(line) <= COMMAND_LENGTH_MAX and leading & commands:
+            return True
+    return False
 
 
 def classify_risk(

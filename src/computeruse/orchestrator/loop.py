@@ -222,6 +222,11 @@ def _first_mountable(
 # the same intent, while genuinely different targets (tested) stay distinct.
 STUCK_REPEAT_TOLERANCE_PX: Final[int] = 32
 
+#: How much of a sub-goal is kept in the step history. Long enough to say what
+#: the step was for, short enough that ten of them stay a summary rather than
+#: a transcript.
+SUB_GOAL_LABEL_MAX_CHARS: Final[int] = 80
+
 
 @dataclass(frozen=True)
 class AxProbeResult:
@@ -581,6 +586,39 @@ TRAIL_MAX_ENTRIES: Final[int] = 6
 TRAIL_MAX_CHARS: Final[int] = 600
 
 
+def _informative_text(content: Sequence[str], *, max_chars: int) -> str:
+    """The distinctive part of what a window showed, as one line (pure).
+
+    The content digest walks the accessibility tree in order and reports every
+    node as ``Role=Value``, which is right for its first job — a fingerprint
+    that changes when the screen changes. As *evidence* it is nearly useless,
+    because a page announces its own furniture first and announces it three
+    times: a link, its group and its static text all carry the same string.
+
+    Measured on a Hacker News comments page: 200 fragments, of which 600
+    characters bought nothing but the site's navigation bar — "new | past |
+    comments | ask | show | jobs" — twice over. The story's title and its
+    comment count, the only things the run was there to read, fell outside the
+    limit. An agent asked to collect three counts re-read the first one until
+    its budget ran out, correctly, because its own record of the visit said
+    nothing about it.
+
+    Keeping the first sighting of each distinct value drops that page to 83
+    fragments and brings the title, the score and "343 comments" inside the
+    same budget.
+    """
+    seen: set[str] = set()
+    kept: list[str] = []
+    for fragment in content:
+        _, separator, tail = fragment.partition("=")
+        value = (tail if separator else fragment).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        kept.append(value)
+    return " | ".join(kept)[:max_chars]
+
+
 def _extend_trail(
     trail: tuple[str, ...],
     window: FocusedWindow | None,
@@ -600,8 +638,41 @@ def _extend_trail(
     title = window.window_title or window.app_name
     if not title:
         return trail
-    text = " | ".join(content)[:TRAIL_MAX_CHARS]
-    entry = f"{title}: {text}"
+    return _extend_trail_entry(
+        trail,
+        title=title,
+        text=_informative_text(content, max_chars=TRAIL_MAX_CHARS),
+        max_entries=max_entries,
+    )
+
+
+def _tool_trail_title(action: Action) -> str:
+    """Name a tool answer by the question it answered (pure).
+
+    Keyed by the query rather than the tool, so asking the same thing twice
+    replaces one entry while two different questions both survive — the same
+    bargain the window key strikes.
+    """
+    if isinstance(action, WebSearch):
+        return f"web_search {action.query}"
+    if isinstance(action, WebFetch):
+        return f"web_fetch {action.url}"
+    if isinstance(action, CallTool):
+        return f"call_tool {action.tool}"
+    return action.type
+
+
+def _extend_trail_entry(
+    trail: tuple[str, ...],
+    *,
+    title: str,
+    text: str,
+    max_entries: int,
+) -> tuple[str, ...]:
+    """Record one piece of evidence under ``title``, replacing any older one."""
+    if not title or not text:
+        return trail
+    entry = f"{title}: {text[:TRAIL_MAX_CHARS]}"
     prefix = f"{title}: "
     replaced = tuple(entry if line.startswith(prefix) else line for line in trail)
     if replaced != trail or any(line.startswith(prefix) for line in trail):
@@ -621,6 +692,16 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
     action = decision.action
     route = _route_for(action)
     step_label = f"step_{state.step_index}:{action.type}"
+    if decision.sub_goal:
+        # What the step was *for*, not just which verb it used. The history a
+        # model was given read "step_29:mouse_click", which is no memory at
+        # all: measured on a real run, the agent opened the first story's
+        # comments page, went back, and opened it again — writing "opening
+        # that link advances the required review of the first story" at step
+        # 31, because nothing it could see said it had already been there five
+        # times. Its own stated intent is the cheapest true record of that,
+        # and it costs one line per step.
+        step_label = f"{step_label} — {decision.sub_goal[:SUB_GOAL_LABEL_MAX_CHARS]}"
     next_state = WorkingState(
         goal=state.goal,
         completed_steps=state.completed_steps,
@@ -781,6 +862,14 @@ class OodaRunner:
     # controls what is drawn onto the picture.
     set_of_marks_enabled: bool = True
     window_probe: Callable[[], FocusedWindow] | None = None
+    #: The *system's* frontmost window, as distinct from ``window_probe``,
+    #: which in background mode reports the target's own window. Only one
+    #: question needs this: whether the keyboard would reach the target.
+    frontmost_probe: Callable[[], FocusedWindow] | None = None
+    #: Told when the agent moves to a different application, so perception
+    #: outside the loop (which pid to snapshot, whose window to read) follows
+    #: it there instead of staying on the app the run was launched against.
+    on_working_app: Callable[[str], None] | None = None
     ax_probe: Callable[[], AxProbeResult] | None = None
     # Semantic postcondition probe for typed/pasted text: returns the focused
     # text field's current AXValue, or None when not determinable.
@@ -863,6 +952,7 @@ class OodaRunner:
         self._sub_goals: list[str] = []
         # The skill mounted by RETRIEVE in the current run (Law 3.2).
         self._skill: SkillDefinition | None = None
+        self._working_app: str | None = None
         # Best-effort perception warnings are logged once per run, then
         # demoted to debug: a permanently-failing probe (e.g. consent missing)
         # must not spam one line per step, but the first failure is still loud.
@@ -875,10 +965,13 @@ class OodaRunner:
         # staleness gate compares it against a reading taken at actuation time.
         self._decision_window: tuple[str, str] | None = None
         self._stale_rejections: int = 0
+        # Search misses streak: prevents infinite search retry loops.
+        self._consecutive_search_misses: int = 0
         # Stuck-loop guard (Law 2): the same physical intent repeated while
         # the layout signature does not move.
         self._last_physical: Action | None = None
         self._stuck_streak: int = 0
+        self._last_verdict: Evidence | None = None
         # The action awaiting a progress verdict, and the observation
         # signature captured just before it ran.
         self._pending_action: Action | None = None
@@ -1122,8 +1215,28 @@ class OodaRunner:
                 # next turn reasons over — so it goes into the working state
                 # the same way a failure diagnostic does. Nothing physical
                 # happened, so there is nothing to verify against the screen.
+                answer = self._run_tool(outcome.action)
                 state = replace(
-                    state, last_error=None, tool_result=self._run_tool(outcome.action)
+                    state,
+                    last_error=None,
+                    tool_result=answer,
+                    # Also kept as evidence, not only as this turn's answer.
+                    # ``tool_result`` lasts one turn, on the sound grounds that
+                    # a fetched page must not argue with what is now on screen.
+                    # But a research goal's findings live *entirely* in these
+                    # answers, and dropping them left the agent with no record
+                    # it had ever searched: measured on a real run of "research
+                    # the latest AI news, then write me a summary in Notes", it
+                    # ran the same search six times in three minutes, each turn
+                    # reasoning from scratch. What a tool returned is machine-
+                    # read, like the screen, and belongs where the rest of what
+                    # the run has found already lives.
+                    observed_trail=_extend_trail_entry(
+                        state.observed_trail,
+                        title=_tool_trail_title(outcome.action),
+                        text=answer,
+                        max_entries=TRAIL_MAX_ENTRIES,
+                    ),
                 )
             elif outcome.route == "internal_skill":
                 # Explicit Stage 2: the provider asked for this skill by id;
@@ -1268,6 +1381,7 @@ class OodaRunner:
             # here reaches the app wherever it is, so bringing it forward buys
             # nothing and costs exactly the thing the mode exists to protect.
             LOGGER.info("ooda background mode: not fronting %r", action.app)
+            self._retarget(action.app)
             # Nothing was actuated, so no witness has anything to say — which
             # is silence, not a miss, and the recovery ladder must not treat it
             # as one.
@@ -1287,6 +1401,8 @@ class OodaRunner:
 
         if not quiet:
             self._execute_physical(action)
+            if isinstance(action, ActivateApp):
+                self._retarget(action.app)
         else:
             # The quiet press already touched the host; the cached OBSERVE
             # frame is stale for exactly the same reason.
@@ -1296,9 +1412,10 @@ class OodaRunner:
         self._last_capture_hash = None
         self._last_screenshot_b64 = None
 
-        return self._verify(
+        self._last_verdict = self._verify(
             action, expectation, before, before_ui, before_content, before_window
         )
+        return self._last_verdict
 
     def _pre_action_frame(self, expectation: ActionExpectation) -> ScreenCapture | None:
         """The frame the bounds check and (optionally) the pixel witness read.
@@ -1539,17 +1656,17 @@ class OodaRunner:
         if not self.app_is_pinned or not current.app_name:
             return
         if (
-            app_evidence(self.app, current.app_name, current.bundle_id)
+            app_evidence(self.working_app, current.app_name, current.bundle_id)
             is not Evidence.CONTRADICTED
         ):
             return
         LOGGER.warning(
             "focus drifted to %r; re-activating %r before %s",
             current.app_name,
-            self.app,
+            self.working_app,
             action.type,
         )
-        self.execute_physical(ActivateApp(type="activate_app", app=self.app))
+        self.execute_physical(ActivateApp(type="activate_app", app=self.working_app))
         try:
             after = self.window_probe() if self.window_probe is not None else None
         except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
@@ -1734,7 +1851,14 @@ class OodaRunner:
             return state
         self._pending_action = None
         moved = observation_signature(self._observation) != self._pre_action_signature
-        if self._same_physical(pending) and not moved:
+        # The signature is the cheap change detector; the witnesses are the
+        # careful one, and when they disagree the careful one is right. A click
+        # into an already-focused text field moves no title and no element
+        # list, so the signature calls it "nothing happened" — while
+        # verification, which looked at the field itself, confirmed it. Three
+        # such clicks used to convince the guard the run was stuck.
+        confirmed = self._last_verdict is Evidence.CONFIRMED
+        if self._same_physical(pending) and not moved and not confirmed:
             self._stuck_streak += 1
         else:
             self._stuck_streak = 0
@@ -2103,19 +2227,78 @@ class OodaRunner:
 
         Clicks and text have accessibility equivalents; hotkeys, scrolling and
         dragging do not, so they go through the global event stream — which
-        means the focus gate must bring the target forward for them to land
-        where they are aimed. That is correct, but it silently ends the one
-        promise the mode makes, and a user who asked to keep working in their
-        own window deserves to know the moment it stops holding rather than
-        discovering it when their window drops behind.
+        delivers them to whatever is frontmost. This said the target was
+        "coming to the front" and then did not bring it: only pointer actions
+        reach the focus gate, so a hotkey was aimed at whichever window
+        happened to own the screen. Saying it and doing it are now the same
+        act, which is the only version of this sentence that is true.
+
+        The user is told each time, because a mode whose whole promise is
+        "your window stays where it is" owes them the moment it stops holding,
+        rather than letting them discover it when their window drops behind.
         """
         if self.quiet_press is None and self.quiet_type is None:
+            return
+        if not self.app:
+            return
+        if isinstance(action, (MouseClick, TypeText, ClipboardPaste)):
+            # These have an accessibility equivalent and merely declined it
+            # this once — the element refused, or the keyboard is already
+            # here. Their focus is the positional gate's business, which
+            # re-asserts the target only when the screen has actually drifted.
             return
         LOGGER.warning(
             "background mode: %s has no accessibility equivalent, so %r is "
             "coming to the front for it",
             action.type,
             self.app,
+        )
+        self.execute_physical(ActivateApp(type="activate_app", app=self.app))
+
+    @property
+    def working_app(self) -> str:
+        """The application this run is working in *now*.
+
+        Not necessarily the one it was launched against. "Research the latest
+        AI news, then write me a summary in Notes" is two applications, and
+        ``activate_app`` is how the agent says it has moved to the second.
+
+        The focus gate exists to catch *involuntary* drift — a dialog, a
+        notification, the user reaching for their own window. A switch the
+        agent asked for is none of those, and treating it as one made a
+        two-application goal impossible: measured on a real run, the agent
+        activated Notes, clicked its "New Note" button, and the gate
+        re-activated Chrome first so the click landed in the browser. It went
+        round that circle four times and never wrote a word.
+        """
+        return self._working_app or self.app
+
+    def _retarget(self, app: str) -> None:
+        """Follow the agent to the application it just asked for."""
+        if not app or app == self._working_app:
+            return
+        LOGGER.info("ooda working app is now %r", app)
+        self._working_app = app
+        if self.on_working_app is not None:
+            self.on_working_app(app)
+
+    def _target_owns_the_screen(self) -> bool:
+        """Is the run's application the one the keyboard would reach?
+
+        Answered by the system, not by the target-scoped window reading that
+        background mode uses for perception — that one names the target by
+        construction and would say yes forever.
+        """
+        if self.frontmost_probe is None or not self.app:
+            return False
+        try:
+            frontmost = self.frontmost_probe()
+        except Exception as exc:  # noqa: BLE001 - a perception gap stays quiet
+            LOGGER.debug("frontmost probe failed: %s", exc)
+            return False
+        return (
+            app_evidence(self.working_app, frontmost.app_name, frontmost.bundle_id)
+            is Evidence.CONFIRMED
         )
 
     def _typed_quietly(self, action: Action) -> bool:
@@ -2132,6 +2315,16 @@ class OodaRunner:
         if not isinstance(action, (TypeText, ClipboardPaste)):
             return False
         if not action.text:
+            return False
+        if self._target_owns_the_screen():
+            # Nothing left to buy. The quiet write exists to avoid taking the
+            # keyboard, and the keyboard is already here; what it costs is
+            # fidelity. Measured on Chrome's address bar: the write returned
+            # true, the field showed nothing, Return did nothing, and the agent
+            # repeated the sequence thirty-three times because a write that
+            # reports success and changes nothing verifies as inconclusive,
+            # and inconclusive never fails an action. Real keystrokes, on the
+            # same field, navigated first try.
             return False
         try:
             return self.quiet_type(action.text)

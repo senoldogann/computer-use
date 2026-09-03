@@ -379,6 +379,20 @@ class ActuationClient:
             raise DriverRpcError(method="focused_window", driver_message=message)
         return FocusedWindow.model_validate(response)
 
+    def app_window(self, pid: int) -> FocusedWindow:
+        """The same reading for one application, in front or not.
+
+        :meth:`focused_window` answers "what is the user looking at", which is
+        the wrong question in background mode: the target is deliberately
+        behind something else, so the system-wide reading names a window the
+        agent is not acting on and does not move when its actions land.
+        """
+        response = self.request("app_window", {"pid": pid})
+        if response.get("ok") != "focused_window":
+            message = str(response.get("message", "unknown driver error"))
+            raise DriverRpcError(method="app_window", driver_message=message)
+        return FocusedWindow.model_validate(response)
+
     def list_apps(self) -> tuple[str, ...]:
         """Display names of running applications with on-screen windows.
 

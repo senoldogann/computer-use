@@ -209,11 +209,19 @@ _KIND_GUIDANCE: Final[dict[FailureKind, str]] = {
         "over from an earlier turn, and never do scale math."
     ),
     FailureKind.VERIFICATION: (
-        "Nothing observable changed, so the action did not land where you "
-        "aimed. The element is probably off-screen, covered by an overlay, or "
-        "at a different position than you read. Scroll it into view, dismiss "
-        "any overlay, or reach the same destination another way (e.g. the URL "
-        "bar instead of a link)."
+        # Deliberately does not name a cause. "Nothing changed" has two, and
+        # the diagnostic this is appended to already says which — it reads the
+        # accessibility element under the point. Asserting "the action did not
+        # land where you aimed" here contradicted that diagnostic whenever the
+        # coordinate had in fact been right, so a live run was told in one
+        # breath not to re-aim and that it had aimed wrong.
+        "The action ran and nothing observable changed, which has two causes. "
+        "The diagnosis above says which: if it named the control you meant, do "
+        "not re-aim — that control is either already in the state you want, or "
+        "it needs a different interaction. If it named nothing, the target is "
+        "off-screen, covered by an overlay, or not where you read it: scroll it "
+        "into view, dismiss the overlay, or reach the same destination another "
+        "way (e.g. the URL bar instead of a link)."
     ),
     FailureKind.TEXT_PLACEMENT: (
         "The text went somewhere other than the field you intended. Click the "

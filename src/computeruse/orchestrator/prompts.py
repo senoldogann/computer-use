@@ -308,6 +308,27 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
                 tuple(f"{i}. {title}" for i, title in enumerate(state.open_tabs, 1)),
             )
         )
+    if state.observed_trail:
+        # What the machine showed on the screens this run has already visited.
+        # The auditor has always been given this, on the grounds that a goal
+        # spanning two windows has evidence that cannot all be on screen at
+        # once. The agent doing the work needs it for the same reason and was
+        # not given it: measured on a real run of "open the first three
+        # stories' comment pages and report each count", the agent read the
+        # first story's 340 comments, navigated back, and re-opened the first
+        # story — believing, correctly given what it could see, that it had
+        # not done it yet. It repeated that for the rest of its budget. A goal
+        # that collects anything is unreachable while the collection is
+        # invisible to the collector.
+        observed.append(
+            ObservedSection(
+                "Text observed on screens you visited EARLIER in this run "
+                "(read from the machine, not your own account of it) — this "
+                "is what you have already found, so build on it instead of "
+                "gathering it again:",
+                state.observed_trail,
+            )
+        )
     if state.mcp_tools:
         # Names and descriptions written by external servers. They belong in
         # this block for the same reason the screen does: someone other than

@@ -16,6 +16,7 @@ pub enum Request {
     Ping,
     Health,
     FocusedWindow,
+    AppWindow(AppWindowParams),
     ListApps,
     HotkeyState,
     MouseMove(MouseMoveParams),
@@ -32,6 +33,20 @@ pub enum Request {
     AppPid(AppPidParams),
     ActivateApp(ActivateAppParams),
     ClipboardPaste(ClipboardPasteParams),
+}
+
+/// Ask one application which window it has focused, instead of asking the
+/// system which application is in front.
+///
+/// Background mode never brings the target forward, so the system-wide answer
+/// describes whatever the *user* is doing. Measured: an agent driving Chrome
+/// from behind was shown the same foreign window title for twenty-five
+/// consecutive steps and looped, because the one signal that says where it is
+/// never moved.
+#[derive(Debug, Deserialize)]
+pub struct AppWindowParams {
+    /// The application to ask. Its focused window is the one being acted on.
+    pub pid: u32,
 }
 
 /// Ask the element *under a point* to activate itself, rather than sending a

@@ -17,12 +17,15 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.schemas import (
     AgentTurn,
+    CallTool,
     ClipboardPaste,
     Finish,
     LoadSkill,
     MouseClick,
     PressHotkey,
     Wait,
+    WebFetch,
+    WebSearch,
 )
 from computeruse.security.autonomy import (
     AutonomyLevel,
@@ -68,6 +71,82 @@ def test_benign_click_is_none() -> None:
 
 def test_routine_marker_is_routine() -> None:
     assert classify_risk(_turn(sub="confirm dialog", type="press_hotkey", key="enter")) is Risk.ROUTINE
+
+
+def test_prose_that_mentions_a_command_is_not_one() -> None:
+    """Writing *about* shutdown is not shutting anything down.
+
+    Measured on a live run of "research the AI news and write me a summary in
+    Notes": the agent produced a correct 1,575-character summary whose first
+    bullet reported an "automated shutdown" capability, and pasting that
+    article into a note classified as issuing a shutdown command. An unattended
+    run at full autonomy stopped to ask permission, and died waiting.
+    """
+    article = (
+        "Güncel Yapay Zekâ Haberleri Özeti\n3 Eylül 2026\n\n"
+        "• OpenAI: şirket mektubuna göre yapay zekâ araçları için "
+        "\u201cotomatik kapatma\u201d (automated shutdown) yetenekleri "
+        "geliştiriyor. Şirket ayrıca sistemlerin kullandığı dijital araçları "
+        "daha yakından izlemeyi planlıyor. " + "Ayrıntılar sürüyor. " * 40
+    )
+    turn = AgentTurn(
+        thought="",
+        sub_goal="özeti nota yapıştır",
+        action=ClipboardPaste(type="clipboard_paste", text=article),
+    )
+    assert classify_risk(turn) is Risk.NONE
+
+
+def test_a_command_stays_a_command_however_it_is_dressed() -> None:
+    """The exemption is for prose, and only for prose."""
+    def paste(text: str) -> AgentTurn:
+        return AgentTurn(
+            thought="",
+            sub_goal="type it",
+            action=ClipboardPaste(type="clipboard_paste", text=text),
+        )
+
+    # A command line, whichever half you read.
+    assert classify_risk(paste("echo hi; rm -rf ~")) is Risk.DESTRUCTIVE
+    # A command at the head of a long payload is still a command.
+    assert classify_risk(paste("shutdown -h now\n" + "a" * 900)) is Risk.DESTRUCTIVE
+
+
+def test_reading_the_web_is_not_a_dialog_button() -> None:
+    """A fetch presses nothing, so its prose must not be scanned for buttons.
+
+    The markers name UI controls the agent might press. Matching them against
+    the model's narration stopped a live run dead: it asked to fetch a page
+    "to confirm its title and comment count" and the word "confirm" made a
+    network read look like someone pressing OK on a dialog. ``finish``,
+    ``wait`` and ``load_skill`` were exempted for exactly this reason and the
+    web tools were not added when they arrived.
+    """
+    fetch = AgentTurn(
+        thought="read it",
+        sub_goal="Read the page text to confirm its title and comment count",
+        action=WebFetch(type="web_fetch", url="https://example.com/"),
+    )
+    search = AgentTurn(
+        thought="look it up",
+        sub_goal="Search to confirm the release date",
+        action=WebSearch(type="web_search", query="release date"),
+    )
+    assert classify_risk(fetch) is Risk.NONE
+    assert classify_risk(search) is Risk.NONE
+    assert decide_permission(AutonomyLevel.GUARDED, classify_risk(fetch)) is (
+        PermissionDecision.ALLOW
+    )
+
+
+def test_an_mcp_tool_is_still_someone_elses_program() -> None:
+    """``call_tool`` runs code the operator did not write; it keeps its scrutiny."""
+    turn = AgentTurn(
+        thought="use it",
+        sub_goal="delete the stale records",
+        action=CallTool(type="call_tool", tool="db.exec", arguments={}),
+    )
+    assert classify_risk(turn) is Risk.DESTRUCTIVE
 
 
 def test_level0_observer_blocks_everything() -> None:

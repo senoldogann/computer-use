@@ -44,6 +44,36 @@ def test_typed_focused_window_via_client() -> None:
     assert (focused.cursor_x, focused.cursor_y) == (420.0, 300.0)
 
 
+def test_app_window_asks_one_application_rather_than_the_system() -> None:
+    """Background mode's sense of place, end to end through the driver.
+
+    ``focused_window`` answers "what is the user looking at", which is the
+    wrong question when the target is deliberately kept behind another window:
+    the reading names someone else's window and does not move when the agent's
+    actions land. Measured on a real run, the agent drove Chrome from behind
+    while being shown the same foreign title for twenty-five consecutive steps,
+    and looped — opening a comments page and going back, over and over.
+    """
+    payload = rpc_call({"method": "app_window", "params": {"pid": 4242}})
+    assert payload.get("ok") == "focused_window"
+    assert payload.get("app_name") == "Safari"
+
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        window = client.app_window(4242)
+    assert window_summary(window) == FIXTURE_SUMMARY
+
+
+def test_app_window_refuses_a_process_it_does_not_have() -> None:
+    """An unknown pid is a caller bug, not an empty window worth reporting."""
+    with ActuationClient(str(SOCKET_PATH), connect_retries=1) as client:
+        try:
+            client.app_window(999999)
+        except DriverRpcError as exc:
+            assert "999999" in str(exc)
+        else:
+            raise AssertionError("an unknown pid should be refused, not answered")
+
+
 def test_window_summary_is_pure_and_compact() -> None:
     focused = FocusedWindow(
         pid=1,

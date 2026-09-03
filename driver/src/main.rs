@@ -237,6 +237,19 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                 Err(BackendError(message)) => Response::Error { message },
             };
         }
+        Request::AppWindow(params) => {
+            return match backend.app_window(params.pid) {
+                Ok(focused) => Response::FocusedWindow {
+                    pid: focused.pid,
+                    app_name: focused.app_name,
+                    bundle_id: focused.bundle_id,
+                    window_title: focused.window_title,
+                    cursor_x: focused.cursor_x,
+                    cursor_y: focused.cursor_y,
+                },
+                Err(BackendError(message)) => Response::Error { message },
+            };
+        }
         Request::ListApps => {
             return match backend.list_apps() {
                 Ok(apps) => Response::ListApps { apps },

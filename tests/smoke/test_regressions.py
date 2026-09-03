@@ -30,8 +30,10 @@ from computeruse.orchestrator.schemas import (
     MouseScroll,
     PressHotkey,
     TypeText,
+    WebFetch,
 )
 from computeruse.skills.distiller import Trajectory, signature_of
+from computeruse.vision import FocusedWindow
 from computeruse.vision.coordinates import Point
 from tests.smoke.conftest import SOCKET_PATH, rpc_call
 
@@ -479,3 +481,171 @@ def test_leaving_the_background_is_announced(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         runner.run(goal="scroll in the background")
     assert any("coming to the front" in record.getMessage() for record in caplog.records)
+
+
+def test_a_tool_answer_survives_the_turn_that_asked_for_it(monkeypatch) -> None:
+    """A research goal's findings live entirely in tool answers.
+
+    ``tool_result`` lasts one turn, on the sound grounds that a fetched page
+    must not argue with what is now on screen. But dropping it left the agent
+    with no record it had ever searched: measured on a real run of "research
+    the latest AI news, then write me a summary in Notes", it ran the same
+    search six times in three minutes, reasoning from scratch each turn.
+    """
+    seen: list[tuple[str, ...]] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        seen.append(state.observed_trail)
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="look it up",
+                action=WebFetch(type="web_fetch", url="https://example.com/ai"),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    monkeypatch.setattr(
+        "computeruse.orchestrator.loop.fetch_page",
+        lambda _url: "Model X ships today, says the vendor.",
+    )
+    OodaRunner(
+        provider=provider,
+        execute_physical=lambda _a: None,
+        max_steps=5,
+    ).run(goal="research the latest AI news")
+
+    assert seen[0] == ()
+    assert any("Model X ships" in entry for entry in seen[-1]), seen[-1]
+
+
+def test_the_run_follows_the_agent_to_a_second_application() -> None:
+    """A two-application goal must not be dragged back to the first one.
+
+    "Research the latest AI news, then write me a summary in Notes" is two
+    applications, and ``activate_app`` is how the agent says it has moved. The
+    focus gate is for *involuntary* drift — a dialog, a notification, the user
+    reaching for their own window — and treating a deliberate switch as drift
+    made the second half of such a goal impossible: measured on a real run, the
+    agent activated Notes, clicked its "New Note" button, and the gate
+    re-activated Chrome first so the click landed in the browser. It went round
+    that circle four times and never wrote a word.
+    """
+    executed: list[Action] = []
+    followed: list[str] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="move to Notes",
+                action=ActivateApp(type="activate_app", app="Notes"),
+            )
+        if state.step_index == 1:
+            return AgentTurn(
+                thought="",
+                sub_goal="start a note",
+                action=MouseClick(type="mouse_click", x=605, y=63),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        window_probe=lambda: FocusedWindow(
+            pid=2, app_name="Notlar", bundle_id="com.apple.Notes"
+        ),
+        on_working_app=followed.append,
+        app="Google Chrome",
+        app_is_pinned=True,
+        max_steps=5,
+    ).run(goal="research, then write it into Notes")
+
+    assert followed == ["Notes"]
+    # No re-activation of Chrome between the switch and the click.
+    assert [a.type for a in executed] == ["activate_app", "mouse_click"]
+    assert executed[0].app == "Notes"  # type: ignore[union-attr]
+
+
+def test_leaving_the_background_actually_brings_the_target_forward() -> None:
+    """Saying it and doing it have to be the same act.
+
+    The announcement claimed the target was "coming to the front" and nothing
+    brought it: only pointer actions reach the focus gate, so a hotkey went
+    into the global event stream aimed at whichever window happened to own the
+    screen. Measured on a real run, an agent pressed Cmd+L and Return thirty
+    times against a browser it never fronted.
+    """
+    executed: list[Action] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="focus the address bar",
+                action=PressHotkey(type="press_hotkey", modifiers=["command"], key="l"),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        quiet_press=lambda _p: True,
+        app="Google Chrome",
+        max_steps=5,
+    ).run(goal="open the address bar")
+    assert [a.type for a in executed] == ["activate_app", "press_hotkey"]
+
+
+def test_the_quiet_write_stands_down_once_the_keyboard_is_here() -> None:
+    """It buys nothing when the target already owns the screen, and costs fidelity.
+
+    Measured on Chrome's address bar with the app frontmost: the accessibility
+    write returned true, the field showed nothing, Return did nothing, and the
+    agent repeated the sequence thirty-three times — a write that reports
+    success and changes nothing verifies as inconclusive, and inconclusive
+    never fails an action. Real keystrokes navigated on the first try.
+    """
+    executed: list[Action] = []
+    quiet_calls: list[str] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="type the address",
+                action=TypeText(type="type_text", text="example.com", wpm=40),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    def quiet_type(text: str) -> bool:
+        quiet_calls.append(text)
+        return True
+
+    OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        quiet_type=quiet_type,
+        frontmost_probe=lambda: FocusedWindow(
+            pid=1, app_name="Google Chrome", bundle_id="com.google.Chrome"
+        ),
+        app="Google Chrome",
+        max_steps=5,
+    ).run(goal="type the address")
+    assert quiet_calls == [], "the quiet write must not be attempted"
+    assert [a.type for a in executed] == ["type_text"]

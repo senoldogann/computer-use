@@ -33,5 +33,8 @@ data/
 # Third-party agent-tooling scaffolding vendored by local tools, not project
 # source (same reason `data/` is ignored: it is a cache of someone else's repo).
 .agents/
-skills/
-skills-lock.json
+# Anchored to the repository root: unanchored, `skills/` also matched the
+# source package `src/computeruse/skills/`, so a new module added there was
+# silently ignored by `git add` and would have gone missing from a commit.
+/skills/
+/skills-lock.json

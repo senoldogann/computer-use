@@ -150,7 +150,7 @@ def openai_model(
     api_key: str | None = None,
     base_url: str | None = None,
     timeout_seconds: float = 180.0,
-    max_tokens: int = 512,
+    max_tokens: int = 2048,
     http_open: Opener | None = None,
     stats_sink: Callable[[ModelCallStats], None] | None = None,
 ) -> Callable[..., str]:
@@ -200,8 +200,16 @@ def openai_model(
             # The action contract in the prompt instructs JSON; this makes the
             # API enforce it, so parse_decision rarely needs its corrective path.
             "response_format": {"type": "json_object"},
-            # A single JSON action decision is ~100-200 tokens; cap at 512 to
-            # prevent the model from rambling and wasting latency/cost.
+            # A click decision is ~100-200 tokens, and 512 was set for that.
+            # But `type_text` and `clipboard_paste` carry their payload inside
+            # the same JSON object, so the cap silently made every goal that
+            # writes something longer than a sentence impossible: the object
+            # was cut mid-string and came back as a contract violation, not as
+            # truncated text. Measured on "research the AI news and write me a
+            # summary in Notes" — four consecutive invalid decisions, every one
+            # of them exactly 512 completion tokens, and the run gave up
+            # without ever typing a word. Still bounded, and unspent capacity
+            # costs nothing.
             # Newer OpenAI models require max_completion_tokens instead of max_tokens.
             "max_completion_tokens": max_tokens,
         }
@@ -253,6 +261,15 @@ def openai_model(
         content = message.get("content")
         if not isinstance(content, str):
             raise OpenAIError(f"OpenAI response missing text content: {payload}")
+        # A cut-off reply is not a malformed one, and saying so is the
+        # difference between a model that shortens its answer and one that
+        # keeps re-sending the same too-long object until the run gives up.
+        if choice.get("finish_reason") == "length":
+            raise OpenAIError(
+                f"OpenAI stopped at the {max_tokens}-token completion limit, so "
+                "the JSON object is cut off and cannot be parsed. Whatever text "
+                "the action carries has to be shorter."
+            )
         # usage is optional on the wire; when absent (proxies, some fakes) the
         # sink still gets the latency with zeroed token counts.
         usage_raw = payload.get("usage")

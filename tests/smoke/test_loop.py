@@ -346,6 +346,56 @@ def test_stuck_guard_ignores_distinct_actions() -> None:
     assert len(executed) == 6
 
 
+def test_a_confirmed_repeat_is_not_a_stuck_loop() -> None:
+    """Verification outranks the progress signature when the two disagree.
+
+    The signature is the cheap change detector — frame, window title, element
+    list — and it deliberately leaves out the content digest, which is what the
+    witnesses read. So a click that changes only text moves no signature while
+    verification, looking at that very text, confirms it. Measured on a real
+    run of "research this, then write it into Notes": three confirmed clicks
+    into the note body convinced the guard the run was stuck, and every later
+    click on that field was refused before it reached the host. The agent could
+    never type, and spent the rest of its budget searching the web instead.
+    """
+    reading = 0
+
+    def ax_probe() -> AxProbeResult:
+        nonlocal reading
+        reading += 1
+        # Same elements every time (signature unmoved); different text every
+        # time (the witnesses see the field respond).
+        return AxProbeResult(
+            summaries=("TextArea 'note body' at (945,551) 600x400",),
+            content=(f"note body revision {reading}",),
+        )
+
+    clicks = 0
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        nonlocal clicks
+        if clicks < 5:
+            clicks += 1
+            return AgentTurn(
+                thought="",
+                sub_goal="focus the note body",
+                action=MouseClick(type="mouse_click", x=945, y=551),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    final = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _a: None,
+        ax_probe=ax_probe,
+        max_steps=12,
+    ).run(goal="write the summary into the note")
+    assert len(final.completed_steps) == 6, "no click should have been refused"
+
+
 def test_jittered_repeats_without_progress_trip_the_guard() -> None:
     """A model jittering click coords with no screen change aborts (regression).
 
