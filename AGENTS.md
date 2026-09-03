@@ -31,7 +31,7 @@ Every line of code, agent decision, and architectural module within this reposit
 3. **Continuous Skill Evolution**: Existing skills must be updated with refined coordinates, alternative UI states, or shortcut paths whenever repeated executions discover optimizations or handle UI updates.
 
 ### Law 4: Multi-Tiered Memory & Experiential Continuity
-1. **Episodic Memory**: Full trace of past sessions, successful task trajectories, and failure retrospectives saved in structured formats.
+1. **Episodic Memory**: Full trace of past sessions, successful task trajectories, and failure retrospectives saved in structured formats. Above the episode sits the **mission** (`orchestrator/mission.py`): the durable work item, carrying its plan and therefore its progress across the runs that attempt it. Resuming hands over `remaining_goal` — what is actually left — never the original goal, because on a physical host re-running a completed sub-goal is not wasted work, it is that step happening again.
 2. **Semantic Knowledge Store**: Searchable memory index containing application-specific UI patterns, user preferences, coordinate maps, and shortcut behaviors.
 3. **Working Context (Scratchpad)**: Minimal, clean, rolling state tracking current goal, completed steps, pending sub-tasks, and latest visual diffs.
 
@@ -40,7 +40,7 @@ Every line of code, agent decision, and architectural module within this reposit
    - **Level 0 (Observer / Advisory)**: Recommends actions and highlights UI regions without taking control.
    - **Level 1 (Supervised / Step-by-Step)**: Proposes each action and waits for user confirmation before physical execution.
    - **Level 2 (Guarded Autonomy)**: Executes routine actions autonomously; pauses and prompts user confirmation for destructive actions (e.g., file deletion, payments, terminal commands, email dispatch).
-   - **Level 3 (Full Autonomy / Auto Mode)**: Unattended execution with continuous self-monitoring, safety boundary checks, and automatic fallback on anomalies.
+   - **Level 3 (Full Autonomy / Auto Mode)**: Unattended execution with continuous self-monitoring, safety boundary checks, and automatic fallback on anomalies. A destructive action still requires a human at Level 3 — but unattended, "requires a human" cannot mean "wait at a prompt nobody will answer". The run **parks** it: the proposed action, the control it targets, the sub-goal it serves and the guard's classification are written to the approval queue (`security/approvals.py`), the mission is marked `blocked` rather than `failed` (`orchestrator/mission.py`, so the attempt is refunded and the work stays resumable), and the session moves on. The same question is never asked twice while it is unanswered. A human answers with `--approve`/`--deny`, which returns the mission to the queue; the approval is a *recorded answer*, never a remote control — the next run reaches that step itself.
 2. **Emergency Kill-Switch**: The user must always be able to reclaim physical control instantly. Implemented channels: **Command+Shift+Escape** (global event-tap hotkey — the driver reports `hotkey_state` and aborts the current action), **SIGINT/SIGTERM** (Ctrl-C), and **rapid cursor shake** (fail-safe interrupt). When tripped, all queued actions are dropped and the run ends; the user can always just grab the mouse.
 
 ### Law 6: Architectural Purity & Code Standards

@@ -50,6 +50,7 @@ src/computeruse/
 │   ├── prompts.py   # Law 2.1: weak-model scaffolding (prompt + parse + retry)
 │   ├── planner.py   # Phase 3: hierarchical goal decomposition + session checkpoints
 │   ├── supervisor.py# ADR-1: bounded respawn of a driver that died mid-run
+│   ├── mission.py   # Law 4: durable work items — blocked vs failed, resume
 │   └── client.py    # typed JSON-RPC client to the Rust driver
 ├── providers/
 │   └── openai.py    # `--model openai` transport (stdlib urllib; no SDK dep)
@@ -62,6 +63,7 @@ src/computeruse/
 │   ├── episodic.py   # EpisodicStore; known_signatures feeds the distiller
 │   └── semantic.py   # Law 4.2: SemanticStore (app knowledge) + pure search
 ├── security/
+│   ├── approvals.py  # Law 5.1: park an action for a human instead of hanging
 │   ├── killswitch.py # Law 5.2: kill-switch (shake detector + OODA gate)
 │   └── autonomy.py   # Law 5.1: Level 0-3 guard, destructive-action detection
 └── vision/

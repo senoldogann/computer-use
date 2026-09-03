@@ -88,7 +88,7 @@ class AgentConfig:
     # driver's focused-window probe at run start" (ADR-2 OBSERVE).
     app: str | None = None
     autonomy_level: AutonomyLevel = AutonomyLevel.GUARDED
-    confirm_handler: Callable[[AgentTurn], bool] | None = None
+    confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None
     enable_visual_verification: bool = True
     enable_vision: bool = True
     # Law 5.2: when True (default), the driver's global kill-hotkey poll is
@@ -129,6 +129,11 @@ class AgentConfig:
     # Session checkpoints are written under ``store_dir/checkpoints`` so an
     # interrupted run can be resumed with the same plan.
     enable_planning: bool = False
+    # Called with the plan after every sub-goal transition, so an owner outside
+    # the agent (a mission store, a UI) can persist progress as it happens.
+    # The agent deliberately does not know what a mission is: it reports where
+    # it got to, and whoever asked for the work decides what that means.
+    on_plan_progress: Callable[[GoalPlan], None] | None = None
     # Observability: when set, every step of the run is appended as one JSON
     # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
     # entirely — a run pays nothing for a diagnostic nobody asked for.
@@ -721,6 +726,8 @@ class Agent:
                         plan=current_plan,
                         completed_steps_count=steps_count,
                     ).save(checkpoint_dir)
+                    if self._config.on_plan_progress is not None:
+                        self._config.on_plan_progress(current_plan)
 
                 on_sub_goal_complete_cb = _on_sub_goal_complete
 

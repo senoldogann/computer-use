@@ -84,6 +84,7 @@ from computeruse.orchestrator.schemas import (
     WebSearch,
 )
 from computeruse.orchestrator.trace import StepTrace
+from computeruse.security.approvals import ApprovalRequiredError
 from computeruse.security.killswitch import KillSwitch
 from computeruse.security.permissions import (
     PermissionConfirmationRequired,
@@ -881,7 +882,13 @@ class OodaRunner:
     # a safety verdict about a click has to be able to look at what is
     # under the pointer, not only at how the model described the click.
     guard: Callable[[AgentTurn, Observation], PermissionDecision] | None = None
-    confirm_handler: Callable[[AgentTurn], bool] | None = None
+    # Handed the accessibility title of the control the action targets, not
+    # only the decision: a human answering "may it press this?" needs to know
+    # *what* it is pressing, and the model's own prose is the one account of
+    # that which cannot be trusted (the guard already refuses to classify from
+    # it). ``None`` when nothing sits under the point, or the action is not
+    # positional.
+    confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None
     sensor: Callable[[], ScreenCapture] | None = None
     # Whether ``sensor`` is used for VERIFY (pre/post action pixel comparison).
     # Off = actions still get their AX/window witnesses, just not pixel ones.
@@ -1063,6 +1070,11 @@ class OodaRunner:
             UnrecoverableFailureError,
             KillSwitchTripped,
             BudgetExceededError,
+            # Parked, not failed. The episode is still recorded — the run did
+            # real work before it reached the question, and Law 4.1 wants that
+            # work kept — but the caller reads the typed error to tell "this
+            # needs you" from "this could not be done".
+            ApprovalRequiredError,
         ) as exc:
             self._finalize(
                 self._last_state,
@@ -1853,7 +1865,8 @@ class OodaRunner:
             )
         if verdict is PermissionDecision.CONFIRM:
             if self.confirm_handler is not None:
-                if self.confirm_handler(decision):
+                target = target_element_label(decision.action, self._observation)
+                if self.confirm_handler(decision, target):
                     return
                 raise PermissionDeniedError(
                     f"action {decision.action.type!r} ({decision.action.model_dump(exclude_none=True)}) "
@@ -2709,6 +2722,15 @@ def failure_retrospective(exc: BaseException) -> str:
         return f"run stopped by its budget: {exc}"
     if isinstance(exc, UnrecoverableFailureError):
         return f"recovery exhausted ({exc.failure.kind.value}): {exc}"
+    if isinstance(exc, ApprovalRequiredError):
+        # Named as a pause rather than a failure, because the next attempt
+        # reads this line: telling it the goal "failed" would have it plan
+        # around an obstacle that is only a question waiting to be answered.
+        return (
+            f"paused for human approval of {exc.request.action_type!r} "
+            f"({exc.request.sub_goal!r}); resumes once approval request "
+            f"{exc.request.request_id!r} is answered"
+        )
     return f"run ended abnormally: {exc}"
 
 

@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from computeruse.agent import Agent, AgentConfig
 from computeruse.autonomous import (
@@ -64,6 +64,18 @@ from computeruse.orchestrator.loop import (
     UnrecoverableFailureError,
     WorkingState,
 )
+from computeruse.orchestrator.mission import (
+    DEFAULT_MAX_ATTEMPTS,
+    MissionStore,
+    mission_blocked,
+    mission_finished,
+    mission_started,
+    mission_unblocked,
+    new_mission,
+    remaining_goal,
+    resumable,
+)
+from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.orchestrator.supervisor import supervisor_for
@@ -76,14 +88,25 @@ from computeruse.providers.openai import (
     openai_model,
     price_for,
 )
+from computeruse.security.approvals import (
+    ApprovalQueue,
+    ApprovalRequiredError,
+    approval_request_for,
+    goals_awaiting_decision,
+    now_utc,
+    pending_requests,
+)
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionConfirmationRequired,
     PermissionDeniedError,
+    classify_risk,
 )
 from computeruse.security.killswitch import KillSwitch, install_sigint_catcher
 from computeruse.skills.registry import SkillRegistry
 from computeruse.vision.apps import extract_goal_app, infer_target_app
+
+LOGGER: Final = logging.getLogger(__name__)
 
 DEFAULT_SOCKET = "/tmp/actuation-driver.sock"
 DEFAULT_STORE = Path.home() / ".computeruse"
@@ -125,6 +148,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=AUTONOMOUS_REST_SECONDS,
         help="How long to wait between unattended runs "
         f"(default: {AUTONOMOUS_REST_SECONDS:.0f}).",
+    )
+    parser.add_argument(
+        "--approvals",
+        action="store_true",
+        help="List the actions an unattended run parked for your decision, and "
+        "the missions waiting on them. Reads the store; runs nothing.",
+    )
+    parser.add_argument(
+        "--approve",
+        default=None,
+        metavar="REQUEST_ID",
+        help="Approve a parked action and return its mission to the queue. The "
+        "action is NOT performed now — the next run reaches it with your answer "
+        "on record.",
+    )
+    parser.add_argument(
+        "--deny",
+        default=None,
+        metavar="REQUEST_ID",
+        help="Refuse a parked action. Its mission returns to the queue so the "
+        "rest of the work can proceed without it.",
     )
     parser.add_argument(
         "--app",
@@ -465,7 +509,7 @@ def _load_callable(spec: str, kind: str) -> Callable[..., object]:
     return callable_
 
 
-def cli_confirm_handler(turn: AgentTurn) -> bool:
+def cli_confirm_handler(turn: AgentTurn, target_label: str | None) -> bool:
     """Prompt the user on stderr/stdin for actions that require confirmation.
 
     Reads exactly one line from stdin so the channel works both for an
@@ -480,6 +524,10 @@ def cli_confirm_handler(turn: AgentTurn) -> bool:
         file=sys.stderr,
     )
     print(f"   Payload: {turn.action.model_dump(exclude_none=True)}", file=sys.stderr)
+    if target_label:
+        # What the *screen* says the click will hit, which is the fact a person
+        # is actually being asked about.
+        print(f"   Target: {target_label}", file=sys.stderr)
     try:
         line = sys.stdin.readline()
     except (EOFError, KeyboardInterrupt):
@@ -536,6 +584,8 @@ def build_config(
     stats_sink: Callable[[object], None] | None = None,
     budget_guard: Callable[[], None] | None = None,
     driver_recover: Callable[[], None] | None = None,
+    parked_confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None,
+    on_plan_progress: Callable[[GoalPlan], None] | None = None,
 ) -> AgentConfig:
     """Compose the CLI's args into the single immutable config the agent runs.
 
@@ -562,10 +612,21 @@ def build_config(
         completion_check = binding.completion_check
     else:
         provider = load_provider(args.provider, goal)
+    # An unattended session never asks: there is nobody to ask. Reaching the
+    # interactive handler there was the worst of the three possible endings —
+    # ``cli_confirm_handler`` blocks on ``stdin.readline()``, and launched from
+    # a terminal (``isatty()`` is true even when the human has gone home) that
+    # is a session frozen mid-task, holding the machine, until someone returns.
+    # ``parking_confirm_handler`` writes the question down and ends the run
+    # instead, so the work is paused rather than hung or silently lost.
     confirm_handler = (
-        cli_confirm_handler
-        if sys.stdin.isatty() or os.environ.get("COMPUTERUSE_MENU") == "1"
-        else None
+        parked_confirm_handler
+        if parked_confirm_handler is not None
+        else (
+            cli_confirm_handler
+            if sys.stdin.isatty() or os.environ.get("COMPUTERUSE_MENU") == "1"
+            else None
+        )
     )
     return AgentConfig(
         goal=goal,
@@ -598,6 +659,7 @@ def build_config(
         trace_screenshots=getattr(args, "trace_screenshots", False),
         budget_guard=budget_guard,
         driver_recover=driver_recover,
+        on_plan_progress=on_plan_progress,
     )
 
 
@@ -666,6 +728,8 @@ def _run_autonomous_session(
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
     skills = SkillRegistry(store / "skills")
     episodes = EpisodicStore(store / "episodes")
+    missions = MissionStore(store / "missions")
+    approvals = ApprovalQueue(store / "approvals")
     rng = random.Random()
     attempted_goals: list[str] = []
     budget = RunBudget(
@@ -711,6 +775,38 @@ def _run_autonomous_session(
 
     def execute(proposal: GoalProposal) -> None:
         attempted_goals.append(proposal.goal)
+        # The mission is opened *before* the run, so a session killed
+        # mid-action still leaves a record that this work was started and how
+        # far it got. Its attempt is spent here for the same reason.
+        mission = mission_started(
+            new_mission(
+                goal=proposal.goal, app=proposal.app, plan=None, now=now_utc()
+            ),
+            now_utc(),
+        )
+        missions.save(mission)
+
+        # The plan as of the last sub-goal transition. Held here because the
+        # blocked path needs it *after* an exception, when the result object
+        # that would otherwise carry it does not exist.
+        progress: dict[str, GoalPlan | None] = {"plan": None}
+
+        def record_progress(plan: GoalPlan) -> None:
+            progress["plan"] = plan
+            missions.save(mission.model_copy(update={"plan": plan}))
+
+        def park(turn: AgentTurn, target_label: str | None) -> bool:
+            """Write the question down and stop, instead of asking nobody."""
+            request = approval_request_for(
+                turn,
+                goal=proposal.goal,
+                mission_id=mission.mission_id,
+                target_label=target_label,
+                risk=classify_risk(turn, target_label=target_label).value,
+                now=now_utc(),
+            )
+            approvals.submit(request)
+            raise ApprovalRequiredError(request=request)
 
         config = build_config(
             args,
@@ -720,11 +816,82 @@ def _run_autonomous_session(
             stats_sink=stats_sink,
             budget_guard=None if budget.is_unset else budget_guard,
             driver_recover=driver_recover,
+            parked_confirm_handler=park,
+            on_plan_progress=record_progress,
         )
         if proposal.app is not None:
             config = replace(config, app=proposal.app)
-        result = Agent(config).run()
+        try:
+            result = Agent(config).run()
+        except ApprovalRequiredError as exc:
+            # Parked, not failed: the attempt is refunded and the mission waits
+            # for a person rather than being retried into the same question.
+            missions.save(
+                mission_blocked(
+                    mission,
+                    plan=progress["plan"],
+                    reason=str(exc),
+                    approval_id=exc.request.request_id,
+                    now=now_utc(),
+                )
+            )
+            print(
+                f"autonomous  : {proposal.goal!r} -> parked for approval "
+                f"({exc.request.request_id})"
+            )
+            return
+        except Exception:
+            missions.save(
+                mission_finished(
+                    mission, plan=progress["plan"], succeeded=False, now=now_utc()
+                )
+            )
+            raise
+        missions.save(
+            mission_finished(
+                mission, plan=result.state.plan, succeeded=True, now=now_utc()
+            )
+        )
         print(f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps")
+
+    def propose() -> GoalProposal | None:
+        """Unfinished work first, then something new.
+
+        A mission left half-done by a killed run is the most concrete thing
+        memory holds — more concrete than a failed skill, because it is a task
+        that was actually started — and resuming it is what makes work survive
+        the session that began it. ``remaining_goal`` hands over what is left,
+        never the original goal: re-running a completed sub-goal on a physical
+        host is not merely wasteful, it repeats whatever that step did.
+        """
+        # A parked run is still recorded as a failed episode (its work is worth
+        # keeping), and that record is what ``propose_goal`` reads — so without
+        # this the next run re-proposes the goal it just parked and asks the
+        # same question again. Its mission is already held back; this closes
+        # the same hole in the episode channel.
+        waiting = goals_awaiting_decision(approvals.requests())
+        open_work = resumable(
+            missions.missions(), max_attempts=DEFAULT_MAX_ATTEMPTS
+        )
+        for mission in open_work:
+            if mission.goal in waiting:
+                continue
+            return GoalProposal(
+                goal=remaining_goal(mission),
+                app=mission.app,
+                reason=(
+                    f"mission {mission.mission_id} was started and never "
+                    f"finished ({mission.attempts} attempt(s) so far)"
+                ),
+            )
+        proposal = propose_goal(skills, episodes, rng=rng)
+        if proposal is not None and proposal.goal in waiting:
+            LOGGER.info(
+                "autonomous: %r is already waiting on a decision; nothing else to do",
+                proposal.goal,
+            )
+            return None
+        return proposal
 
     done = run_autonomously(
         SessionLimits(
@@ -733,13 +900,73 @@ def _run_autonomous_session(
             rest_seconds=args.rest_seconds,
         ),
         observe=observe,
-        propose=lambda: propose_goal(skills, episodes, rng=rng),
+        propose=propose,
         execute=execute,
         stop=lambda: False,
     )
     print(f"autonomous  : {done} run(s) attempted")
     for goal in attempted_goals:
         print(f"  - {goal}")
+    parked = pending_requests(approvals.requests())
+    if parked:
+        print(f"awaiting you: {len(parked)} action(s) need a decision")
+        for request in parked:
+            target = f" on {request.target_label!r}" if request.target_label else ""
+            print(f"  - [{request.request_id}] {request.action_type}{target} — {request.sub_goal}")
+        print("  review with: computeruse --approvals")
+    return 0
+
+
+def _review_approvals(args: argparse.Namespace) -> int:
+    """List parked actions, or record a decision on one (reads/writes the store).
+
+    Deliberately does not perform the approved action. An approval is a
+    recorded answer, not a remote control: the next run reaches that step
+    itself, with the guard consulting what the human said. Performing it here
+    would act on a screen nobody has looked at since the question was asked.
+    """
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    approvals = ApprovalQueue(store / "approvals")
+    missions = MissionStore(store / "missions")
+
+    decision_id = args.approve or args.deny
+    if decision_id is not None:
+        try:
+            answered = approvals.resolve(
+                decision_id, approved=args.approve is not None, now=now_utc()
+            )
+        except KeyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"{answered.request_id}: {answered.decision}")
+        if answered.mission_id is not None:
+            try:
+                mission = missions.load(answered.mission_id)
+            except KeyError:
+                # The queue outlives the mission store's contents; a decision
+                # is still worth recording even when its mission is gone.
+                print(f"  (mission {answered.mission_id} no longer in the store)")
+                return 0
+            missions.save(mission_unblocked(mission, now_utc()))
+            print(f"  mission {mission.mission_id} is back in the queue")
+        return 0
+
+    parked = pending_requests(approvals.requests())
+    if not parked:
+        print("no actions are waiting for a decision")
+        return 0
+    print(f"{len(parked)} action(s) waiting for a decision:\n")
+    for request in parked:
+        print(f"  [{request.request_id}]")
+        print(f"    goal     : {request.goal}")
+        print(f"    step     : {request.sub_goal}")
+        print(f"    action   : {request.action_type} {request.action}")
+        if request.target_label:
+            print(f"    target   : {request.target_label}")
+        print(f"    risk     : {request.risk}")
+        print(f"    parked   : {request.created_at.isoformat(timespec='seconds')}")
+        print()
+    print("approve with: computeruse --approve <id>   (or --deny <id>)")
     return 0
 
 
@@ -751,6 +978,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # happens". Stream the runner's lines to stderr so the run is observable
     # while the final summary block still lands on stdout at the end.
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+    # Reviewing the queue is a store operation, not a run: it needs no driver,
+    # no model and no goal, so it is dispatched before every check below.
+    if args.approvals or args.approve is not None or args.deny is not None:
+        return _review_approvals(args)
     if args.autonomous is None and not args.goal:
         print("error: --goal is required unless --autonomous is given", file=sys.stderr)
         return 2
