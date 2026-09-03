@@ -13,7 +13,6 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
-
 #: Grammatical filler, carrying no topic at all. Split from the workflow noise
 #: below because they are different kinds of uselessness: these are noise in
 #: any text, those are noise only in this domain.

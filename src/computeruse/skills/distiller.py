@@ -8,16 +8,15 @@ Persistence is the registry's job, not the distiller's.
 
 from __future__ import annotations
 
-import re
-
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
 from computeruse.orchestrator.schemas import Action
-from computeruse.slug import ascii_slug
 from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition
+from computeruse.slug import ascii_slug
 
 
 @dataclass(frozen=True)
