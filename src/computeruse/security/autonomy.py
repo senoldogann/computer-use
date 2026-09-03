@@ -70,98 +70,107 @@ class Risk(Enum):
 # motivated the word-boundary matching below).
 _TYPED_COMMANDS: frozenset[str] = frozenset({"rm", "dd", "mkfs", "shutdown", "reboot"})
 
-# Whole-word *intent* markers. Matching is token-based, NOT substring based:
-# the agent means "delete", "pay", "send" etc. — a verb, not random letters.
+#: The family name a grant uses to cover the typed commands above. Kept
+#: separate from :data:`DESTRUCTIVE_FAMILIES` because these are not verbs a UI
+#: shows — they are things typed at a prompt, and the classifier finds them by
+#: a different rule (see :func:`_looks_like_a_command`).
+SHELL_FAMILY: Final[str] = "shell"
+
+# Whole-word *intent* markers, grouped by the thing being asked for.
+#
+# The grouping is not cosmetic. A flat set answers "is this destructive?" and
+# nothing else, which is all the guard ever needed — but a human delegating
+# authority in advance does not delegate "destructiveness", they delegate
+# *deleting files in Downloads* or *sending mail to the team*. A grant has to
+# name a verb, so the verbs have to exist as names.
+#
+# Matching stays token-based, NOT substring based: the agent means "delete",
+# "pay", "send" — a verb, not random letters. Each family carries its
+# translations because the user's locale must not decide whether the guard
+# fires, or whether a grant they wrote in English covers a Turkish button.
+DESTRUCTIVE_FAMILIES: Final[dict[str, frozenset[str]]] = {
+    # Destroying something that exists.
+    "delete": frozenset(
+        {
+            "delete", "remove", "erase", "wipe", "terminate",
+            "sil", "kaldır", "kaldir", "yoket",
+            "supprimer", "supprime", "effacer", "efface", "détruire", "detruire",
+            "löschen", "lösche", "loeschen", "entfernen", "zerstören", "zerstoren",
+            "borrar", "eliminar",
+            "cancellare", "eliminare",
+            "apagar", "excluir", "destruir",
+            "verwijderen", "vernietigen",
+            # The macOS delete verb is not "delete", it is the Trash — and
+            # "Move to Trash" / "Empty Trash" are the two most common
+            # destructive buttons on the platform this agent runs on. Both
+            # classified as Risk.NONE until they were listed here, so an
+            # unattended run could empty the Trash without asking anyone.
+            "trash", "çöp", "cop", "boşalt", "bosalt",
+            "corbeille", "papierkorb", "papelera", "cestino", "lixeira",
+            "prullenbak",
+        }
+    ),
+    # Spending the user's money.
+    "pay": frozenset(
+        {
+            "pay", "checkout", "purchase",
+            "öde", "ode", "satınal", "satinal",
+            "payer", "paye", "acheter", "achete",
+            "bezahlen", "zahlung", "kaufen",
+            "pagar", "comprar",
+            "pagare", "comprare",
+            "betalen", "kopen",
+            # A subscription is a recurring purchase; the button rarely says
+            # "pay".
+            "buy", "subscribe", "abone", "abonnement", "suscribir",
+        }
+    ),
+    # Putting something in front of another person, irreversibly.
+    "send": frozenset(
+        {
+            "send", "dispatch",
+            "gönder", "gonder",
+            "envoyer", "envoie",
+            "senden",
+            "enviar",
+            "inviare",
+            "versturen",
+        }
+    ),
+    # Changing what software the machine runs.
+    "install": frozenset(
+        {
+            "install", "uninstall",
+            "installieren", "deinstallieren",
+            "desinstaller",
+            "instalar", "desinstalar",
+            "installare", "disinstallare",
+            "installeren", "deïnstalleren",
+        }
+    ),
+    # Replacing existing content or state wholesale.
+    "overwrite": frozenset(
+        {
+            "overwrite", "format",
+            "sıfırla", "sifirla", "formatla",
+            "formatieren",
+            "formatear",
+            # Throwing away work in progress is destroying it, whatever the
+            # button calls itself: "Discard Changes", "Revert", "Reset".
+            "discard", "revert", "reset",
+            "verwerfen", "descartar", "restablecer",
+            "réinitialiser", "reinitialiser",
+        }
+    ),
+    # Acting as the machine's administrator.
+    "admin": frozenset({"sudo"}),
+}
+
+#: Every destructive marker, whatever family it belongs to. Derived rather than
+#: repeated, so a verb added to a family is a verb the guard fires on — the two
+#: cannot drift apart because there is only one of them.
 _DESTRUCTIVE_MARKERS: frozenset[str] = frozenset(
-    {
-        # English
-        "delete",
-        "remove",
-        "uninstall",
-        "pay",
-        "checkout",
-        "purchase",
-        "send",
-        "dispatch",
-        "install",
-        "sudo",
-        "wipe",
-        "erase",
-        "format",
-        "terminate",
-        "overwrite",
-        # Turkish
-        "sil",
-        "kaldır",
-        "kaldir",
-        "öde",
-        "ode",
-        "satınal",
-        "satinal",
-        "gönder",
-        "gonder",
-        "sıfırla",
-        "sifirla",
-        "formatla",
-        "yoket",
-        # French
-        "supprimer",
-        "supprime",
-        "effacer",
-        "efface",
-        "payer",
-        "paye",
-        "acheter",
-        "achete",
-        "envoyer",
-        "envoie",
-        "desinstaller",
-        "détruire",
-        "detruire",
-        # German (umlauts stripped duplicates included: users type both)
-        "löschen",
-        "lösche",
-        "loeschen",
-        "entfernen",
-        "bezahlen",
-        "zahlung",
-        "kaufen",
-        "senden",
-        "installieren",
-        "deinstallieren",
-        "formatieren",
-        "zerstören",
-        "zerstoren",
-        # Spanish
-        "borrar",
-        "eliminar",
-        "pagar",
-        "comprar",
-        "enviar",
-        "instalar",
-        "desinstalar",
-        "formatear",
-        # Italian
-        "cancellare",
-        "eliminare",
-        "pagare",
-        "comprare",
-        "inviare",
-        "installare",
-        "disinstallare",
-        # Portuguese
-        "apagar",
-        "excluir",
-        "destruir",
-        # Dutch
-        "verwijderen",
-        "betalen",
-        "kopen",
-        "versturen",
-        "installeren",
-        "deïnstalleren",
-        "vernietigen",
-    }
+    marker for family in DESTRUCTIVE_FAMILIES.values() for marker in family
 )
 
 # Phrases that are routine-but-stateful: worth a confirmation in guarded mode.
@@ -274,7 +283,7 @@ class AutonomyPolicy:
             # it is exactly as safe as matching a control's accessibility title.
             subject = f"{subject} {turn.action.tool}".lower()
 
-        words = _intent_words(subject)
+        words = intent_words(subject)
         if words & self.destructive_markers:
             return Risk.DESTRUCTIVE
         if words & self.typed_commands:
@@ -300,7 +309,7 @@ class AutonomyPolicy:
         return Risk.NONE
 
 
-def _intent_words(subject: str) -> set[str]:
+def intent_words(subject: str) -> set[str]:
     """Whole words of a phrase, punctuation folded (pure).
 
     Tokenised on whitespace so `rm` matches the *word* `rm`, never the letters
@@ -335,9 +344,9 @@ def _looks_like_a_command(text: str, commands: frozenset[str]) -> bool:
     """
     lowered = text.lower()
     for line in lowered.splitlines():
-        leading = _intent_words(line)
+        leading = intent_words(line)
         first = line.strip().split()
-        if first and _intent_words(first[0]) & commands:
+        if first and intent_words(first[0]) & commands:
             return True
         if len(line) <= COMMAND_LENGTH_MAX and leading & commands:
             return True
@@ -401,9 +410,21 @@ def _arguments_are_destructive(
     for text in _argument_strings(arguments, depth=0):
         if _looks_like_a_command(text, commands):
             return True
-        if len(text) <= COMMAND_LENGTH_MAX and _intent_words(text.lower()) & markers:
+        if len(text) <= COMMAND_LENGTH_MAX and intent_words(text.lower()) & markers:
             return True
     return False
+
+
+def is_command_payload(text: str) -> bool:
+    """Pure: does this typed/pasted payload read as a shell command?
+
+    The public form of the rule the classifier applies to ``type_text`` and
+    ``clipboard_paste``, exported because a capability grant has to be able to
+    ask the same question — a permission covering "shell" must agree with the
+    guard about what a shell command is, or it would authorise something the
+    guard never flagged (or fail to cover something it did).
+    """
+    return _looks_like_a_command(text, AutonomyPolicy().typed_commands)
 
 
 def classify_risk(
@@ -464,6 +485,8 @@ def decide_permission(level: AutonomyLevel, risk: Risk) -> PermissionDecision:
 #: from here keeps working; the definitions live in that leaf module to keep
 #: this one free to depend on the orchestrator's action schemas.
 __all__ = [
+    "DESTRUCTIVE_FAMILIES",
+    "SHELL_FAMILY",
     "AutonomyLevel",
     "AutonomyPolicy",
     "PermissionConfirmationRequired",
@@ -472,4 +495,6 @@ __all__ = [
     "Risk",
     "classify_risk",
     "decide_permission",
+    "intent_words",
+    "is_command_payload",
 ]

@@ -304,7 +304,7 @@ def test_click_risk_comes_from_the_button_not_the_narration() -> None:
     assert label == "Hesabı Sil"
     assert classify_risk(turn, target_label=label) is Risk.DESTRUCTIVE
     assert (
-        guarded(AutonomyLevel.FULL)(turn, observation) is PermissionDecision.CONFIRM
+        guarded(AutonomyLevel.FULL, authorize=None)(turn, observation) is PermissionDecision.CONFIRM
     ), "even unattended autonomy asks before a destructive control"
 
 
@@ -340,7 +340,7 @@ def test_element_value_never_drives_the_verdict() -> None:
         raw=('SearchField "Search" at (50,50) 200x24 value="delete my account"',)
     )
     assert target_element_label(turn.action, observation) == "Search"
-    assert guarded(AutonomyLevel.FULL)(turn, observation) is PermissionDecision.ALLOW
+    assert guarded(AutonomyLevel.FULL, authorize=None)(turn, observation) is PermissionDecision.ALLOW
 
 
 def test_non_positional_actions_have_no_target_element() -> None:
@@ -367,7 +367,7 @@ def test_runner_refuses_a_destructive_button_the_model_described_as_routine() ->
     runner = OodaRunner(
         provider=provider,
         execute_physical=executed.append,
-        guard=guarded(AutonomyLevel.GUARDED),
+        guard=guarded(AutonomyLevel.GUARDED, authorize=None),
         ax_probe=ax_probe,
         max_steps=3,
     )

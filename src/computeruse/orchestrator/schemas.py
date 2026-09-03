@@ -208,3 +208,25 @@ class AgentTurn(BaseModel):
             if item.type == "finish" and index != len(self.actions) - 1:
                 raise ValueError("'finish' must be the last action of a batch")
         return self
+
+
+class _ActionEnvelope(BaseModel):
+    """Internal: the discriminated union, addressable on its own."""
+
+    action: Action = Field(discriminator="type")
+
+
+def action_from_payload(payload: dict[str, object]) -> Action | None:
+    """Rebuild an action from a dict it was serialised into (pure).
+
+    The approval queue stores an action as ``model_dump`` output so a person
+    can read it, and something later has to read it back — deciding what a
+    parked action delegates means knowing what it *is*, not what it looked
+    like. Returns ``None`` for a payload that no longer parses (a record from
+    an older schema, a hand-edited file), because a queue entry that cannot be
+    understood is exactly the one nothing should be inferred from.
+    """
+    try:
+        return _ActionEnvelope.model_validate({"action": payload}).action
+    except ValueError:
+        return None

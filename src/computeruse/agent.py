@@ -54,11 +54,18 @@ from computeruse.orchestrator.loop import (
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
 from computeruse.orchestrator.trace import RunTracer, StepTrace, event_line, new_run_id
+from computeruse.security.approvals import now_utc as grant_now
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionDecision,
+    Risk,
     classify_risk,
-    decide_permission,
+)
+from computeruse.security.grants import (
+    GrantStore,
+    GrantVerdict,
+    authorize,
+    decide_with_grant,
 )
 from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
@@ -191,6 +198,8 @@ class AgentResult:
 
 def guarded(
     level: AutonomyLevel,
+    *,
+    authorize: Callable[[AgentTurn, str | None], GrantVerdict] | None,
 ) -> Callable[[AgentTurn, Observation], PermissionDecision]:
     """Build the VALIDATE-step guard for an autonomy level (pure).
 
@@ -200,15 +209,24 @@ def guarded(
     with the flow"); the accessibility title under the pointer is the machine's
     ("Delete account"). Classifying the control the click will actually hit is
     what makes Law 5.1 a guard rather than a request for the model's opinion.
+
+    ``authorize`` consults the user's standing capability grants, and is asked
+    only about actions the classifier already called destructive — a grant can
+    turn one of those confirmations into permission, and can do nothing else
+    (see :func:`~computeruse.security.grants.decide_with_grant`). ``None`` runs
+    the constitution's plain level/risk table, which is what a caller with no
+    grant store should get: no grants means everything destructive asks.
     """
 
     def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
-        return decide_permission(
-            level,
-            classify_risk(
-                turn, target_label=target_element_label(turn.action, observation)
-            ),
+        label = target_element_label(turn.action, observation)
+        risk = classify_risk(turn, target_label=label)
+        verdict = (
+            authorize(turn, label)
+            if authorize is not None and risk is Risk.DESTRUCTIVE
+            else None
         )
+        return decide_with_grant(level, risk, verdict)
 
     return guard
 
@@ -295,6 +313,12 @@ class Agent:
         episodes_store = EpisodicStore(self._config.store_dir / "episodes")
         skills_registry = SkillRegistry(self._config.store_dir / "skills")
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
+        # Law 5.1 delegation: the user's standing capability grants. They apply
+        # whenever any exist — a permission someone deliberately wrote, with an
+        # expiry and a use count, should not also need a flag to be honoured,
+        # and `--grants` is what makes them visible. With an empty store the
+        # authorizer below never fires and every destructive action asks.
+        grant_store = GrantStore(self._config.store_dir / "grants")
         distilled: DistillResult | None = None
         # Every run is identifiable, whether or not anything is written down:
         # the id is what ties a log line, a trace directory and a user's
@@ -749,11 +773,54 @@ class Agent:
                         "MCP requested but no servers configured in %s", DEFAULT_CONFIG_PATH
                     )
 
+            def grant_authorizer(
+                turn: AgentTurn, target_label: str | None
+            ) -> GrantVerdict:
+                """Does a standing grant cover this action — and spend it if so.
+
+                The matching is pure; consuming is not, and it happens *here*,
+                before the action runs. A count decremented after the fact is a
+                count that a crash mid-action silently refunds, which is the
+                wrong direction to be wrong in: under-reporting costs the user a
+                use they already had, over-reporting hands out authority they
+                never gave.
+                """
+                verdict = authorize(
+                    turn.action,
+                    sub_goal=turn.sub_goal,
+                    target_label=target_label,
+                    app=app,
+                    grants=grant_store.grants(),
+                    now=grant_now(),
+                )
+                if verdict.is_granted and verdict.grant_id is not None:
+                    try:
+                        grant_store.consume(verdict.grant_id)
+                    except (KeyError, OSError) as exc:
+                        # A grant we cannot record as spent is a grant we must
+                        # not honour: an unbounded permission is not the
+                        # permission the user wrote (Law 6.3, fail closed).
+                        LOGGER.warning(
+                            "capability grant %s could not be consumed (%s); "
+                            "treating the action as unauthorised",
+                            verdict.grant_id,
+                            exc,
+                        )
+                        return GrantVerdict(
+                            outcome="not_covered",
+                            grant_id=verdict.grant_id,
+                            reason=f"the grant could not be recorded as used: {exc}",
+                        )
+                    LOGGER.info("action authorised by %s", verdict.reason)
+                return verdict
+
             runner = OodaRunner(
                 provider=self._config.provider,
                 execute_physical=client.send,
                 kill_switch=kill_switch,
-                guard=guarded(self._config.autonomy_level),
+                guard=guarded(
+                    self._config.autonomy_level, authorize=grant_authorizer
+                ),
                 confirm_handler=self._config.confirm_handler,
                 # One capture source, two consumers: ORIENT verification and
                 # the multimodal OBSERVE screenshot are the same frame stream.

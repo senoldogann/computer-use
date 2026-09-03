@@ -31,6 +31,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Final, cast
 
@@ -77,7 +78,12 @@ from computeruse.orchestrator.mission import (
 )
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
-from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
+from computeruse.orchestrator.schemas import (
+    AgentTurn,
+    Finish,
+    MouseClick,
+    action_from_payload,
+)
 from computeruse.orchestrator.supervisor import supervisor_for
 from computeruse.providers.openai import (
     DEFAULT_MODEL,
@@ -90,6 +96,7 @@ from computeruse.providers.openai import (
 )
 from computeruse.security.approvals import (
     ApprovalQueue,
+    ApprovalRequest,
     ApprovalRequiredError,
     approval_request_for,
     goals_awaiting_decision,
@@ -101,6 +108,17 @@ from computeruse.security.autonomy import (
     PermissionConfirmationRequired,
     PermissionDeniedError,
     classify_risk,
+)
+from computeruse.security.grants import (
+    ANY as GRANT_ANY,
+)
+from computeruse.security.grants import (
+    GRANTABLE_VERBS,
+    CapabilityGrant,
+    GrantStore,
+    action_verbs,
+    active_grants,
+    new_grant,
 )
 from computeruse.security.killswitch import KillSwitch, install_sigint_catcher
 from computeruse.skills.registry import SkillRegistry
@@ -148,6 +166,71 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=AUTONOMOUS_REST_SECONDS,
         help="How long to wait between unattended runs "
         f"(default: {AUTONOMOUS_REST_SECONDS:.0f}).",
+    )
+    parser.add_argument(
+        "--grants",
+        action="store_true",
+        help="List your standing capability grants — the destructive actions "
+        "the agent may take without asking, and what bounds each one. Reads "
+        "the store; runs nothing.",
+    )
+    parser.add_argument(
+        "--grant",
+        default=None,
+        metavar="VERB",
+        help="Delegate authority over one family of destructive action "
+        f"({', '.join(sorted(GRANTABLE_VERBS))}) in advance, so an unattended "
+        "run need not stop and ask. Bounded by --grant-app, --grant-target, "
+        "--grant-uses and --grant-hours.",
+    )
+    parser.add_argument(
+        "--grant-app",
+        default=None,
+        metavar="APP",
+        help="Application the grant applies within. Required: a grant with no "
+        "application covers the whole machine, which has to be typed as "
+        f"--grant-app '{GRANT_ANY}' deliberately.",
+    )
+    parser.add_argument(
+        "--grant-target",
+        default=GRANT_ANY,
+        metavar="GLOB",
+        help="Glob matched against the accessibility title of the control, e.g. "
+        f"'Move to Trash' or '*.tmp' (default: {GRANT_ANY!r}, any control in "
+        "the app).",
+    )
+    parser.add_argument(
+        "--grant-uses",
+        type=int,
+        default=1,
+        help="How many times the grant may be used before it is spent "
+        "(default: 1).",
+    )
+    parser.add_argument(
+        "--grant-hours",
+        type=float,
+        default=24.0,
+        help="How long the grant lives, in hours (default: 24).",
+    )
+    parser.add_argument(
+        "--grant-note",
+        default=None,
+        metavar="TEXT",
+        help="Why you granted it, in your words. Required: a list of standing "
+        "permissions nobody can explain is one nobody will audit.",
+    )
+    parser.add_argument(
+        "--revoke",
+        default=None,
+        metavar="GRANT_ID",
+        help="Delete a standing capability grant.",
+    )
+    parser.add_argument(
+        "--always",
+        action="store_true",
+        help="With --approve: also mint a capability grant from the parked "
+        "action, so the same question is not asked again. Scoped to that "
+        "action's app and control unless you widen it with the --grant-* flags.",
     )
     parser.add_argument(
         "--approvals",
@@ -917,6 +1000,117 @@ def _run_autonomous_session(
     return 0
 
 
+def _grant_from_request(
+    args: argparse.Namespace, request: ApprovalRequest, store: Path
+) -> CapabilityGrant | None:
+    """Mint a grant covering the action a human just approved.
+
+    Returns ``None`` when the parked action carries no destructive verb to
+    delegate, which can happen: an action reaches the queue because the *guard*
+    said CONFIRM, and a routine-marker confirmation ("Save", "Close") is not a
+    family anyone can be granted. Saying so beats writing a grant that matches
+    nothing.
+    """
+    action = action_from_payload(request.action)
+    if action is None:
+        return None
+    verbs = action_verbs(
+        action, sub_goal=request.sub_goal, target_label=request.target_label
+    )
+    if not verbs:
+        return None
+    now = now_utc()
+    grant = new_grant(
+        # The narrowest family the action fell into, so "delete and send"
+        # delegates one of them rather than silently both.
+        verb=min(verbs),
+        app=args.grant_app or args.app or GRANT_ANY,
+        target_pattern=args.grant_target
+        if args.grant_target != GRANT_ANY
+        else (request.target_label or GRANT_ANY),
+        max_invocations=args.grant_uses,
+        expires_at=now + timedelta(hours=args.grant_hours),
+        note=args.grant_note or f"approved once for: {request.sub_goal}",
+        now=now,
+    )
+    GrantStore(store / "grants").save(grant)
+    return grant
+
+
+def _review_grants(args: argparse.Namespace) -> int:
+    """List, mint, or revoke standing capability grants (reads/writes the store).
+
+    Minting is deliberately verbose. Every bound — the app, the controls, the
+    count, the expiry — has to be typed or defaulted on purpose, because the
+    whole safety argument for delegating authority in advance is that the
+    delegation is *narrow*. A grant nobody had to think about is one nobody
+    remembers giving.
+    """
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    grants = GrantStore(store / "grants")
+    now = now_utc()
+
+    if args.revoke is not None:
+        try:
+            grants.revoke(args.revoke)
+        except KeyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"{args.revoke}: revoked")
+        return 0
+
+    if args.grant is not None:
+        if args.grant_app is None:
+            print(
+                "error: --grant needs --grant-app. A grant with no application "
+                f"covers the whole machine; type --grant-app {GRANT_ANY!r} if "
+                "that is really what you mean.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.grant_note:
+            print(
+                "error: --grant needs --grant-note saying why. A standing "
+                "permission you cannot explain later is one you cannot audit.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            grant = new_grant(
+                verb=args.grant,
+                app=args.grant_app,
+                target_pattern=args.grant_target,
+                max_invocations=args.grant_uses,
+                expires_at=now + timedelta(hours=args.grant_hours),
+                note=args.grant_note,
+                now=now,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        grants.save(grant)
+        print(f"granted {grant.grant_id}")
+        print(f"  {grant.verb} in {grant.app}, controls matching {grant.target_pattern!r}")
+        print(f"  {grant.max_invocations} use(s), expires {grant.expires_at.isoformat(timespec='seconds')}")
+        return 0
+
+    live = active_grants(grants.grants(), now)
+    if not live:
+        print("no standing grants; every destructive action will ask")
+        return 0
+    print(f"{len(live)} standing grant(s):\n")
+    for grant in live:
+        print(f"  [{grant.grant_id}]")
+        print(f"    may      : {grant.verb} in {grant.app}")
+        print(f"    controls : {grant.target_pattern}")
+        print(f"    left     : {grant.remaining} of {grant.max_invocations}")
+        print(f"    expires  : {grant.expires_at.isoformat(timespec='seconds')}")
+        print(f"    because  : {grant.note}")
+        print()
+    print("revoke with: computeruse --revoke <id>")
+    return 0
+
+
 def _review_approvals(args: argparse.Namespace) -> int:
     """List parked actions, or record a decision on one (reads/writes the store).
 
@@ -939,6 +1133,22 @@ def _review_approvals(args: argparse.Namespace) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         print(f"{answered.request_id}: {answered.decision}")
+        if args.always and args.approve is not None:
+            # "Yes, and stop asking" — the natural moment to delegate, because
+            # the person is looking at exactly what they are delegating. The
+            # grant is scoped to the action they just read: its verb family,
+            # its app, and the control it names. Widening that is possible but
+            # has to be typed.
+            grant = _grant_from_request(args, answered, store)
+            if grant is None:
+                print(
+                    "  (no destructive verb to delegate; nothing granted)",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  granted {grant.grant_id}: {grant.verb} in {grant.app}, "
+                      f"{grant.max_invocations} use(s), controls matching "
+                      f"{grant.target_pattern!r}")
         if answered.mission_id is not None:
             try:
                 mission = missions.load(answered.mission_id)
@@ -980,6 +1190,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     # Reviewing the queue is a store operation, not a run: it needs no driver,
     # no model and no goal, so it is dispatched before every check below.
+    if args.grants or args.grant is not None or args.revoke is not None:
+        return _review_grants(args)
     if args.approvals or args.approve is not None or args.deny is not None:
         return _review_approvals(args)
     if args.autonomous is None and not args.goal:

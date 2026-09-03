@@ -64,6 +64,7 @@ src/computeruse/
 │   └── semantic.py   # Law 4.2: SemanticStore (app knowledge) + pure search
 ├── security/
 │   ├── approvals.py  # Law 5.1: park an action for a human instead of hanging
+│   ├── grants.py     # Law 5.1: bounded authority delegated in advance
 │   ├── killswitch.py # Law 5.2: kill-switch (shake detector + OODA gate)
 │   └── autonomy.py   # Law 5.1: Level 0-3 guard, destructive-action detection
 └── vision/
