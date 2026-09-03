@@ -816,6 +816,10 @@ class OodaRunner:
     # controls what is drawn onto the picture.
     set_of_marks_enabled: bool = True
     window_probe: Callable[[], FocusedWindow] | None = None
+    #: The *system's* frontmost window, as distinct from ``window_probe``,
+    #: which in background mode reports the target's own window. Only one
+    #: question needs this: whether the keyboard would reach the target.
+    frontmost_probe: Callable[[], FocusedWindow] | None = None
     ax_probe: Callable[[], AxProbeResult] | None = None
     # Semantic postcondition probe for typed/pasted text: returns the focused
     # text field's current AXValue, or None when not determinable.
@@ -2138,19 +2142,51 @@ class OodaRunner:
 
         Clicks and text have accessibility equivalents; hotkeys, scrolling and
         dragging do not, so they go through the global event stream — which
-        means the focus gate must bring the target forward for them to land
-        where they are aimed. That is correct, but it silently ends the one
-        promise the mode makes, and a user who asked to keep working in their
-        own window deserves to know the moment it stops holding rather than
-        discovering it when their window drops behind.
+        delivers them to whatever is frontmost. This said the target was
+        "coming to the front" and then did not bring it: only pointer actions
+        reach the focus gate, so a hotkey was aimed at whichever window
+        happened to own the screen. Saying it and doing it are now the same
+        act, which is the only version of this sentence that is true.
+
+        The user is told each time, because a mode whose whole promise is
+        "your window stays where it is" owes them the moment it stops holding,
+        rather than letting them discover it when their window drops behind.
         """
         if self.quiet_press is None and self.quiet_type is None:
+            return
+        if not self.app:
+            return
+        if isinstance(action, (MouseClick, TypeText, ClipboardPaste)):
+            # These have an accessibility equivalent and merely declined it
+            # this once — the element refused, or the keyboard is already
+            # here. Their focus is the positional gate's business, which
+            # re-asserts the target only when the screen has actually drifted.
             return
         LOGGER.warning(
             "background mode: %s has no accessibility equivalent, so %r is "
             "coming to the front for it",
             action.type,
             self.app,
+        )
+        self.execute_physical(ActivateApp(type="activate_app", app=self.app))
+
+    def _target_owns_the_screen(self) -> bool:
+        """Is the run's application the one the keyboard would reach?
+
+        Answered by the system, not by the target-scoped window reading that
+        background mode uses for perception — that one names the target by
+        construction and would say yes forever.
+        """
+        if self.frontmost_probe is None or not self.app:
+            return False
+        try:
+            frontmost = self.frontmost_probe()
+        except Exception as exc:  # noqa: BLE001 - a perception gap stays quiet
+            LOGGER.debug("frontmost probe failed: %s", exc)
+            return False
+        return (
+            app_evidence(self.app, frontmost.app_name, frontmost.bundle_id)
+            is Evidence.CONFIRMED
         )
 
     def _typed_quietly(self, action: Action) -> bool:
@@ -2167,6 +2203,16 @@ class OodaRunner:
         if not isinstance(action, (TypeText, ClipboardPaste)):
             return False
         if not action.text:
+            return False
+        if self._target_owns_the_screen():
+            # Nothing left to buy. The quiet write exists to avoid taking the
+            # keyboard, and the keyboard is already here; what it costs is
+            # fidelity. Measured on Chrome's address bar: the write returned
+            # true, the field showed nothing, Return did nothing, and the agent
+            # repeated the sequence thirty-three times because a write that
+            # reports success and changes nothing verifies as inconclusive,
+            # and inconclusive never fails an action. Real keystrokes, on the
+            # same field, navigated first try.
             return False
         try:
             return self.quiet_type(action.text)

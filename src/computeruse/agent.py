@@ -742,6 +742,7 @@ class Agent:
                 vision_enabled=self._config.enable_vision,
                 set_of_marks_enabled=self._config.enable_set_of_marks,
                 window_probe=window_probe,
+                frontmost_probe=client.focused_window,
                 ax_probe=ax_probe,
                 # ADR-2 semantic postcondition: the focused field's AXValue
                 # lets type_text/clipboard_paste be verified against what the

@@ -32,6 +32,7 @@ from computeruse.orchestrator.schemas import (
     TypeText,
 )
 from computeruse.skills.distiller import Trajectory, signature_of
+from computeruse.vision import FocusedWindow
 from computeruse.vision.coordinates import Point
 from tests.smoke.conftest import SOCKET_PATH, rpc_call
 
@@ -479,3 +480,80 @@ def test_leaving_the_background_is_announced(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         runner.run(goal="scroll in the background")
     assert any("coming to the front" in record.getMessage() for record in caplog.records)
+
+
+def test_leaving_the_background_actually_brings_the_target_forward() -> None:
+    """Saying it and doing it have to be the same act.
+
+    The announcement claimed the target was "coming to the front" and nothing
+    brought it: only pointer actions reach the focus gate, so a hotkey went
+    into the global event stream aimed at whichever window happened to own the
+    screen. Measured on a real run, an agent pressed Cmd+L and Return thirty
+    times against a browser it never fronted.
+    """
+    executed: list[Action] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="focus the address bar",
+                action=PressHotkey(type="press_hotkey", modifiers=["command"], key="l"),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        quiet_press=lambda _p: True,
+        app="Google Chrome",
+        max_steps=5,
+    ).run(goal="open the address bar")
+    assert [a.type for a in executed] == ["activate_app", "press_hotkey"]
+
+
+def test_the_quiet_write_stands_down_once_the_keyboard_is_here() -> None:
+    """It buys nothing when the target already owns the screen, and costs fidelity.
+
+    Measured on Chrome's address bar with the app frontmost: the accessibility
+    write returned true, the field showed nothing, Return did nothing, and the
+    agent repeated the sequence thirty-three times — a write that reports
+    success and changes nothing verifies as inconclusive, and inconclusive
+    never fails an action. Real keystrokes navigated on the first try.
+    """
+    executed: list[Action] = []
+    quiet_calls: list[str] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return AgentTurn(
+                thought="",
+                sub_goal="type the address",
+                action=TypeText(type="type_text", text="example.com", wpm=40),
+            )
+        return AgentTurn(
+            thought="",
+            sub_goal="done",
+            action=Finish(type="finish", status="success", summary="ok"),
+        )
+
+    def quiet_type(text: str) -> bool:
+        quiet_calls.append(text)
+        return True
+
+    OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        quiet_type=quiet_type,
+        frontmost_probe=lambda: FocusedWindow(
+            pid=1, app_name="Google Chrome", bundle_id="com.google.Chrome"
+        ),
+        app="Google Chrome",
+        max_steps=5,
+    ).run(goal="type the address")
+    assert quiet_calls == [], "the quiet write must not be attempted"
+    assert [a.type for a in executed] == ["type_text"]
