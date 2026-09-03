@@ -34,6 +34,7 @@ from computeruse.orchestrator.evidence import (
     verification_diagnostic,
 )
 from computeruse.orchestrator.failures import (
+    Failure,
     FailureKind,
     RecoveryAction,
     UnrecoverableFailureError,
@@ -945,6 +946,28 @@ def test_the_two_ax_signals_never_vote_twice() -> None:
     final = runner.run(goal="press OK")
     assert final.last_error is None
     assert "step_0:mouse_click" in final.completed_steps
+
+
+def test_the_ladder_does_not_argue_with_the_diagnosis_it_follows() -> None:
+    """Guidance is appended to a diagnosis, so it must not assert a rival cause.
+
+    The verification diagnostic reads the accessibility element under the point
+    and decides between the two causes of "nothing changed". The ladder's hint
+    then asserted one of them outright — "the action did not land where you
+    aimed" — so a live run was told in one breath not to re-aim and that it had
+    aimed wrong.
+    """
+    failure = Failure(
+        kind=FailureKind.VERIFICATION,
+        message="action verification failed",
+        action_type="mouse_click",
+        target="945,551",
+    )
+    hint = recovery_hint(failure, 1)
+    assert "did not land where you aimed" not in hint
+    # It still has to say what to do in each case.
+    assert "do not re-aim" in hint
+    assert "off-screen" in hint
 
 
 def test_diagnosis_distinguishes_a_miss_from_an_idempotent_hit() -> None:
