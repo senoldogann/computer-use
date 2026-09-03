@@ -78,6 +78,13 @@ from computeruse.orchestrator.mission import (
 )
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
+from computeruse.orchestrator.report import (
+    UsageRecord,
+    UsageStore,
+    period_ending,
+    render,
+    summarize,
+)
 from computeruse.orchestrator.schemas import (
     AgentTurn,
     Finish,
@@ -166,6 +173,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=AUTONOMOUS_REST_SECONDS,
         help="How long to wait between unattended runs "
         f"(default: {AUTONOMOUS_REST_SECONDS:.0f}).",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print what the agent did while nobody was watching: what it "
+        "finished, what it lost, what is waiting for your decision, what "
+        "authority it used and what it spent. Reads the store; runs nothing.",
+    )
+    parser.add_argument(
+        "--since-hours",
+        type=float,
+        default=24.0,
+        help="How far back --report looks, in hours (default: 24). Open items "
+        "— paused missions, unanswered questions — are always shown whatever "
+        "the window.",
     )
     parser.add_argument(
         "--grants",
@@ -278,8 +300,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--level",
         type=int,
         choices=[0, 1, 2, 3],
-        default=AutonomyLevel.GUARDED.value,
-        help="Autonomy level 0-3 (default: 2 = guarded).",
+        default=AutonomyLevel.FULL.value,
+        help="Autonomy level 0-3 (default: 3 = full). Level 3 still asks "
+        "about destructive actions unless --yes is given.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Trust mode: auto-approve every CONFIRM without prompting, so "
+        "the agent runs uninterrupted like a human operator. BLOCK still "
+        "blocks, and the kill-switch (Cmd+Shift+Escape / Ctrl-C / shake), "
+        "budgets, verification and stuck-guard keep running. Every "
+        "auto-approval is logged. This is delegation in advance — use it "
+        "only on a machine you own.",
     )
     parser.add_argument(
         "--background",
@@ -328,8 +361,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--plan",
         action="store_true",
         help="Decompose the goal into ordered sub-goals and advance through "
-        "them (a finish marks the current sub-goal done); checkpoints are "
-        "written to --store/checkpoints for resumability.",
+        "them (a finish marks the current sub-goal done); progress is saved "
+        "to the mission store as it happens and checkpoints are written to "
+        "--store/checkpoints. Resume with --resume <plan-id>; missions "
+        "resume via remaining_goal.",
+    )
+    parser.add_argument(
+        "--resume",
+        default=None,
+        metavar="PLAN_ID",
+        help="Resume a previous --plan run from its checkpoint file "
+        "(--store/checkpoints/<PLAN_ID>.json) instead of starting over.",
     )
     parser.add_argument(
         "--display",
@@ -603,7 +645,7 @@ def cli_confirm_handler(turn: AgentTurn, target_label: str | None) -> bool:
     denial — fail-closed (Law 5).
     """
     print(
-        f"\n⚠️  CONFIRMATION REQUIRED: Agent wants to perform [{turn.action.type}] for goal: {turn.sub_goal!r}",
+        f"\nCONFIRMATION REQUIRED: Agent wants to perform [{turn.action.type}] for goal: {turn.sub_goal!r}",
         file=sys.stderr,
     )
     print(f"   Payload: {turn.action.model_dump(exclude_none=True)}", file=sys.stderr)
@@ -616,6 +658,25 @@ def cli_confirm_handler(turn: AgentTurn, target_label: str | None) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return line.strip().lower() in ("y", "yes")
+
+
+def auto_confirm_handler(turn: AgentTurn, target_label: str | None) -> bool:
+    """Trust-mode confirmation: approve without prompting, but log it.
+
+    Used only when the operator passed --yes. The approval is recorded on
+    stderr (and therefore in the panel log + trace) so an unattended run
+    stays auditable: what was auto-approved, what it targeted, and why the
+    guard had asked. Never used at Level 0 — the guard BLOCKs there before
+    any handler is consulted.
+    """
+    print(
+        f"trust mode (--yes): auto-approved [{turn.action.type}] for "
+        f"{turn.sub_goal!r}"
+        + (f" on {target_label!r}" if target_label else "")
+        + f" payload={turn.action.model_dump(exclude_none=True)}",
+        file=sys.stderr,
+    )
+    return True
 
 
 def resolve_verify(args: argparse.Namespace) -> bool:
@@ -702,15 +763,21 @@ def build_config(
     # is a session frozen mid-task, holding the machine, until someone returns.
     # ``parking_confirm_handler`` writes the question down and ends the run
     # instead, so the work is paused rather than hung or silently lost.
-    confirm_handler = (
-        parked_confirm_handler
-        if parked_confirm_handler is not None
-        else (
-            cli_confirm_handler
-            if sys.stdin.isatty() or os.environ.get("COMPUTERUSE_MENU") == "1"
-            else None
+    # Trust mode (--yes) overrides both: the operator explicitly asked for
+    # uninterrupted autonomy, so CONFIRM is auto-approved with a log line.
+    trust_mode = bool(getattr(args, "yes", False))
+    if trust_mode:
+        confirm_handler = auto_confirm_handler
+    else:
+        confirm_handler = (
+            parked_confirm_handler
+            if parked_confirm_handler is not None
+            else (
+                cli_confirm_handler
+                if sys.stdin.isatty() or os.environ.get("COMPUTERUSE_MENU") == "1"
+                else None
+            )
         )
-    )
     return AgentConfig(
         goal=goal,
         app=args.app,
@@ -719,6 +786,7 @@ def build_config(
         store_dir=Path(args.store),
         autonomy_level=AutonomyLevel(args.level),
         confirm_handler=confirm_handler,
+        auto_approve=trust_mode,
         enable_visual_verification=resolve_verify(args),
         enable_vision=getattr(args, "vision", True),
         enable_set_of_marks=getattr(args, "marks", True),
@@ -844,6 +912,22 @@ def _run_autonomous_session(
         tokens["total"] += int(getattr(call, "total_tokens", 0) or 0)
         cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
 
+    def usage_since(
+        mark: tuple[int, float, float]
+    ) -> tuple[int, float, float]:
+        """What has been spent since ``mark`` (tokens, dollars, seconds).
+
+        The session's counters are cumulative because the *budget* is the
+        session's, so a per-run record has to be a delta — charging each run
+        the session total would make a ten-run night look like ten expensive
+        runs instead of ten cheap ones.
+        """
+        return (
+            tokens["total"] - mark[0],
+            cost["usd"] - mark[1],
+            time.monotonic() - mark[2],
+        )
+
     def budget_guard() -> None:
         reason = budget_verdict(
             budget,
@@ -858,6 +942,7 @@ def _run_autonomous_session(
 
     def execute(proposal: GoalProposal) -> None:
         attempted_goals.append(proposal.goal)
+        mark = (tokens["total"], cost["usd"], time.monotonic())
         # The mission is opened *before* the run, so a session killed
         # mid-action still leaves a record that this work was started and how
         # far it got. Its attempt is spent here for the same reason.
@@ -904,6 +989,20 @@ def _run_autonomous_session(
         )
         if proposal.app is not None:
             config = replace(config, app=proposal.app)
+        def record(run_id: str, outcome: str, steps: int) -> None:
+            spent_tokens, spent_cost, spent_seconds = usage_since(mark)
+            _record_usage(
+                store,
+                run_id=run_id,
+                goal=proposal.goal,
+                app=proposal.app or "unknown",
+                outcome=outcome,
+                steps=steps,
+                tokens=spent_tokens,
+                cost_usd=spent_cost,
+                elapsed_seconds=spent_seconds,
+            )
+
         try:
             result = Agent(config).run()
         except ApprovalRequiredError as exc:
@@ -918,6 +1017,7 @@ def _run_autonomous_session(
                     now=now_utc(),
                 )
             )
+            record(f"parked-{exc.request.request_id}", "blocked", 0)
             print(
                 f"autonomous  : {proposal.goal!r} -> parked for approval "
                 f"({exc.request.request_id})"
@@ -929,12 +1029,14 @@ def _run_autonomous_session(
                     mission, plan=progress["plan"], succeeded=False, now=now_utc()
                 )
             )
+            record(f"unfinished-{mission.mission_id}", "failure", 0)
             raise
         missions.save(
             mission_finished(
                 mission, plan=result.state.plan, succeeded=True, now=now_utc()
             )
         )
+        record(result.run_id, "success", len(result.state.completed_steps))
         print(f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps")
 
     def propose() -> GoalProposal | None:
@@ -1035,6 +1137,58 @@ def _grant_from_request(
     )
     GrantStore(store / "grants").save(grant)
     return grant
+
+
+def _record_usage(
+    store: Path,
+    *,
+    run_id: str,
+    goal: str,
+    app: str,
+    outcome: str,
+    steps: int,
+    tokens: int,
+    cost_usd: float,
+    elapsed_seconds: float,
+) -> None:
+    """Write what a run consumed, whatever ending it had.
+
+    Best effort by contract: a run that did its work and then failed to write
+    its own receipt should not report failure for that reason, so a store that
+    cannot be written is logged and skipped. The counters are otherwise lost
+    with the terminal — they only ever existed in this process.
+    """
+    try:
+        UsageStore(store / "usage").record(
+            UsageRecord(
+                run_id=run_id,
+                goal=goal,
+                app=app,
+                outcome=outcome,
+                steps=steps,
+                total_tokens=tokens,
+                cost_usd=cost_usd,
+                elapsed_seconds=elapsed_seconds,
+                recorded_at=now_utc(),
+            )
+        )
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("could not record usage for run %s: %s", run_id, exc)
+
+
+def _print_report(args: argparse.Namespace) -> int:
+    """Read the five stores together and print what happened (I/O + pure render)."""
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    report = summarize(
+        episodes=tuple(EpisodicStore(store / "episodes").episodes()),
+        usage=UsageStore(store / "usage").records(),
+        missions=MissionStore(store / "missions").missions(),
+        approvals=ApprovalQueue(store / "approvals").requests(),
+        grants=GrantStore(store / "grants").grants(),
+        period=period_ending(now_utc(), hours=args.since_hours),
+    )
+    print(render(report), end="")
+    return 0
 
 
 def _review_grants(args: argparse.Namespace) -> int:
@@ -1190,6 +1344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     # Reviewing the queue is a store operation, not a run: it needs no driver,
     # no model and no goal, so it is dispatched before every check below.
+    if args.report:
+        return _print_report(args)
     if args.grants or args.grant is not None or args.revoke is not None:
         return _review_grants(args)
     if args.approvals or args.approve is not None or args.deny is not None:
@@ -1290,6 +1446,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.autonomous is not None:
             return _run_autonomous_session(args, driver_recover=driver_recover)
 
+        if getattr(args, "resume", None) is not None:
+            # AUT-01: checkpoints were written but never read. --resume loads
+            # the plan and continues from the first pending sub-goal, so an
+            # interrupted --plan run does not restart completed work.
+            from computeruse.orchestrator.planner import SessionCheckpoint
+
+            store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+            checkpoint_path = store / "checkpoints" / f"{args.resume}.json"
+            if not checkpoint_path.is_file():
+                # Also accept a full filename or path the user copied.
+                alt = Path(args.resume)
+                checkpoint_path = alt if alt.is_file() else checkpoint_path
+            try:
+                checkpoint = SessionCheckpoint.load(checkpoint_path)
+            except Exception as exc:
+                print(f"error: cannot load checkpoint {args.resume!r}: {exc}", file=sys.stderr)
+                return 2
+            pending = [
+                sg.description
+                for sg in checkpoint.plan.sub_goals
+                if sg.status in ("pending", "in_progress")
+            ]
+            if not pending:
+                print(f"checkpoint {checkpoint.session_id}: plan already complete", file=sys.stderr)
+                return 0
+            # Continue with what is left, never the original goal: re-running
+            # a completed sub-goal on a physical host repeats its side effects.
+            args.goal = " then ".join(pending)
+            print(
+                f"resuming checkpoint {checkpoint.session_id}: "
+                f"{len(pending)} sub-goal(s) left",
+                file=sys.stderr,
+            )
+
         explicit_app, cleaned_goal = extract_goal_app(args.goal)
         args.goal = cleaned_goal
         named_app = args.app is not None
@@ -1372,7 +1562,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             budget_guard=None if budget.is_unset else budget_guard,
             driver_recover=driver_recover,
         )
-        result = Agent(config).run()
+        # Spend is recorded on *both* endings. A run that failed still cost
+        # what it cost, and that is exactly the run someone wants the number
+        # for; recording only successes would make the report's total a
+        # comfortable fiction.
+        try:
+            result = Agent(config).run()
+        except BaseException:
+            _record_usage(
+                Path(args.store),
+                run_id=f"unfinished-{int(time.time())}",
+                goal=config.goal,
+                app=config.app or "unknown",
+                outcome="failure",
+                steps=0,
+                tokens=run_tokens["total"],
+                cost_usd=run_cost["usd"],
+                elapsed_seconds=time.monotonic() - run_started_at,
+            )
+            raise
+        _record_usage(
+            Path(args.store),
+            run_id=result.run_id,
+            goal=config.goal,
+            app=result.app,
+            outcome="success",
+            steps=len(result.state.completed_steps),
+            tokens=run_tokens["total"],
+            cost_usd=run_cost["usd"],
+            elapsed_seconds=time.monotonic() - run_started_at,
+        )
 
         print(f"goal        : {config.goal}")
         print(f"run_id      : {result.run_id}")

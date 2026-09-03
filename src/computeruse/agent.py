@@ -94,8 +94,13 @@ class AgentConfig:
     # Target application; None means "discover the frontmost app from the
     # driver's focused-window probe at run start" (ADR-2 OBSERVE).
     app: str | None = None
-    autonomy_level: AutonomyLevel = AutonomyLevel.GUARDED
+    autonomy_level: AutonomyLevel = AutonomyLevel.FULL
     confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None
+    # Trust mode (--yes): the operator has explicitly asked for uninterrupted
+    # autonomy. CONFIRM decisions are auto-approved and logged, BLOCK still
+    # blocks, kill-switch/budget/verification/stuck-guard still run. This is
+    # delegation in advance, not removal of the guard.
+    auto_approve: bool = False
     enable_visual_verification: bool = True
     enable_vision: bool = True
     # Law 5.2: when True (default), the driver's global kill-hotkey poll is
@@ -200,6 +205,7 @@ def guarded(
     level: AutonomyLevel,
     *,
     authorize: Callable[[AgentTurn, str | None], GrantVerdict] | None,
+    auto_approve: bool = False,
 ) -> Callable[[AgentTurn, Observation], PermissionDecision]:
     """Build the VALIDATE-step guard for an autonomy level (pure).
 
@@ -216,6 +222,10 @@ def guarded(
     (see :func:`~computeruse.security.grants.decide_with_grant`). ``None`` runs
     the constitution's plain level/risk table, which is what a caller with no
     grant store should get: no grants means everything destructive asks.
+
+    ``auto_approve`` is trust mode (--yes): CONFIRM becomes ALLOW, BLOCK still
+    blocks. The safety floor (kill-switch, budget, verification, stuck-guard)
+    keeps running; only the human prompt is skipped, and the caller logs it.
     """
 
     def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
@@ -226,7 +236,16 @@ def guarded(
             if authorize is not None and risk is Risk.DESTRUCTIVE
             else None
         )
-        return decide_with_grant(level, risk, verdict)
+        base = decide_with_grant(level, risk, verdict)
+        if auto_approve and base is PermissionDecision.CONFIRM:
+            LOGGER.info(
+                "trust mode: auto-approved %s for %r (risk=%s)",
+                turn.action.type,
+                turn.sub_goal,
+                risk.value,
+            )
+            return PermissionDecision.ALLOW
+        return base
 
     return guard
 
@@ -819,7 +838,9 @@ class Agent:
                 execute_physical=client.send,
                 kill_switch=kill_switch,
                 guard=guarded(
-                    self._config.autonomy_level, authorize=grant_authorizer
+                    self._config.autonomy_level,
+                    authorize=grant_authorizer,
+                    auto_approve=self._config.auto_approve,
                 ),
                 confirm_handler=self._config.confirm_handler,
                 # One capture source, two consumers: ORIENT verification and

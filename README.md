@@ -51,6 +51,7 @@ src/computeruse/
 │   ├── planner.py   # Phase 3: hierarchical goal decomposition + session checkpoints
 │   ├── supervisor.py# ADR-1: bounded respawn of a driver that died mid-run
 │   ├── mission.py   # Law 4: durable work items — blocked vs failed, resume
+│   ├── report.py    # Law 5: what happened overnight + per-run spend record
 │   └── client.py    # typed JSON-RPC client to the Rust driver
 ├── providers/
 │   └── openai.py    # `--model openai` transport (stdlib urllib; no SDK dep)
