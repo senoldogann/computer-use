@@ -1005,6 +1005,7 @@ class OodaRunner:
         self._observation = EMPTY_OBSERVATION
         self._decision_window = None
         self._stale_rejections = 0
+        self._consecutive_search_misses = 0
         self._last_physical = None
         self._stuck_streak = 0
         self._pending_action = None
@@ -1296,6 +1297,7 @@ class OodaRunner:
                 "ooda %s: %s", outcome.step_label, outcome.action.model_dump(exclude_none=True)
             )
         if outcome.route == "physical":
+            self._consecutive_search_misses = 0
             self._record_for_progress(outcome.action)
         self._trace_step(decision, outcome, verdict=verdict, error=None)
         # A successful action clears obsolete recovery diagnostics: the
@@ -2410,9 +2412,43 @@ class OodaRunner:
         """
         try:
             if isinstance(action, WebSearch):
+                mcp_search_tools: list[str] = []
+                if self.mcp is not None:
+                    for tool in self.mcp.tools:
+                        name_lower = tool.qualified_name.lower()
+                        desc_lower = tool.description.lower()
+                        if any(k in name_lower or k in desc_lower for k in ("search", "exa", "tavily", "brave")):
+                            mcp_search_tools.append(tool.qualified_name)
+
+                if self._consecutive_search_misses >= 2:
+                    if mcp_search_tools:
+                        return (
+                            f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
+                            f"Aramayı web_search ile tekrarlayamazsınız! Lütfen kurulu MCP arama araçlarını ({', '.join(mcp_search_tools)}) "
+                            f"call_tool ile kullanın veya doğrudan ekrandaki Google Chrome tarayıcısına geçip arama çubuğunu kullanın."
+                        )
+                    return (
+                        f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
+                        f"Aramayı web_search ile tekrarlayamazsınız! Lütfen doğrudan ekrandaki Google Chrome tarayıcısına geçip arama çubuğunu kullanın."
+                    )
+
                 hits = search_web(action.query)
                 if not hits:
-                    return f"web_search {action.query!r}: no results"
+                    self._consecutive_search_misses += 1
+                    if mcp_search_tools:
+                        hint = (
+                            f"web_search sonuç döndüremedi ({self._consecutive_search_misses}. kez). Aramayı web_search ile tekrarlamayın! "
+                            f"Eğer kurulu başka bir web arama MCP'si varsa ({', '.join(mcp_search_tools)}) call_tool ile onu deneyin; "
+                            f"yoksa doğrudan ekrandaki Google Chrome tarayıcısına geçin ve arama çubuğunu kullanın."
+                        )
+                    else:
+                        hint = (
+                            f"web_search sonuç döndüremedi ({self._consecutive_search_misses}. kez). Aramayı web_search ile tekrarlamayın! "
+                            f"Doğrudan ekrandaki Google Chrome tarayıcısına geçin ve arama çubuğunu kullanarak aramayı fiziksel olarak gerçekleştirin."
+                        )
+                    return f"web_search {action.query!r}: no results. {hint}"
+
+                self._consecutive_search_misses = 0
                 lines = "\n".join(f"- {hit.render()}" for hit in hits)
                 return f"web_search {action.query!r} returned:\n{lines}"
             if isinstance(action, WebFetch):
@@ -2425,6 +2461,8 @@ class OodaRunner:
                         "Use the screen or the web tools instead."
                     )
                 outcome = self.mcp.call(action.tool, action.arguments)
+                if not outcome.failed:
+                    self._consecutive_search_misses = 0
                 status = "failed" if outcome.failed else "returned"
                 # Deliberately NOT fenced here. This string becomes
                 # ``tool_result``, which the prompt renders inside the one
@@ -2435,7 +2473,26 @@ class OodaRunner:
                 return f"call_tool {action.tool} {status}:\n{outcome.text}"
         except WebError as exc:
             LOGGER.warning("ooda tool %s failed: %s", action.type, exc)
-            return f"{action.type} failed: {exc}"
+            self._consecutive_search_misses += 1
+            mcp_search_tools = []
+            if self.mcp is not None:
+                for tool in self.mcp.tools:
+                    name_lower = tool.qualified_name.lower()
+                    desc_lower = tool.description.lower()
+                    if any(k in name_lower or k in desc_lower for k in ("search", "exa", "tavily", "brave")):
+                        mcp_search_tools.append(tool.qualified_name)
+            if mcp_search_tools:
+                fallback_advice = (
+                    f"web_search servisi hata verdi ({exc}). Aramayı web_search ile tekrarlamayın! "
+                    f"Kurulu MCP arama araçlarını ({', '.join(mcp_search_tools)}) call_tool ile deneyin "
+                    f"veya Google Chrome tarayıcısını açıp aramayı doğrudan tarayıcı üzerinden yapın."
+                )
+            else:
+                fallback_advice = (
+                    f"web_search servisi hata verdi ({exc}). Aramayı web_search ile tekrarlamayın! "
+                    f"Doğrudan Google Chrome tarayıcısına geçip aramayı tarayıcı üzerinden yapın."
+                )
+            return f"{action.type} failed: {fallback_advice}"
         raise ValueError(f"not a tool action: {action.type!r}")
 
     def _load_skill_for(self, action: Action) -> SkillDefinition:

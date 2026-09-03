@@ -6,30 +6,41 @@
 <title>Computer Use</title>
 <style>
   :root {
-    --accent: #50A574;
-    --accent-hover: #449265;
-    --accent-glow: rgba(80, 165, 116, 0.40);
-    --accent-gradient: linear-gradient(135deg, #50A574 0%, #3a7d55 100%);
-    --bg-base: #141414;
-    --surface: #1A1A1A;
-    --surface-hover: #222222;
-    --surface-active: #282828;
-    --border: #262626;
-    --border-highlight: #333333;
-    --text-primary: #FFFFFF;
-    --text-secondary: #A4A4A4;
-    --text-tertiary: #6E6E6E;
-    --success: #50A574;
-    --success-glow: rgba(80, 165, 116, 0.40);
-    --warning: #ffd60a;
-    --warning-glow: rgba(255, 214, 10, 0.35);
-    --error: #ff453a;
-    --error-glow: rgba(255, 69, 58, 0.35);
-    --purple: #bf5af2;
-    --cyan: #5ac8fa;
+    /* Claude Anthropic Signature Palette */
+    --accent: #D97757;                   /* Official Anthropic Orange / Terracotta */
+    --accent-hover: #E08365;
+    --accent-glow: rgba(217, 119, 87, 0.35);
+    --accent-gradient: linear-gradient(135deg, #E08365 0%, #D97757 50%, #C15F3C 100%);
+    
+    /* Warm Charcoal Dark Canvas */
+    --bg-base: #1A1916;                  /* Anthropic Warm Dark Base */
+    --surface: #22211D;                  /* Elevated Panel Surface */
+    --surface-hover: #2B2A25;
+    --surface-active: #34332D;
+    
+    /* Subtle Warm Borders */
+    --border: #33312B;
+    --border-highlight: #45433B;
+    --border-subtle: rgba(255, 255, 255, 0.07);
+
+    /* Typography */
+    --text-primary: #FAF9F5;             /* Claude Warm Ivory Paper White */
+    --text-secondary: #B0AEA5;           /* Claude Warm Mid Gray */
+    --text-tertiary: #75736B;            /* Muted Slate Gray */
+
+    /* Status & Accents */
+    --success: #788C5D;                  /* Anthropic Olive Green */
+    --success-glow: rgba(120, 140, 93, 0.35);
+    --warning: #D4A359;                  /* Anthropic Warm Amber */
+    --warning-glow: rgba(212, 163, 89, 0.30);
+    --error: #D05548;                    /* Coral Crimson */
+    --error-glow: rgba(208, 85, 72, 0.30);
+    --purple: #9D79BC;                   /* Anthropic Mauve */
+    --cyan: #6A9BCC;                     /* Anthropic Sky Blue */
+
     --radius-sm: 6px;
     --radius-md: 10px;
-    --radius-lg: 14px;
+    --radius-lg: 16px;
     --radius-pill: 999px;
   }
 
@@ -47,7 +58,7 @@
     -webkit-user-select: none;
     user-select: none;
     position: relative;
-    border: 0.75px solid #242424;
+    border: 0.75px solid var(--border);
   }
 
   body::after {
@@ -74,7 +85,7 @@
     justify-content: space-between;
     padding: 0 14px;
     border-bottom: 0.5px solid var(--border);
-    background: #171717;
+    background: #201F1B;
     z-index: 10;
   }
 
@@ -85,7 +96,7 @@
     min-width: 0;
   }
 
-  .mark{
+  .mark {
     width: 28px;
     height: 28px;
     border-radius: 8px;
@@ -93,13 +104,14 @@
     display: grid;
     place-items: center;
     background: var(--accent-gradient);
-    box-shadow: 0 2px 8px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.4);
+    box-shadow: 0 2px 10px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.35);
     position: relative;
+    color: #FFFFFF;
   }
 
   .mark svg {
-    width: 15px;
-    height: 15px;
+    width: 16px;
+    height: 16px;
   }
 
   .brand-text {
@@ -111,7 +123,7 @@
   .app-name {
     font-size: 12px;
     font-weight: 650;
-    letter-spacing: -0.1px;
+    letter-spacing: -0.15px;
     line-height: 1.2;
     color: var(--text-primary);
   }
@@ -135,7 +147,7 @@
     gap: 6px;
     padding: 3px 9px;
     border-radius: var(--radius-pill);
-    background: #1E1E1E;
+    background: #262521;
     border: 0.5px solid var(--border);
   }
 
@@ -178,14 +190,14 @@
     gap: 5px;
     padding: 3px 8px;
     border-radius: var(--radius-pill);
-    background: #1E1E1E;
+    background: #262521;
     border: 0.5px solid var(--border);
     font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
     font-size: 9.5px;
     color: var(--text-secondary);
     white-space: nowrap;
   }
-  .stat-pill svg { width: 10px; height: 10px; color: var(--accent); }
+  .stat-pill svg { width: 10px; height: 10px; color: var(--accent); flex-shrink: 0; }
 
   .icon-btn {
     width: 24px;
@@ -207,9 +219,9 @@
     top: 56px;
     left: 50%;
     transform: translateX(-50%) translateY(-10px);
-    background: #1B2920;
-    border: 0.5px solid rgba(80, 165, 116, 0.45);
-    color: #FFFFFF;
+    background: #2A241E;
+    border: 0.5px solid rgba(217, 119, 87, 0.45);
+    color: #FAF9F5;
     font-size: 11px;
     font-weight: 600;
     padding: 6px 14px;
@@ -230,9 +242,9 @@
 
   /* Expand / Collapse Button */
   .expand-btn {
-    background: rgba(80, 165, 116, 0.12);
+    background: rgba(217, 119, 87, 0.12);
     color: var(--accent);
-    border: 0.5px solid rgba(80, 165, 116, 0.35);
+    border: 0.5px solid rgba(217, 119, 87, 0.35);
     border-radius: 4px;
     font-size: 9px;
     font-weight: 650;
@@ -246,7 +258,7 @@
     vertical-align: baseline;
   }
   .expand-btn:hover {
-    background: rgba(80, 165, 116, 0.25);
+    background: rgba(217, 119, 87, 0.25);
     border-color: var(--accent);
   }
 
@@ -254,7 +266,7 @@
   .tab-bar {
     flex: 0 0 auto;
     display: flex;
-    background: #171717;
+    background: #1C1B18;
     padding: 6px 14px;
     gap: 6px;
     border-bottom: 0.5px solid var(--border);
@@ -277,13 +289,13 @@
     transition: all 0.15s ease;
   }
 
-  .tab-btn svg { width: 13px; height: 13px; }
-  .tab-btn:hover { background: #202020; color: var(--text-primary); }
+  .tab-btn svg { width: 13px; height: 13px; flex-shrink: 0; }
+  .tab-btn:hover { background: #262521; color: var(--text-primary); }
   .tab-btn.active {
-    background: #242424;
-    color: #FFFFFF;
+    background: #2A2924;
+    color: #FAF9F5;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-    border: 0.5px solid #333333;
+    border: 0.5px solid #3F3D35;
   }
   .tab-btn.active svg { color: var(--accent); }
 
@@ -306,15 +318,14 @@
     gap: 2px;
     padding: 10px 12px;
     min-height: 0;
-    /* Streaming feed surface: near-black like the reference activity feed. */
-    background: #121212;
+    background: #151412;
   }
 
   #log::-webkit-scrollbar,
   .tab-pane::-webkit-scrollbar { width: 5px; }
   #log::-webkit-scrollbar-thumb,
   .tab-pane::-webkit-scrollbar-thumb {
-    background: #2E2E2E;
+    background: #33312B;
     border-radius: 3px;
   }
   #log::-webkit-scrollbar-track,
@@ -336,7 +347,7 @@
     width: 34px;
     height: 34px;
     border-radius: 9px;
-    background: #1B1B1B;
+    background: #262521;
     border: 0.5px solid var(--border);
     display: grid;
     place-items: center;
@@ -368,7 +379,7 @@
   .chip {
     padding: 6.5px 10px;
     border-radius: 8px;
-    background: #1A1A1A;
+    background: #22211D;
     border: 0.5px solid var(--border);
     color: var(--text-secondary);
     font-size: 10.5px;
@@ -382,7 +393,7 @@
   .chip svg { width: 13px; height: 13px; flex-shrink: 0; color: var(--accent); }
 
   .chip:hover {
-    background: #222222;
+    background: #2A2924;
     border-color: var(--border-highlight);
     color: var(--text-primary);
   }
@@ -873,7 +884,7 @@
     gap: 6px;
     padding: 9px 14px 11px;
     border-top: 0.5px solid var(--border);
-    background: #171717;
+    background: #201F1B;
     position: relative;
     z-index: 10;
   }
@@ -899,18 +910,373 @@
     color: var(--text-secondary);
   }
 
+  .input-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .autonomy-toggle-btn {
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 2px 7.5px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    outline: none;
+    line-height: 1.2;
+  }
+
+  .autonomy-toggle-btn.full {
+    color: var(--accent);
+    background: rgba(217, 119, 87, 0.12);
+    border: 0.5px solid rgba(217, 119, 87, 0.35);
+  }
+  .autonomy-toggle-btn.full:hover {
+    background: rgba(217, 119, 87, 0.22);
+    box-shadow: 0 0 8px rgba(217, 119, 87, 0.25);
+  }
+
+  .autonomy-toggle-btn.guarded {
+    color: var(--warning);
+    background: rgba(212, 163, 89, 0.10);
+    border: 0.5px solid rgba(212, 163, 89, 0.30);
+  }
+  .autonomy-toggle-btn.guarded:hover {
+    background: rgba(212, 163, 89, 0.18);
+    box-shadow: 0 0 8px rgba(212, 163, 89, 0.20);
+  }
+
+  .autonomy-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .mcp-toggle-btn {
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 2px 7.5px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    outline: none;
+    line-height: 1.2;
+  }
+  .mcp-toggle-btn.on {
+    color: var(--purple);
+    background: rgba(157, 121, 188, 0.12);
+    border: 0.5px solid rgba(157, 121, 188, 0.35);
+  }
+  .mcp-toggle-btn.on:hover {
+    background: rgba(157, 121, 188, 0.22);
+    box-shadow: 0 0 8px rgba(157, 121, 188, 0.25);
+  }
+  .mcp-toggle-btn.off {
+    color: var(--text-tertiary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 0.5px solid rgba(255, 255, 255, 0.10);
+  }
+  .mcp-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .pos-toggle-btn {
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 2px 7.5px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--cyan);
+    background: rgba(106, 155, 204, 0.10);
+    border: 0.5px solid rgba(106, 155, 204, 0.30);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    outline: none;
+    line-height: 1.2;
+    transition: all 0.15s ease;
+  }
+  .pos-toggle-btn:hover {
+    background: rgba(106, 155, 204, 0.20);
+  }
+  .pos-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* ----- MCP Store (Eklentiler) Styles ---------------------------------- */
+  .mcp-store-container {
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    height: 100%;
+    overflow-y: auto;
+  }
+  .mcp-header-section {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .mcp-title {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.2px;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .mcp-subtitle {
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .mcp-search-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .mcp-search-icon {
+    position: absolute;
+    left: 10px;
+    color: var(--text-tertiary);
+    display: flex;
+    align-items: center;
+    pointer-events: none;
+  }
+  .mcp-search-input {
+    padding-left: 28px !important;
+  }
+  .mcp-installed-strip {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: #22211D;
+    border: 0.5px solid var(--border);
+  }
+  .mcp-installed-header {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .mcp-installed-list {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .mcp-installed-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #282723;
+    border: 0.5px solid #383630;
+    border-radius: var(--radius-pill);
+    padding: 3px 8px 3px 6px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .mcp-remove-btn {
+    color: var(--text-tertiary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 2px;
+    transition: color 0.15s ease;
+  }
+  .mcp-remove-btn:hover {
+    color: var(--error);
+  }
+  .mcp-category-section {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .mcp-category-title {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .mcp-category-title svg {
+    width: 12px;
+    height: 12px;
+    color: var(--accent);
+  }
+  .mcp-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .mcp-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 12px;
+    background: #22211D;
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-md);
+    transition: all 0.15s ease;
+  }
+  .mcp-card:hover {
+    background: #2A2925;
+    border-color: var(--border-highlight);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  .mcp-card-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+  .mcp-card-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: #282723;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border: 0.5px solid rgba(255, 255, 255, 0.08);
+  }
+  .mcp-card-icon svg {
+    width: 16px;
+    height: 16px;
+  }
+  .mcp-card-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .mcp-card-name {
+    font-size: 11.5px;
+    font-weight: 650;
+    color: var(--text-primary);
+  }
+  .mcp-card-desc {
+    font-size: 10px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 1px;
+  }
+  .mcp-action-btn {
+    padding: 3.5px 11px;
+    border-radius: 6px;
+    font-size: 10.5px;
+    font-weight: 650;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .mcp-action-btn.install {
+    background: #2A2925;
+    color: var(--text-primary);
+    border: 0.5px solid var(--border-highlight);
+  }
+  .mcp-action-btn.install:hover {
+    background: var(--accent);
+    color: #ffffff;
+    box-shadow: 0 0 8px var(--accent-glow);
+  }
+  .mcp-action-btn.installed {
+    background: rgba(120, 140, 93, 0.15);
+    color: var(--success);
+    border: 0.5px solid rgba(120, 140, 93, 0.35);
+  }
+
+  /* Modal Dialog */
+  .mcp-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    z-index: 200;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .mcp-modal {
+    width: 100%;
+    max-width: 380px;
+    background: #22211D;
+    border: 0.75px solid #45433B;
+    border-radius: var(--radius-lg);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.75);
+    animation: fadeIn 0.15s ease-out;
+  }
+  .mcp-modal-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .mcp-modal-desc {
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+  .mcp-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
   .app-toggle-btn {
     font-size: 9px;
     font-weight: 600;
     color: var(--accent);
-    background: rgba(80, 165, 116, 0.12);
+    background: rgba(217, 119, 87, 0.12);
     padding: 1.5px 6px;
     border-radius: 4px;
-    border: 0.5px solid rgba(80, 165, 116, 0.3);
+    border: 0.5px solid rgba(217, 119, 87, 0.3);
     cursor: pointer;
     transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
   }
-  .app-toggle-btn:hover { background: rgba(80, 165, 116, 0.22); }
+  .app-toggle-btn:hover { background: rgba(217, 119, 87, 0.22); }
 
   .app-field-container {
     display: none;
@@ -919,8 +1285,8 @@
 
   .text-input {
     width: 100%;
-    background: #1B1B1B;
-    border: 0.5px solid #2B2B2B;
+    background: #262521;
+    border: 0.5px solid #383630;
     border-radius: var(--radius-md);
     color: var(--text-primary);
     font-size: 11.5px;
@@ -929,9 +1295,9 @@
     transition: all 0.15s ease;
   }
 
-  .text-input::placeholder { color: #585858; }
+  .text-input::placeholder { color: #6E6B63; }
   .text-input:focus {
-    background: #202020;
+    background: #2A2924;
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--accent-glow);
   }
@@ -961,18 +1327,18 @@
     flex: 1;
     background: var(--accent-gradient);
     color: #fff;
-    box-shadow: 0 2px 7px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.35);
+    box-shadow: 0 2px 8px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.35);
   }
   .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 
   .btn-stop {
-    background: #2A1717;
-    border: 0.5px solid #4A2323;
-    color: #ff5e55;
+    background: #2A1919;
+    border: 0.5px solid #4A2828;
+    color: #ff6b60;
     display: none;
   }
-  .btn-stop:hover { background: #381D1D; }
+  .btn-stop:hover { background: #382020; }
 
   .kbd-badge {
     font-size: 9px;
@@ -1001,8 +1367,8 @@
   <header class="toolbar">
     <div class="brand-group">
       <div class="mark">
-        <svg viewBox="0 0 24 24" fill="none">
-          <path d="M5 4.5 20 12 5 19.5 8.6 12z" fill="#fff"/>
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M12 2C12.4 7.2 16.8 11.6 22 12C16.8 12.4 12.4 16.8 12 22C11.6 16.8 7.2 12.4 2 12C7.2 11.6 11.6 7.2 12 2Z"/>
         </svg>
       </div>
       <div class="brand-text">
@@ -1016,8 +1382,14 @@
         <div class="status-dot ok" id="dot"></div>
         <span class="status-text" id="stLabel">Idle</span>
       </div>
-      <div class="stat-pill" id="statTokens" title="Toplam kullanılan token">⚡ 0 tok</div>
-      <div class="stat-pill" id="statElapsed" title="Toplam geçen süre">⏱ 0s</div>
+      <div class="stat-pill" id="statTokens" title="Toplam kullanılan token">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        <span id="statTokensVal">0 tok</span>
+      </div>
+      <div class="stat-pill" id="statElapsed" title="Toplam geçen süre">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span id="statElapsedVal">0s</span>
+      </div>
       <button class="icon-btn" id="copyBtn" title="Tüm logları kopyala / Copy session logs" onclick="copySessionLogs()">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -1044,6 +1416,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       <span>Live Agent</span>
     </button>
+    <button class="tab-btn" id="tabBtnMcp" onclick="switchTab('mcp')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6m0 8v6M4.93 4.93l4.24 4.24m5.66 5.66 4.24 4.24M2 12h6m8 0h6M4.93 19.07l4.24-4.24m5.66-5.66 4.24-4.24"/></svg>
+      <span>Eklentiler</span>
+    </button>
     <button class="tab-btn" id="tabBtnHistory" onclick="switchTab('history')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       <span>History</span>
@@ -1059,10 +1435,8 @@
     <div id="log" role="log" aria-live="polite">
       <div class="empty-state" id="emptyHero">
         <div class="empty-icon">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
-            <polyline points="2 17 12 22 22 17"/>
-            <polyline points="2 12 12 17 22 12"/>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2C12.4 7.2 16.8 11.6 22 12C16.8 12.4 12.4 16.8 12 22C11.6 16.8 7.2 12.4 2 12C7.2 11.6 11.6 7.2 12 2Z"/>
           </svg>
         </div>
         <div class="empty-title">Ready for Your Next Task</div>
@@ -1137,23 +1511,38 @@
       </div>
       <div class="actions-list">
         <div class="action-metric-row">
-          <span>🖱️ Mouse Clicks</span>
+          <span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 3 7 18 3-7 7-3L3 3z"/><path d="m13 13 6 6"/></svg>
+            Mouse Clicks
+          </span>
           <strong id="statClicks">0</strong>
         </div>
         <div class="action-metric-row">
-          <span>⌨️ Text Typings</span>
+          <span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6.01" y2="8"/><line x1="10" y1="8" x2="10.01" y2="8"/><line x1="14" y1="8" x2="14.01" y2="8"/><line x1="18" y1="8" x2="18.01" y2="8"/><line x1="7" y1="16" x2="17" y2="16"/></svg>
+            Text Typings
+          </span>
           <strong id="statTypes">0</strong>
         </div>
         <div class="action-metric-row">
-          <span>📋 Clipboard Pastes</span>
+          <span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+            Clipboard Pastes
+          </span>
           <strong id="statPastes">0</strong>
         </div>
         <div class="action-metric-row">
-          <span>⚡ Keyboard Hotkeys</span>
+          <span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0 3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/></svg>
+            Keyboard Hotkeys
+          </span>
           <strong id="statHotkeys">0</strong>
         </div>
         <div class="action-metric-row">
-          <span>📱 App Activations</span>
+          <span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+            App Activations
+          </span>
           <strong id="statApps">0</strong>
         </div>
       </div>
@@ -1166,15 +1555,70 @@
     </div>
   </section>
 
+  <!-- TAB 4: MCP Store (Eklentiler) -->
+  <main class="tab-pane" id="tabMcp">
+    <div class="mcp-store-container">
+      <div class="mcp-header-section">
+        <div class="mcp-title">
+          <span>Eklentiler</span>
+          <span id="mcpActiveCount" style="font-size:10px;font-weight:600;color:var(--accent);background:rgba(217,119,87,0.15);padding:2px 7px;border-radius:999px;">0 Aktif</span>
+        </div>
+        <div class="mcp-subtitle">Computer Use'u favori araçlarınızla güçlendirin</div>
+      </div>
+
+      <div class="mcp-search-wrapper">
+        <span class="mcp-search-icon">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </span>
+        <input class="text-input mcp-search-input" id="mcpSearchInput" placeholder="Eklenti veya araç ara..." oninput="filterMcpCatalog(this.value)">
+      </div>
+
+      <div class="mcp-installed-strip" id="mcpInstalledStrip">
+        <div class="mcp-installed-header">
+          <span>Kurulu Araçlar</span>
+          <span id="mcpInstalledCount" style="color:var(--accent);">0 Kurulu</span>
+        </div>
+        <div class="mcp-installed-list" id="mcpInstalledList">
+          <span style="font-size: 11px; color: var(--text-tertiary);">Yükleniyor...</span>
+        </div>
+      </div>
+
+      <div id="mcpCatalogContainer" style="display:flex; flex-direction:column; gap:14px;"></div>
+    </div>
+  </main>
+
   <!-- Footer Compose -->
   <footer>
     <div class="input-wrapper">
       <div class="input-header">
         <label class="input-label" for="goal">Instruction / Goal</label>
-        <button class="app-toggle-btn" id="appToggleBtn" type="button">+ Target App</button>
+        <div class="input-header-actions">
+          <button class="autonomy-toggle-btn full" id="autonomyToggleBtn" type="button" title="Full Autonomy (Level 3): Rutin adımlarda izin istemeden otomatik ilerler">
+            <span class="autonomy-icon" id="autonomyIcon">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            </span>
+            <span id="autonomyLabel">Full Auto</span>
+          </button>
+          <button class="mcp-toggle-btn on" id="mcpToggleBtn" type="button" title="MCP Sunucuları: Eklenti araçlarını modele bağlar">
+            <span class="mcp-icon">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6m0 8v6M4.93 4.93l4.24 4.24m5.66 5.66 4.24 4.24M2 12h6m8 0h6"/></svg>
+            </span>
+            <span id="mcpLabel">MCP</span>
+          </button>
+          <button class="pos-toggle-btn" id="posToggleBtn" type="button" title="Konum: Ekranın alt ortası (Claude Dock stili) veya Menü Barı">
+            <span class="pos-icon" id="posIcon">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="16" width="16" height="4" rx="1"/><circle cx="12" cy="8" r="3"/><line x1="12" y1="11" x2="12" y2="16"/></svg>
+            </span>
+            <span id="posLabel">Dock</span>
+          </button>
+          <button class="app-toggle-btn" id="appToggleBtn" type="button" title="Hedef Uygulama Belirle">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span>App</span>
+          </button>
+        </div>
       </div>
       <input class="text-input" id="goal" autocomplete="off" spellcheck="false"
-        placeholder="e.g. open address bar, type github.com and hit Enter">
+        placeholder="What can I help you with today? / Ne yapmamı istersiniz?">
     </div>
 
     <div class="input-wrapper app-field-container" id="appField">
@@ -1186,16 +1630,20 @@
 
     <div class="btn-row">
       <button class="btn btn-primary" id="run">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
         <span>Run Agent</span>
         <span class="kbd-badge">⌘⏎</span>
       </button>
       <button class="btn btn-stop" id="stop">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
         <span>Stop</span>
       </button>
     </div>
 
     <div class="footer-legend">
-      Auto-grounds on frontmost app · Press <kbd>Cmd+Shift+Esc</kbd> anytime to reclaim control
+      <span>Auto-grounds on frontmost app · Press</span>
+      <kbd>Cmd+Shift+Esc</kbd>
+      <span>anytime to reclaim control</span>
     </div>
   </footer>
 
@@ -1216,6 +1664,51 @@
   window._lastElapsedS = 0;
   var dot = document.getElementById("dot");
   var stLabel = document.getElementById("stLabel");
+  var autonomyToggleBtn = document.getElementById("autonomyToggleBtn");
+  var autonomyLabel = document.getElementById("autonomyLabel");
+
+  var currentAutonomyLevel = 3;
+  try {
+    var savedLvl = parseInt(localStorage.getItem("cu_autonomy_level"), 10);
+    if (savedLvl === 2 || savedLvl === 3) currentAutonomyLevel = savedLvl;
+  } catch(e){}
+
+  var autonomyIcon = document.getElementById("autonomyIcon");
+
+  function updateAutonomyUI() {
+    if (!autonomyToggleBtn || !autonomyLabel) return;
+    if (currentAutonomyLevel === 3) {
+      autonomyToggleBtn.className = "autonomy-toggle-btn full";
+      autonomyLabel.textContent = "Full Auto";
+      if (autonomyIcon) autonomyIcon.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
+      autonomyToggleBtn.title = "Full Autonomy (Level 3): Rutin adımlarda izin istemeden otomatik ilerler. Tıklayarak Guarded moda geçebilirsiniz.";
+    } else {
+      autonomyToggleBtn.className = "autonomy-toggle-btn guarded";
+      autonomyLabel.textContent = "Guarded";
+      if (autonomyIcon) autonomyIcon.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>';
+      autonomyToggleBtn.title = "Guarded Mode (Level 2): Durum değiştiren ve rutin adımlarda onay ister. Tıklayarak Tam Otonomiye geçebilirsiniz.";
+    }
+  }
+  updateAutonomyUI();
+
+  if (autonomyToggleBtn) {
+    autonomyToggleBtn.addEventListener("click", function(){
+      currentAutonomyLevel = (currentAutonomyLevel === 3) ? 2 : 3;
+      try { localStorage.setItem("cu_autonomy_level", currentAutonomyLevel); } catch(e){}
+      updateAutonomyUI();
+      post({cmd: "set_level", level: currentAutonomyLevel});
+      showToast(currentAutonomyLevel === 3 ? "Tam Otonomi Aktif (İzin İstenmez)" : "Denetimli Mod Aktif (İzin İstenir)");
+    });
+  }
+
+  window.setAutonomyLevel = function(lvl) {
+    if (lvl === 2 || lvl === 3) {
+      currentAutonomyLevel = lvl;
+      try { localStorage.setItem("cu_autonomy_level", currentAutonomyLevel); } catch(e){}
+      updateAutonomyUI();
+      showToast(currentAutonomyLevel === 3 ? "Tam Otonomi Aktif" : "Denetimli Mod Aktif");
+    }
+  };
 
   var currentTree = null;
   var currentRunRecord = null;
@@ -1252,27 +1745,59 @@
     search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
     bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
     err: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
-    rerun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>'
+    rerun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+    cross: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+    plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6m0 8v6M4.93 4.93l4.24 4.24m5.66 5.66 4.24 4.24M2 12h6m8 0h6"/></svg>',
+    gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
   };
 
   /* ----- Tab Management -------------------------------------------------- */
-  window.switchTab = function(tabName){
+  function switchTab(tabName){
     document.querySelectorAll(".tab-btn").forEach(function(b){ b.classList.remove("active"); });
     document.querySelectorAll(".tab-pane").forEach(function(p){ p.classList.remove("active"); });
 
     if(tabName === "live"){
-      document.getElementById("tabBtnLive").classList.add("active");
-      document.getElementById("tabLive").classList.add("active");
+      var btn = document.getElementById("tabBtnLive");
+      var pane = document.getElementById("tabLive");
+      if (btn) btn.classList.add("active");
+      if (pane) pane.classList.add("active");
+    } else if(tabName === "mcp"){
+      var btn = document.getElementById("tabBtnMcp");
+      var pane = document.getElementById("tabMcp");
+      if (btn) btn.classList.add("active");
+      if (pane) pane.classList.add("active");
+      if (typeof renderMcpStoreView === "function") renderMcpStoreView();
+      else if (window.renderMcpStoreView) window.renderMcpStoreView();
     } else if(tabName === "history"){
-      document.getElementById("tabBtnHistory").classList.add("active");
-      document.getElementById("tabHistory").classList.add("active");
-      renderHistoryView();
+      var btn = document.getElementById("tabBtnHistory");
+      var pane = document.getElementById("tabHistory");
+      if (btn) btn.classList.add("active");
+      if (pane) pane.classList.add("active");
+      if (typeof renderHistoryView === "function") renderHistoryView();
+      else if (window.renderHistoryView) window.renderHistoryView();
     } else if(tabName === "analytics"){
-      document.getElementById("tabBtnAnalytics").classList.add("active");
-      document.getElementById("tabAnalytics").classList.add("active");
-      renderAnalyticsView();
+      var btn = document.getElementById("tabBtnAnalytics");
+      var pane = document.getElementById("tabAnalytics");
+      if (btn) btn.classList.add("active");
+      if (pane) pane.classList.add("active");
+      if (typeof renderAnalyticsView === "function") renderAnalyticsView();
+      else if (window.renderAnalyticsView) window.renderAnalyticsView();
     }
-  };
+  }
+  window.switchTab = switchTab;
+
+  // Bind click listeners explicitly
+  var btnLive = document.getElementById("tabBtnLive");
+  var btnMcp = document.getElementById("tabBtnMcp");
+  var btnHist = document.getElementById("tabBtnHistory");
+  var btnAna = document.getElementById("tabBtnAnalytics");
+  if (btnLive) btnLive.onclick = function(){ switchTab("live"); };
+  if (btnMcp) btnMcp.onclick = function(){ switchTab("mcp"); };
+  if (btnHist) btnHist.onclick = function(){ switchTab("history"); };
+  if (btnAna) btnAna.onclick = function(){ switchTab("analytics"); };
 
   /* ----- Storage & Task History ------------------------------------------ */
   function getStoredHistory(){
@@ -1364,34 +1889,40 @@
     return currentTree;
   }
 
+  var BOLT_ICON = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
+  var CLOCK_ICON = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+
   function updateRunStats(line){
-    // "st : tok_total=1234 elapsed=41.3s" streamed by the CLI after every
-    // model call; feeds the header counters without touching the feed.
     var t = (line.match(/tok_total=(\d+)/) || [])[1];
     var e = (line.match(/elapsed=([\d.]+)s/) || [])[1];
     var c = (line.match(/calls=(\d+)/) || [])[1];
-    if (t) { window._lastTokens = parseInt(t, 10) || 0; statsTokens.textContent = "⚡ " + window._lastTokens.toLocaleString("tr-TR") + " tok"; }
-    if (e) { window._lastElapsedS = parseFloat(e) || 0; statsElapsed.textContent = "⏱ " + Math.round(window._lastElapsedS) + "s"; }
+    if (t) {
+      window._lastTokens = parseInt(t, 10) || 0;
+      statsTokens.innerHTML = BOLT_ICON + ' <span>' + window._lastTokens.toLocaleString("tr-TR") + ' tok</span>';
+    }
+    if (e) {
+      window._lastElapsedS = parseFloat(e) || 0;
+      statsElapsed.innerHTML = CLOCK_ICON + ' <span>' + Math.round(window._lastElapsedS) + 's</span>';
+    }
     if (c) { window._lastCalls = parseInt(c, 10) || 0; }
   }
 
   function submit(){
     var g = goal.value.trim();
     if(!g) return;
-    var m = {cmd:"run", goal:g};
+    var m = {cmd:"run", goal:g, level:currentAutonomyLevel};
     var a = app.value.trim();
     if(a) m.app = a;
 
     if (emptyHero) emptyHero.style.display = "none";
-    currentTree = null; // Start fresh tree spine
-    // Fresh run, fresh counters.
+    currentTree = null;
     window._lastTokens = 0;
     window._lastElapsedS = 0;
     window._lastCalls = 0;
-    statsTokens.textContent = "⚡ 0 tok";
-    statsElapsed.textContent = "⏱ 0s";
+    statsTokens.innerHTML = BOLT_ICON + ' <span>0 tok</span>';
+    statsElapsed.innerHTML = CLOCK_ICON + ' <span>0s</span>';
     renderConnectCard();
-    renderGoalCard(g, a);
+    renderGoalCard(g, a, currentAutonomyLevel);
     setRunning(true);
 
     currentRunRecord = {
@@ -1489,28 +2020,18 @@
     }
 
     var lines = [
-      "# 🤖 Computer Use Ajan Oturum Logları",
-      "**Tarih:** " + new Date().toLocaleString(),
-      "**Toplam Olay:** " + sessionEvents.length,
+      "# Computer Use Session Log",
+      "**Date:** " + new Date().toLocaleString(),
+      "**Total Events:** " + sessionEvents.length,
       "",
       "---",
       "",
-      "### 📋 Adım Adım Çalışma Geçmişi:",
+      "### Execution Step Trace:",
       ""
     ];
 
     sessionEvents.forEach(function(ev, idx) {
-      var icon = "🔹";
-      if (ev.type === "Goal") icon = "🎯";
-      else if (ev.type === "Reasoning") icon = "🧠";
-      else if (ev.type === "Sub-goal") icon = "🎯";
-      else if (ev.type === "Observe") icon = "👁️";
-      else if (ev.type === "Action") icon = "🖱️";
-      else if (ev.type === "Verified") icon = "✅";
-      else if (ev.type === "Error") icon = "❌";
-      else if (ev.type === "Completed") icon = "🏆";
-
-      lines.push((idx + 1) + ". **[" + ev.time + "] " + icon + " " + ev.type + ":** " + ev.summary);
+      lines.push((idx + 1) + ". **[" + ev.time + "] " + ev.type + ":** " + ev.summary);
       if (ev.raw && ev.raw !== ev.summary && ev.type !== "Reasoning" && ev.type !== "Observe") {
         lines.push("   ```\n   " + ev.raw + "\n   ```");
       }
@@ -1518,10 +2039,9 @@
 
     var mdText = lines.join("\n");
 
-    // Copy to clipboard
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(mdText).then(function(){
-        showToast("📋 Tüm loglar panoya kopyalandı!");
+        showToast("Tüm loglar panoya kopyalandı!");
       }).catch(function(){
         fallbackCopy(mdText);
       });
@@ -1529,7 +2049,6 @@
       fallbackCopy(mdText);
     }
 
-    // Visual button feedback
     var copyBtn = document.getElementById("copyBtn");
     if (copyBtn) {
       var origSvg = copyBtn.innerHTML;
@@ -1548,7 +2067,7 @@
     ta.select();
     try {
       document.execCommand("copy");
-      showToast("📋 Tüm loglar panoya kopyalandı!");
+      showToast("Tüm loglar panoya kopyalandı!");
     } catch(e) {
       showToast("Kopyalama başarısız oldu");
     }
@@ -1559,16 +2078,17 @@
     return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  function renderGoalCard(goalText, appText) {
+  function renderGoalCard(goalText, appText, level) {
     closeGroup();
     recordSessionEvent("Goal", (appText ? "[" + appText + "] " : "") + goalText);
-    // Reference pattern: "connected to the computer" style first line with a
-    // laptop icon; the target app rides as the indented child row.
     var card = document.createElement("div");
     card.className = "step-card";
+    var levelBadge = (level === 2)
+      ? '<span style="font-size:9.5px;font-weight:600;color:var(--warning);background:rgba(212,163,89,0.12);padding:1.5px 6px;border-radius:4px;border:0.5px solid rgba(212,163,89,0.3);margin-left:8px;display:inline-flex;align-items:center;gap:4px;"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> Guarded</span>'
+      : '<span style="font-size:9.5px;font-weight:600;color:var(--accent);background:rgba(217,119,87,0.12);padding:1.5px 6px;border-radius:4px;border:0.5px solid rgba(217,119,87,0.3);margin-left:8px;display:inline-flex;align-items:center;gap:4px;"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Full Auto</span>';
     var html = 
       '<div class="feed-line feed-head"><span class="feed-icon">' + ICONS.laptop + '</span>' +
-      '<span class="feed-text">' + escapeHtml(goalText) + '</span></div>';
+      '<span class="feed-text">' + escapeHtml(goalText) + levelBadge + '</span></div>';
     if (appText) {
       html += '<div class="feed-sub"><span class="feed-icon">' + ICONS.globe + '</span>' +
         '<span>Hedef uygulama · ' + escapeHtml(appText) + '</span></div>';
@@ -1589,7 +2109,7 @@
 
   /* ----- Reference-feed group pattern ------------------------------------ */
   // Streaming rows are grouped like the reference feed: a header line
-  // (💻 connected, ◎ sub-goal, 🔍 totals) with the rows that belong to it as
+  // (connected, sub-goal, totals) with the rows that belong to it as
   // indented children — the same shape as its "N arama çalıştırıldı" group.
   var currentGroup = null;
 
@@ -1715,6 +2235,17 @@
         detail = "Bring App to Front: <b>" + escapeHtml(parsed.app) + "</b>";
         if(currentRunRecord) currentRunRecord.actions.apps++;
         totals.apps++;
+      } else if (actType === "web_search") {
+        iconSvg = ICONS.globe;
+        detail = 'Web Search: <b>"' + escapeHtml(parsed.query || "") + '"</b> <span style="font-size:9px;color:var(--cyan);background:rgba(90,200,250,0.12);padding:1.5px 5px;border-radius:4px;margin-left:6px;">SearXNG</span>';
+      } else if (actType === "call_tool") {
+        iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
+        detail = 'MCP Tool: <code>' + escapeHtml(parsed.tool || "") + '</code> <span style="font-size:9px;color:var(--purple);background:rgba(191,90,242,0.12);padding:1.5px 5px;border-radius:4px;margin-left:6px;">MCP</span>';
+      } else if (actType === "click_mark") {
+        iconSvg = ICONS.click;
+        detail = 'Click AX Mark <code>[' + parsed.mark + ']</code> · ' + (parsed.button || "left");
+        if(currentRunRecord) currentRunRecord.actions.clicks++;
+        totals.clicks++;
       } else if (actType === "wait") {
         iconSvg = ICONS.wait;
         detail = "Wait " + parsed.duration_ms + "ms (" + escapeHtml(parsed.reason || "") + ")";
@@ -1841,14 +2372,14 @@
     actions.className = "confirm-actions";
     var approve = document.createElement("button");
     approve.className = "confirm-btn approve";
-    approve.textContent = "✓ Approve";
+    approve.innerHTML = ICONS.check + " <span>Approve</span>";
     approve.addEventListener("click", function(){
       post({cmd:"confirm", answer:"y"});
       card.remove();
     });
     var deny = document.createElement("button");
     deny.className = "confirm-btn deny";
-    deny.textContent = "✕ Deny";
+    deny.innerHTML = ICONS.cross + " <span>Deny</span>";
     deny.addEventListener("click", function(){
       post({cmd:"confirm", answer:"n"});
       card.remove();
@@ -1994,7 +2525,11 @@
       var card = document.createElement("div");
       card.className = "history-card";
       var statusClass = item.status === "success" ? "success" : "failed";
-      var statusLabel = item.status === "success" ? "✓ Done" : (item.status === "stopped" ? "⏹ Stopped" : "✕ Error");
+      var statusIcon = item.status === "success"
+        ? ICONS.check
+        : (item.status === "stopped" ? '<svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>' : ICONS.cross);
+      var statusText = item.status === "success" ? "Done" : (item.status === "stopped" ? "Stopped" : "Error");
+      var statusBadge = '<span class="tag-pill ' + statusClass + '" style="display:inline-flex;align-items:center;gap:4px;">' + statusIcon + ' ' + statusText + '</span>';
 
       card.innerHTML = 
         '<div class="history-header">' +
@@ -2002,9 +2537,9 @@
         '</div>' +
         '<div class="history-meta">' +
           '<div class="history-tags">' +
-            '<span class="tag-pill ' + statusClass + '">' + statusLabel + '</span>' +
+            statusBadge +
             '<span class="tag-pill">' + (item.steps || 0) + ' steps · ' + (item.durationSec || 1) + 's</span>' +
-            (item.tokens ? '<span class="tag-pill">⚡ ' + Number(item.tokens).toLocaleString("tr-TR") + ' tok</span>' : '') +
+            (item.tokens ? '<span class="tag-pill" style="display:inline-flex;align-items:center;gap:3px;">' + ICONS.bolt + ' ' + Number(item.tokens).toLocaleString("tr-TR") + ' tok</span>' : '') +
             (item.app && item.app !== "Auto Focus" ? '<span class="tag-pill">' + escapeHtml(item.app) + '</span>' : '') +
           '</div>' +
           '<div>' + (item.dateStr || "") + ' ' + (item.timeStr || "") + '</div>' +
@@ -2094,14 +2629,14 @@
         card.className = "skill-card";
         card.innerHTML = 
           '<div class="skill-info">' +
-            '<div class="skill-name">✨ ' + escapeHtml(s.name) + '</div>' +
+            '<div class="skill-name" style="display:flex;align-items:center;gap:5px;">' + ICONS.skill + ' ' + escapeHtml(s.name) + '</div>' +
             '<div class="skill-desc">Autonomous Reusable Workflow</div>' +
           '</div>';
         // Same L11 hardening as the history re-run button: no inline onclick
         // with interpolated skill names.
         var runBtn = document.createElement("button");
         runBtn.className = "rerun-btn";
-        runBtn.innerHTML = '⚡ Run';
+        runBtn.innerHTML = ICONS.bolt + ' <span>Run</span>';
         runBtn.addEventListener("click", function(){
           rerunTask("Execute distilled skill: " + s.name, "");
         });
@@ -2110,7 +2645,6 @@
       });
     }
   };
-
   function setRunning(r){
     runBtn.disabled = r;
     stopBtn.style.display = r ? "inline-flex" : "none";
@@ -2118,9 +2652,409 @@
     setStatus(r ? "Running" : (window._lastErr ? "Error" : "Idle"), r ? "w" : (window._lastErr ? "e" : ""));
   }
 
-  // Native -> JS API invoked by the Rust brush.
+  /* ----- MCP Store Logic & State ---------------------------------------- */
+  window._installedMcp = {};
+  window._mcpEnabled = true;
+  window._isFloatingBottom = true;
+  var currentInstallingItem = null;
+
+  var MCP_STORE_CATALOG = [
+    {
+      id: "filesystem",
+      name: "Local Filesystem",
+      category: "Featured",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#788C5D" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+      desc: "Mac'inizdeki dosya ve klasörleri okuma, yazma ve arama.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "{path}"],
+      fields: [{key: "path", label: "İzin Verilen Kök Dizin", placeholder: "/Users/username/Desktop"}]
+    },
+    {
+      id: "memory",
+      name: "Knowledge Graph Memory",
+      category: "Featured",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#9D79BC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-2.04z"/></svg>',
+      desc: "Oturumlar arası kalıcı bilgi grafiği ve bağlam hafızası.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    {
+      id: "brave-search",
+      name: "Brave Search",
+      category: "Featured",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D4A359" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24m5.66 5.66 4.24 4.24M2 12h6m8 0h6"/></svg>',
+      desc: "Brave Search API ile internette doğrudan canlı arama.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-brave-search"],
+      envFields: [{key: "BRAVE_API_KEY", label: "Brave API Anahtarı", secret: true, placeholder: "BSA..."}]
+    },
+    {
+      id: "tavily",
+      name: "Tavily AI Search",
+      category: "Featured",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#6A9BCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><path d="m11 8 3 3-3 3"/></svg>',
+      desc: "LLM'ler için gerçek zamanlı, filtrelenmiş ve optimize edilmiş AI web araması.",
+      command: "npx",
+      args: ["-y", "tavily-mcp@latest"],
+      envFields: [{key: "TAVILY_API_KEY", label: "Tavily API Anahtarı (tvly-...)", secret: true, placeholder: "tvly-..."}]
+    },
+    {
+      id: "exa",
+      name: "Exa Neural Search",
+      category: "Featured",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D97757" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C12.4 7.2 16.8 11.6 22 12C16.8 12.4 12.4 16.8 12 22C11.6 16.8 7.2 12.4 2 12C7.2 11.6 11.6 7.2 12 2Z"/></svg>',
+      desc: "Yapay zeka için anlamsal nöral web araması, bağlantı ve içerik çıkarma.",
+      command: "npx",
+      args: ["-y", "exa-mcp-server"],
+      envFields: [{key: "EXA_API_KEY", label: "Exa API Anahtarı", secret: true, placeholder: "exa-api-..."}]
+    },
+    {
+      id: "github",
+      name: "GitHub",
+      category: "Featured",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#FAF9F5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>',
+      desc: "Depoları, pull request'leri, issue'ları ve commit'leri yönetin.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+      envFields: [{key: "GITHUB_PERSONAL_ACCESS_TOKEN", label: "GitHub Personal Access Token", secret: true, placeholder: "ghp_..."}]
+    },
+    {
+      id: "fetch",
+      name: "Web Fetch",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#6A9BCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+      desc: "Web sayfalarının içeriğini temiz metin veya markdown olarak çeker.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-fetch"]
+    },
+    {
+      id: "notion",
+      name: "Notion",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#FAF9F5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8v8l8-8v8"/></svg>',
+      desc: "Notion sayfalarını ve veritabanlarını arayın, okuyun ve düzenleyin.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-notion"],
+      envFields: [{key: "NOTION_API_TOKEN", label: "Notion Integration Token", secret: true, placeholder: "ntn_..."}]
+    },
+    {
+      id: "slack",
+      name: "Slack",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D05548" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/><path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>',
+      desc: "Slack kanallarını okuma, mesaj gönderme ve özetleme.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-slack"],
+      envFields: [
+        {key: "SLACK_BOT_TOKEN", label: "Slack Bot Token (xoxb-...)", secret: true, placeholder: "xoxb-..."},
+        {key: "SLACK_TEAM_ID", label: "Slack Team ID", secret: false, placeholder: "T..."}
+      ]
+    },
+    {
+      id: "linear",
+      name: "Linear",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#9D79BC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m14 8-4 8m0-8 4 8"/></svg>',
+      desc: "Linear projelerini, görevleri ve döngüleri takip edin.",
+      command: "npx",
+      args: ["-y", "linear-mcp-server"],
+      envFields: [{key: "LINEAR_API_KEY", label: "Linear API Key", secret: true, placeholder: "lin_api_..."}]
+    },
+    {
+      id: "sqlite",
+      name: "SQLite Database",
+      category: "Developer",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#788C5D" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+      desc: "Yerel SQLite veritabanlarını sorgulama, şema analizi ve veri okuma.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-sqlite", "{db_path}"],
+      fields: [{key: "db_path", label: "Veritabanı Dosya Yolu (.db / .sqlite)", placeholder: "/path/to/database.db"}]
+    },
+    {
+      id: "postgres",
+      name: "PostgreSQL",
+      category: "Developer",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#6A9BCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
+      desc: "PostgreSQL tabloları üzerinde SQL sorgulama ve veri inceleme.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-postgres", "{connection_string}"],
+      fields: [{key: "connection_string", label: "Bağlantı URI (postgresql://...)", secret: true, placeholder: "postgresql://user:pass@host:5432/db"}]
+    },
+    {
+      id: "git",
+      name: "Git Tools",
+      category: "Developer",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D97757" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6m12-3a9 9 0 0 0-9-9"/></svg>',
+      desc: "Git dalları, geçmişi, diff ve commit inceleme yetenekleri.",
+      command: "npx",
+      args: ["-y", "mcp-server-git", "{repo_path}"],
+      fields: [{key: "repo_path", label: "Yerel Git Deposu Yolu", placeholder: "/Users/username/project"}]
+    },
+    {
+      id: "puppeteer",
+      name: "Puppeteer Browser",
+      category: "Developer",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D4A359" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>',
+      desc: "Headless Chrome otomasyonu, sayfa kazıma ve ekran görüntüleri.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-puppeteer"]
+    }
+  ];
+
+  window.renderMcpStoreView = function(filterQuery) {
+    var installedListEl = document.getElementById("mcpInstalledList");
+    var installedCountEl = document.getElementById("mcpInstalledCount");
+    var activeCountEl = document.getElementById("mcpActiveCount");
+    var catalogContainer = document.getElementById("mcpCatalogContainer");
+    if (!catalogContainer) return;
+
+    var installedKeys = Object.keys(window._installedMcp || {});
+    installedCountEl.textContent = installedKeys.length + " Kurulu";
+    activeCountEl.textContent = (window._mcpEnabled ? installedKeys.length : 0) + " Aktif";
+
+    // Render installed strip
+    if (installedKeys.length === 0) {
+      installedListEl.innerHTML = '<span style="font-size: 11px; color: var(--text-tertiary);">Henüz kurulu eklenti yok.</span>';
+    } else {
+      var stripHtml = "";
+      installedKeys.forEach(function(key){
+        var item = MCP_STORE_CATALOG.find(function(c){ return c.id === key; }) || { name: key, icon: ICONS.gear };
+        stripHtml += 
+          '<div class="mcp-installed-pill">' +
+            '<span class="mcp-pill-icon">' + (item.icon || ICONS.gear) + '</span>' +
+            '<span>' + escapeHtml(item.name || key) + '</span>' +
+            '<span class="mcp-remove-btn" title="Kaldır" onclick="deleteMcpServer(\'' + key + '\')">' + ICONS.cross + '</span>' +
+          '</div>';
+      });
+      installedListEl.innerHTML = stripHtml;
+    }
+
+    // Filter catalog
+    var q = (filterQuery || "").trim().toLowerCase();
+    var filtered = MCP_STORE_CATALOG.filter(function(item){
+      if (!q) return true;
+      return item.name.toLowerCase().indexOf(q) !== -1 ||
+             item.desc.toLowerCase().indexOf(q) !== -1 ||
+             item.category.toLowerCase().indexOf(q) !== -1;
+    });
+
+    var categories = ["Featured", "Productivity", "Developer"];
+    var catLabels = { "Featured": "Öne Çıkanlar", "Productivity": "Üretkenlik", "Developer": "Geliştirici Araçları" };
+
+    var html = "";
+    categories.forEach(function(cat){
+      var items = filtered.filter(function(it){ return it.category === cat; });
+      if (items.length === 0) return;
+
+      html += '<div class="mcp-category-section">';
+      html += '<div class="mcp-category-title">' + (catLabels[cat] || cat) + '</div>';
+      html += '<div class="mcp-grid">';
+
+      items.forEach(function(item){
+        var isInstalled = !!(window._installedMcp && window._installedMcp[item.id]);
+        var actionBtn = isInstalled
+          ? '<button class="mcp-action-btn installed" onclick="deleteMcpServer(\'' + item.id + '\')">' + ICONS.check + ' <span>Kurulu</span> <span style="display:inline-flex;margin-left:3px;opacity:0.6;">' + ICONS.cross + '</span></button>'
+          : '<button class="mcp-action-btn install" onclick="openMcpInstallModal(\'' + item.id + '\')">' + ICONS.plus + ' <span>Kur</span></button>';
+
+        html += 
+          '<div class="mcp-card">' +
+            '<div class="mcp-card-left">' +
+              '<div class="mcp-card-icon">' + item.icon + '</div>' +
+              '<div class="mcp-card-info">' +
+                '<div class="mcp-card-name">' + escapeHtml(item.name) + '</div>' +
+                '<div class="mcp-card-desc">' + escapeHtml(item.desc) + '</div>' +
+              '</div>' +
+            '</div>' +
+            actionBtn +
+          '</div>';
+      });
+
+      html += '</div></div>';
+    });
+
+    catalogContainer.innerHTML = html;
+  };
+
+  window.filterMcpCatalog = function(q) {
+    window.renderMcpStoreView(q);
+  };
+
+  window.openMcpInstallModal = function(id) {
+    var item = MCP_STORE_CATALOG.find(function(c){ return c.id === id; });
+    if (!item) return;
+    currentInstallingItem = item;
+
+    var hasFields = (item.fields && item.fields.length > 0) || (item.envFields && item.envFields.length > 0);
+    if (!hasFields) {
+      post({
+        cmd: "save_mcp",
+        id: item.id,
+        command: item.command,
+        args: item.args,
+        env: {}
+      });
+      return;
+    }
+
+    document.getElementById("mcpModalTitle").textContent = item.name + " Kurulumu";
+    document.getElementById("mcpModalDesc").textContent = item.desc;
+    var fieldsContainer = document.getElementById("mcpModalFields");
+    fieldsContainer.innerHTML = "";
+
+    if (item.fields) {
+      item.fields.forEach(function(f){
+        var wrap = document.createElement("div");
+        wrap.className = "mcp-field-group";
+        wrap.innerHTML = 
+          '<label class="mcp-field-label">' + escapeHtml(f.label) + '</label>' +
+          '<input class="text-input" name="arg_' + f.key + '" placeholder="' + escapeHtml(f.placeholder || "") + '" value="' + escapeHtml(f.default || "") + '" required>';
+        fieldsContainer.appendChild(wrap);
+      });
+    }
+
+    if (item.envFields) {
+      item.envFields.forEach(function(f){
+        var wrap = document.createElement("div");
+        wrap.className = "mcp-field-group";
+        wrap.innerHTML = 
+          '<label class="mcp-field-label">' + escapeHtml(f.label) + '</label>' +
+          '<input class="text-input" name="env_' + f.key + '" type="' + (f.secret ? "password" : "text") + '" placeholder="' + escapeHtml(f.placeholder || "") + '" required>';
+        fieldsContainer.appendChild(wrap);
+      });
+    }
+
+    document.getElementById("mcpModalBackdrop").style.display = "flex";
+  };
+
+  window.closeMcpModal = function() {
+    document.getElementById("mcpModalBackdrop").style.display = "none";
+    currentInstallingItem = null;
+  };
+
+  window.submitMcpInstall = function(e) {
+    e.preventDefault();
+    if (!currentInstallingItem) return;
+
+    var form = document.getElementById("mcpModalForm");
+    var formData = new FormData(form);
+    var item = currentInstallingItem;
+
+    var args = (item.args || []).slice();
+    if (item.fields) {
+      item.fields.forEach(function(f){
+        var val = formData.get("arg_" + f.key) || f.default || "";
+        args = args.map(function(a){ return a.replace("{" + f.key + "}", val); });
+      });
+    }
+
+    var env = {};
+    if (item.envFields) {
+      item.envFields.forEach(function(f){
+        var val = formData.get("env_" + f.key) || "";
+        if (val) env[f.key] = val;
+      });
+    }
+
+    post({
+      cmd: "save_mcp",
+      id: item.id,
+      command: item.command,
+      args: args,
+      env: env
+    });
+
+    closeMcpModal();
+  };
+
+  window.deleteMcpServer = function(id) {
+    post({ cmd: "delete_mcp", id: id });
+  };
+
+  window.onMcpLoaded = function(data, enabled) {
+    window._installedMcp = (data && data.mcpServers) ? data.mcpServers : {};
+    window._mcpEnabled = enabled;
+    updateMcpToggleUI();
+    renderMcpStoreView();
+  };
+
+  window.onMcpSaved = function(id) {
+    showToast("Eklenti başarıyla kuruldu!");
+    post({ cmd: "get_mcp" });
+  };
+
+  window.onMcpDeleted = function(id) {
+    showToast("Eklenti kaldırıldı.");
+    post({ cmd: "get_mcp" });
+  };
+
+  window.onMcpToggled = function(enabled) {
+    window._mcpEnabled = enabled;
+    updateMcpToggleUI();
+    renderMcpStoreView();
+    showToast(enabled ? "MCP Sunucuları Aktif" : "MCP Sunucuları Devre Dışı");
+  };
+
+  function updateMcpToggleUI() {
+    var btn = document.getElementById("mcpToggleBtn");
+    var label = document.getElementById("mcpLabel");
+    if (!btn || !label) return;
+    if (window._mcpEnabled) {
+      btn.className = "mcp-toggle-btn on";
+      label.textContent = "MCP";
+      btn.title = "MCP Sunucuları: Aktif. Tıklayarak kapatabilirsiniz.";
+    } else {
+      btn.className = "mcp-toggle-btn off";
+      label.textContent = "MCP";
+      btn.title = "MCP Sunucuları: Devre dışı. Tıklayarak açabilirsiniz.";
+    }
+  }
+
+  var mcpToggleBtn = document.getElementById("mcpToggleBtn");
+  if (mcpToggleBtn) {
+    mcpToggleBtn.addEventListener("click", function(){
+      window._mcpEnabled = !window._mcpEnabled;
+      updateMcpToggleUI();
+      post({ cmd: "set_mcp_enabled", enabled: window._mcpEnabled });
+      showToast(window._mcpEnabled ? "MCP Aktif" : "MCP Devre Dışı");
+    });
+  }
+
+  /* ----- Position Mode (Floating Dock vs Menu Bar) ----------------------- */
+  var posToggleBtn = document.getElementById("posToggleBtn");
+  var posLabel = document.getElementById("posLabel");
+  var posIcon = document.getElementById("posIcon");
+  function updatePosToggleUI() {
+    if (!posToggleBtn || !posLabel) return;
+    if (window._isFloatingBottom) {
+      posLabel.textContent = "Dock";
+      if (posIcon) posIcon.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="16" width="16" height="4" rx="1"/><circle cx="12" cy="8" r="3"/><line x1="12" y1="11" x2="12" y2="16"/></svg>';
+      posToggleBtn.title = "Konum: Dock Üstü (Claude Stili). Tıklayarak Menü Barına geçebilirsiniz.";
+    } else {
+      posLabel.textContent = "Bar";
+      if (posIcon) posIcon.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="4" rx="1"/><circle cx="17" cy="5" r="1"/></svg>';
+      posToggleBtn.title = "Konum: Menü Barı Sağ Üst. Tıklayarak Dock Üstüne geçebilirsiniz.";
+    }
+  }
+  if (posToggleBtn) {
+    posToggleBtn.addEventListener("click", function(){
+      window._isFloatingBottom = !window._isFloatingBottom;
+      updatePosToggleUI();
+      post({ cmd: "set_position_mode", bottom: window._isFloatingBottom });
+      showToast(window._isFloatingBottom ? "Dock Üstü Konumuna Geçildi" : "Menü Barı Konumuna Geçildi");
+    });
+  }
+  window.onPositionModeChanged = function(bottom) {
+    window._isFloatingBottom = bottom;
+    updatePosToggleUI();
+  };
+
   window.Native = {
-    log: function(t){ processIncomingLine(t, "out"); },
+    log: function(line){
+      processIncomingLine(line, "out");
+      if (line.indexOf("step_") !== -1 || line.indexOf("Action:") !== -1) {
+        log.scrollTop = log.scrollHeight;
+      }
+    },
     event: function(t){
       try { renderStepEvent(JSON.parse(t)); }
       catch (e) { processIncomingLine(t, "dim"); }
@@ -2143,7 +3077,26 @@
   };
 
   post({cmd:"ready"});
+  post({cmd:"get_mcp"});
 })();
 </script>
+
+  <!-- MCP Configuration Modal -->
+  <div class="mcp-modal-backdrop" id="mcpModalBackdrop">
+    <div class="mcp-modal">
+      <div class="mcp-modal-title" id="mcpModalTitle">Eklenti Kur</div>
+      <div class="mcp-modal-desc" id="mcpModalDesc"></div>
+      <form id="mcpModalForm" onsubmit="submitMcpInstall(event)">
+        <div id="mcpModalFields" style="display:flex; flex-direction:column; gap:10px; margin-bottom:12px;"></div>
+        <div class="mcp-modal-actions">
+          <button type="button" class="btn btn-stop" style="display:inline-flex; border:0.5px solid var(--border);" onclick="closeMcpModal()">İptal</button>
+          <button type="submit" class="btn btn-primary" style="flex:unset; padding:7.5px 16px;">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            <span>Kaydet ve Kur</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
 </body>
 </html>

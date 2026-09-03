@@ -116,7 +116,9 @@ def test_panel_brand_is_left_aligned_without_traffic_light_lane() -> None:
     html = (REPO_ROOT / "driver" / "assets" / "menu.html").read_text()
     assert "padding-left: 62px" not in html, "no reserved traffic-light lane in the toolbar"
     assert ".mark" in html
-    mark_block = re.search(r"\.mark\{[^}]*\}", html)
+    # Tolerates the space in `.mark {`: the rule being asserted is that the
+    # brand is not pushed right, and a stylesheet reformat is not a regression.
+    mark_block = re.search(r"\.mark\s*\{[^}]*\}", html)
     assert mark_block is not None
     assert "margin-left:auto" not in mark_block.group(0), "brand must not be pushed right"
     # The native side must keep hiding the three standard window buttons.
