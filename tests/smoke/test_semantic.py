@@ -12,7 +12,12 @@ from collections.abc import Callable
 import pytest
 
 from computeruse.agent import Agent, AgentConfig
-from computeruse.memory.semantic import SemanticEntry, SemanticStore, search_entries
+from computeruse.memory.semantic import (
+    SemanticEntry,
+    SemanticStore,
+    extract_facts_from_run,
+    search_entries,
+)
 from computeruse.orchestrator.loop import OodaRunner, WorkingState
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.security.autonomy import AutonomyLevel
@@ -113,6 +118,23 @@ def test_semantic_store_search_round_trip(tmp_path) -> None:
 
 
 # --- Knowledge into the OODA working context ---------------------------------
+
+
+def test_a_turkish_run_can_write_down_what_it_learned() -> None:
+    """The id a store builds must satisfy the pattern that names its own file.
+
+    ``str.isalnum`` is Unicode-aware, so slugging a goal with it kept ``ü``,
+    ``ç`` and ``ğ`` — and the entry model requires ASCII. Observed on a live
+    run: the agent researched the news, pasted its summary into Notes, and then
+    died writing what it had learned, so the whole run was lost to memory.
+    """
+    facts = extract_facts_from_run(
+        app="Notlar",
+        steps=(MouseClick(type="mouse_click", x=1, y=2),),
+        step_descriptions=("Güncel yapay zekâ haberleri için güvenilir kaynak",),
+    )
+    assert facts, "a described step should produce a fact"
+    assert facts[0].entry_id == "notlar.guncel-yapay-zeka-haberleri-icin-guvenil"
 
 
 def test_working_state_preserves_knowledge_through_decide_step() -> None:

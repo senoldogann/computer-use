@@ -73,6 +73,45 @@ def test_routine_marker_is_routine() -> None:
     assert classify_risk(_turn(sub="confirm dialog", type="press_hotkey", key="enter")) is Risk.ROUTINE
 
 
+def test_prose_that_mentions_a_command_is_not_one() -> None:
+    """Writing *about* shutdown is not shutting anything down.
+
+    Measured on a live run of "research the AI news and write me a summary in
+    Notes": the agent produced a correct 1,575-character summary whose first
+    bullet reported an "automated shutdown" capability, and pasting that
+    article into a note classified as issuing a shutdown command. An unattended
+    run at full autonomy stopped to ask permission, and died waiting.
+    """
+    article = (
+        "Güncel Yapay Zekâ Haberleri Özeti\n3 Eylül 2026\n\n"
+        "• OpenAI: şirket mektubuna göre yapay zekâ araçları için "
+        "\u201cotomatik kapatma\u201d (automated shutdown) yetenekleri "
+        "geliştiriyor. Şirket ayrıca sistemlerin kullandığı dijital araçları "
+        "daha yakından izlemeyi planlıyor. " + "Ayrıntılar sürüyor. " * 40
+    )
+    turn = AgentTurn(
+        thought="",
+        sub_goal="özeti nota yapıştır",
+        action=ClipboardPaste(type="clipboard_paste", text=article),
+    )
+    assert classify_risk(turn) is Risk.NONE
+
+
+def test_a_command_stays_a_command_however_it_is_dressed() -> None:
+    """The exemption is for prose, and only for prose."""
+    def paste(text: str) -> AgentTurn:
+        return AgentTurn(
+            thought="",
+            sub_goal="type it",
+            action=ClipboardPaste(type="clipboard_paste", text=text),
+        )
+
+    # A command line, whichever half you read.
+    assert classify_risk(paste("echo hi; rm -rf ~")) is Risk.DESTRUCTIVE
+    # A command at the head of a long payload is still a command.
+    assert classify_risk(paste("shutdown -h now\n" + "a" * 900)) is Risk.DESTRUCTIVE
+
+
 def test_reading_the_web_is_not_a_dialog_button() -> None:
     """A fetch presses nothing, so its prose must not be scanned for buttons.
 

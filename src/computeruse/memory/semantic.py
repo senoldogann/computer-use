@@ -20,13 +20,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
 from computeruse.orchestrator.schemas import Action
+from computeruse.slug import ascii_slug
 
 EntryKind = Literal["pattern", "preference", "shortcut", "coordinate"]
+
+
+#: How much of a step's description survives into its entry id. Long enough
+#: to tell two patterns apart, short enough to keep a filename sane.
+DESC_SLUG_MAX_CHARS: Final[int] = 40
 
 
 class SemanticEntry(BaseModel):
@@ -146,7 +152,7 @@ def extract_facts_from_run(
         desc = step_descriptions[i] if i < len(step_descriptions) else ""
         if not desc or len(desc) < 3:
             continue
-        slug_desc = "".join(ch if ch.isalnum() else "-" for ch in desc.lower()).strip("-")[:40]
+        slug_desc = ascii_slug(desc, max_chars=DESC_SLUG_MAX_CHARS)
         if not slug_desc:
             continue
         entry_id = f"{app_slug}.{slug_desc}"

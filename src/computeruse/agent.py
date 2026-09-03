@@ -458,6 +458,12 @@ class Agent:
             cached_pid: int | None = None
             background_actuation = self._config.background_actuation
             target_window_warned = False
+            # Which application perception should read. It starts as the one
+            # the run was launched against and moves when the agent says it has
+            # moved: a goal like "research this, then write it into Notes" is
+            # two applications, and reading the first one forever means the
+            # agent works blind in the second.
+            working_app: str | None = self._config.app
 
             def window_probe() -> FocusedWindow:
                 """Where the agent is, as one line the provider reads (§5).
@@ -529,6 +535,11 @@ class Agent:
             # a Retina frame per probe is the most expensive thing the loop can
             # do. Everything outside it is unreachable — not a target and not
             # evidence — so perception spends its budget inside it.
+            def _follow_app(app: str) -> None:
+                """Point perception at the application the agent moved to."""
+                nonlocal working_app
+                working_app = app
+
             def target_pid() -> int | None:
                 """The app this run works in, which in background mode is not
                 the frontmost one.
@@ -537,10 +548,10 @@ class Agent:
                 relaunched mid-run, and a stale pid would silently point
                 perception at a process that no longer exists.
                 """
-                if not self._config.background_actuation or self._config.app is None:
+                if not self._config.background_actuation or working_app is None:
                     return _current_pid()
                 try:
-                    return client.app_pid(self._config.app) or _current_pid()
+                    return client.app_pid(working_app) or _current_pid()
                 except Exception as exc:  # noqa: BLE001 - fall back to frontmost
                     LOGGER.debug("target pid lookup failed: %s", exc)
                     return _current_pid()
@@ -743,6 +754,7 @@ class Agent:
                 set_of_marks_enabled=self._config.enable_set_of_marks,
                 window_probe=window_probe,
                 frontmost_probe=client.focused_window,
+                on_working_app=_follow_app,
                 ax_probe=ax_probe,
                 # ADR-2 semantic postcondition: the focused field's AXValue
                 # lets type_text/clipboard_paste be verified against what the

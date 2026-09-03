@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from computeruse.orchestrator.schemas import Action
+from computeruse.slug import ascii_slug
 from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition
 
 
@@ -42,6 +43,10 @@ class DistillResult:
 # A "complex workflow" worth distilling needs more than a single trivial click;
 # anything shorter is noise vs. signal for the skill store (Law 3.1).
 _MIN_STEPS: int = 2
+
+
+#: Enough for any application name; the signature carries the identity.
+APP_SLUG_MAX_CHARS: Final[int] = 60
 
 
 def signature_of(trajectory: Trajectory) -> str:
@@ -192,5 +197,5 @@ def _compact_params(action: Action) -> str:
 
 
 def _slug(app: str) -> str:
-    """Lowercase, hyphenate, strip non-alphanumerics for a filesystem-safe id."""
-    return "".join(ch if ch.isalnum() else "-" for ch in app.lower()).strip("-")
+    """Lowercase ASCII id for an application name (pure)."""
+    return ascii_slug(app, max_chars=APP_SLUG_MAX_CHARS)
