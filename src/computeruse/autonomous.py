@@ -53,10 +53,18 @@ DEFAULT_REST_SECONDS: Final[float] = 300.0
 
 @dataclass(frozen=True)
 class MachineActivity:
-    """One observation of whether a human is using the machine (pure data)."""
+    """One observation of whether a human is using the machine (pure data).
+
+    ``idle_seconds`` is the direct answer when the driver can give it: the HID
+    system's own clock since the last input of any kind. The cursor and window
+    are the fallback for a driver that cannot, and they are a *proxy* — they
+    miss someone typing without moving the mouse, which is exactly the person
+    an agent must not start clicking around.
+    """
 
     cursor: tuple[float, float]
     frontmost: str
+    idle_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -74,16 +82,25 @@ class GoalProposal:
 
 
 def machine_is_idle(
-    samples: tuple[MachineActivity, ...], *, required: int
+    samples: tuple[MachineActivity, ...], *, required: int, threshold: float
 ) -> bool:
-    """Has the machine been untouched across these observations (pure)?
+    """Has the machine been untouched (pure)?
 
-    Both signals have to hold still. The cursor alone misses someone reading,
-    and the frontmost application alone misses someone working within one
-    window; together they catch the cases that matter without needing input
-    monitoring, which would be a far more invasive thing to ask of a user than
-    this feature is worth.
+    Prefers the measurement over the proxy. When the newest observation carries
+    the system's own idle clock, that clock answers the question directly and
+    completely — it counts keystrokes as well as movement, and one reading is
+    worth any number of samples of something that merely correlates.
+
+    Without it, both proxies have to hold still across every sample: the cursor
+    alone misses someone reading, and the frontmost window alone misses someone
+    working inside one. Neither catches someone typing, which is why the
+    measurement is preferred wherever it exists.
     """
+    if not samples:
+        return False
+    newest = samples[-1]
+    if newest.idle_seconds is not None:
+        return newest.idle_seconds >= threshold
     if len(samples) < required:
         return False
     recent = samples[-required:]
@@ -183,7 +200,9 @@ def wait_for_idle(
         except Exception as exc:  # noqa: BLE001 - a blind probe means not idle
             LOGGER.debug("idle probe failed: %s", exc)
             samples.clear()
-        if machine_is_idle(tuple(samples), required=required):
+        if machine_is_idle(
+            tuple(samples), required=required, threshold=idle_seconds
+        ):
             return True
         if len(samples) > required:
             samples = samples[-required:]

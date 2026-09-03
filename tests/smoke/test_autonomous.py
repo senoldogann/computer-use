@@ -27,28 +27,29 @@ from computeruse.skills.schemas import SkillDefinition
 
 
 def _activity(x: float, app: str = "Finder") -> MachineActivity:
-    return MachineActivity(cursor=(x, 0.0), frontmost=app)
+    """A sample from a driver too old to report the system idle clock."""
+    return MachineActivity(cursor=(x, 0.0), frontmost=app, idle_seconds=None)
 
 
 def test_a_still_machine_is_idle_and_a_moving_one_is_not() -> None:
     still = tuple(_activity(10) for _ in range(4))
-    assert machine_is_idle(still, required=4) is True
+    assert machine_is_idle(still, required=4, threshold=60) is True
 
     moved = (*[_activity(10) for _ in range(3)], _activity(11))
-    assert machine_is_idle(moved, required=4) is False
+    assert machine_is_idle(moved, required=4, threshold=60) is False
 
 
 def test_switching_apps_counts_as_using_the_machine() -> None:
     """The cursor alone misses someone reading; the frontmost window alone
     misses someone working inside one. Both have to hold still."""
     switched = (_activity(10, "Finder"), _activity(10, "Finder"), _activity(10, "Chrome"))
-    assert machine_is_idle(switched, required=3) is False
+    assert machine_is_idle(switched, required=3, threshold=60) is False
 
 
 def test_too_few_observations_is_not_idle() -> None:
     """Absence of evidence is not evidence of absence, and acting on one
     sample would mean acting during a pause for thought."""
-    assert machine_is_idle((_activity(10),), required=4) is False
+    assert machine_is_idle((_activity(10),), required=4, threshold=60) is False
 
 
 def test_waiting_can_be_interrupted_without_waiting_out_the_timer() -> None:
@@ -254,3 +255,27 @@ def test_a_user_returning_to_the_machine_ends_the_session() -> None:
         sleep=lambda _s: None,
     )
     assert done == 0 and executed == []
+
+
+def test_the_system_idle_clock_beats_the_proxy() -> None:
+    """One reading of the real thing outweighs any number of samples of
+    something that merely correlates with it.
+
+    The cursor and window are a proxy that misses the case that matters most:
+    someone typing without moving the mouse reads as absent, and an agent that
+    starts clicking then is typing into their window rather than the target's.
+    """
+    typing = MachineActivity(cursor=(0.0, 0.0), frontmost="Notes", idle_seconds=2.0)
+    assert machine_is_idle((typing,), required=4, threshold=60) is False
+
+    away = MachineActivity(cursor=(0.0, 0.0), frontmost="Notes", idle_seconds=300.0)
+    # One sample suffices: the clock already answers the whole question.
+    assert machine_is_idle((away,), required=4, threshold=60) is True
+
+
+def test_a_driver_without_the_clock_still_uses_the_proxy() -> None:
+    """An older driver degrades to the heuristic rather than reporting the
+    machine free, which would be the dangerous direction to fail in."""
+    still = tuple(_activity(10) for _ in range(4))
+    assert machine_is_idle(still, required=4, threshold=60) is True
+    assert machine_is_idle(still[:1], required=4, threshold=60) is False

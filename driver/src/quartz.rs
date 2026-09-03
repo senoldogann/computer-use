@@ -14,6 +14,14 @@
 
 use core::time::Duration;
 
+extern "C" {
+    /// Seconds since the last input event of a given type. This reads the HID
+    /// system's own idle clock rather than watching events, so it needs no
+    /// Input Monitoring consent — the permission that would let a program see
+    /// *what* the user pressed, which an idle check has no business knowing.
+    fn CGEventSourceSecondsSinceLastEventType(state_id: u32, event_type: u32) -> f64;
+}
+
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField, KeyCode as QK,
     ScrollEventUnit,
@@ -457,6 +465,19 @@ impl Backend for QuartzBackend {
 
     fn app_pid(&self, app: &str) -> Result<Option<i32>, BackendError> {
         Ok(pid_of_running_app(app))
+    }
+
+    fn idle_seconds(&self) -> Result<f64, BackendError> {
+        // kCGAnyInputEventType (-1) covers keyboard, mouse and tablet, which
+        // is the whole point: an idle check that watches only the cursor calls
+        // someone typing "absent", and acting then means typing into their
+        // window instead of the target's.
+        const ANY_INPUT_EVENT: u32 = u32::MAX; // kCGAnyInputEventType == ~0
+        const HID_SYSTEM_STATE: u32 = 1; // kCGEventSourceStateHIDSystemState
+        let seconds = unsafe {
+            CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, ANY_INPUT_EVENT)
+        };
+        Ok(seconds)
     }
 
     fn ax_press(&self, pid: u32, point: Point) -> Result<bool, BackendError> {

@@ -672,8 +672,11 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
     def observe() -> MachineActivity:
         with ActuationClient(args.socket, connect_retries=2) as client:
             window = client.focused_window()
+            idle = client.idle_seconds()
         return MachineActivity(
-            cursor=(window.cursor_x, window.cursor_y), frontmost=window.app_name
+            cursor=(window.cursor_x, window.cursor_y),
+            frontmost=window.app_name,
+            idle_seconds=idle,
         )
 
     def execute(proposal: GoalProposal) -> None:
