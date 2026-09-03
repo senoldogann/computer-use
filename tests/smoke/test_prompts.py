@@ -419,6 +419,31 @@ def test_audit_contract_forbids_agreeing_with_the_claim() -> None:
     assert "leftover state" in contract
 
 
+def test_decision_prompt_carries_what_earlier_screens_showed() -> None:
+    """The collector has to be able to see its own collection.
+
+    The auditor was given the observed trail on the grounds that a goal
+    spanning several windows has evidence that cannot all be on screen at
+    once. The agent doing the collecting needs it for exactly that reason and
+    did not have it. Measured on a real run of "open the first three stories'
+    comment pages and report each count": the agent read the first story's
+    340 comments, navigated back, and re-opened the first story — correct
+    given everything it could see — and spent the rest of its budget doing it
+    again.
+    """
+    state = WorkingState(
+        goal="report the comment count of the first three stories",
+        active_window="Hacker News",
+        observed_trail=("Muse Spark 1.3 | Hacker News: 340 comments",),
+    )
+    prompt = decision_prompt(state, app="Google Chrome")
+    assert "340 comments" in prompt
+    # Inside the fence, like every other thing a page put in front of it.
+    before, _, after = prompt.partition("340 comments")
+    assert before.count("<observed_data>") > before.count("</observed_data>")
+    assert "</observed_data>" in after
+
+
 def test_audit_prompt_carries_observed_trail_but_not_agent_reasoning() -> None:
     """Earlier evidence is machine-observed; the agent's story stays out."""
     state = WorkingState(

@@ -252,6 +252,11 @@ pub trait Backend: Send + Sync {
     /// ``ax_snapshot`` when the caller did not name an app).
     fn focused_window(&self) -> Result<FocusedWindow, BackendError>;
 
+    /// The same reading for *one named application*, whether or not it is in
+    /// front. Background mode acts on a window the user keeps behind another,
+    /// so the system-wide answer describes the wrong window entirely.
+    fn app_window(&self, pid: u32) -> Result<FocusedWindow, BackendError>;
+
     /// Returns the display names of running applications that own on-screen
     /// windows. Feeds autonomous target-app inference: the orchestrator can
     /// resolve a goal's implied app ("Excel'de aç") against what the user
@@ -654,6 +659,17 @@ impl Backend for SimulatedBackend {
         );
         let mut budget = NodeBudget::new(max_nodes);
         Ok(truncate_nodes(root, &mut budget, false))
+    }
+
+    fn app_window(&self, pid: u32) -> Result<FocusedWindow, BackendError> {
+        // The fixture owns exactly one app, so asking it about a pid it does
+        // not have is a caller bug worth surfacing rather than answering.
+        if pid != 4242 {
+            return Err(BackendError(format!(
+                "simulated backend has no application with pid {pid}"
+            )));
+        }
+        self.focused_window()
     }
 
     fn focused_window(&self) -> Result<FocusedWindow, BackendError> {

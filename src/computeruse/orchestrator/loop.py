@@ -581,6 +581,39 @@ TRAIL_MAX_ENTRIES: Final[int] = 6
 TRAIL_MAX_CHARS: Final[int] = 600
 
 
+def _informative_text(content: Sequence[str], *, max_chars: int) -> str:
+    """The distinctive part of what a window showed, as one line (pure).
+
+    The content digest walks the accessibility tree in order and reports every
+    node as ``Role=Value``, which is right for its first job — a fingerprint
+    that changes when the screen changes. As *evidence* it is nearly useless,
+    because a page announces its own furniture first and announces it three
+    times: a link, its group and its static text all carry the same string.
+
+    Measured on a Hacker News comments page: 200 fragments, of which 600
+    characters bought nothing but the site's navigation bar — "new | past |
+    comments | ask | show | jobs" — twice over. The story's title and its
+    comment count, the only things the run was there to read, fell outside the
+    limit. An agent asked to collect three counts re-read the first one until
+    its budget ran out, correctly, because its own record of the visit said
+    nothing about it.
+
+    Keeping the first sighting of each distinct value drops that page to 83
+    fragments and brings the title, the score and "343 comments" inside the
+    same budget.
+    """
+    seen: set[str] = set()
+    kept: list[str] = []
+    for fragment in content:
+        _, separator, tail = fragment.partition("=")
+        value = (tail if separator else fragment).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        kept.append(value)
+    return " | ".join(kept)[:max_chars]
+
+
 def _extend_trail(
     trail: tuple[str, ...],
     window: FocusedWindow | None,
@@ -600,7 +633,9 @@ def _extend_trail(
     title = window.window_title or window.app_name
     if not title:
         return trail
-    text = " | ".join(content)[:TRAIL_MAX_CHARS]
+    text = _informative_text(content, max_chars=TRAIL_MAX_CHARS)
+    if not text:
+        return trail
     entry = f"{title}: {text}"
     prefix = f"{title}: "
     replaced = tuple(entry if line.startswith(prefix) else line for line in trail)

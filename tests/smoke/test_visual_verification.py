@@ -1029,8 +1029,10 @@ def test_trail_keeps_one_entry_per_window() -> None:
     # Order still reads as the order things were first seen.
     assert trail[0].startswith("Issues · repo: ")
     assert trail[1].startswith("Calculator: ")
-    # The newest reading of a window wins.
-    assert "Link=Issues" in trail[0]
+    # The newest reading of a window wins. Roles are dropped and repeats
+    # collapsed: the trail is read as evidence, and a page names its own
+    # furniture three times before it says anything worth remembering.
+    assert trail[0] == "Issues · repo: 46 Open | Issues"
 
 
 def test_trail_is_bounded_and_ignores_empty_observations() -> None:

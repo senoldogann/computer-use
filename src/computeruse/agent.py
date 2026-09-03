@@ -456,16 +456,60 @@ class Agent:
             # frontmost pid inside each probe would triple the per-step RPC
             # traffic for the same information (L9).
             cached_pid: int | None = None
+            background_actuation = self._config.background_actuation
+            target_window_warned = False
 
             def window_probe() -> FocusedWindow:
+                """Where the agent is, as one line the provider reads (§5).
+
+                In background mode that is emphatically not the system's
+                answer. The target is deliberately kept behind another window,
+                so ``focused_window`` names whatever the *user* is doing and
+                never moves when the agent's actions land. Measured on a real
+                run: twenty-five consecutive steps shown the same foreign
+                title while the agent drove Chrome from behind, opening a
+                comments page and going back, opening it and going back, with
+                no evidence in front of it that anything had happened.
+                """
                 nonlocal cached_pid
+                nonlocal target_window_warned
+                if background_actuation:
+                    pid = target_pid()
+                    if pid is not None:
+                        try:
+                            window = client.app_window(pid)
+                        except Exception as exc:  # noqa: BLE001 - best-effort
+                            # Falling back to the system-wide reading keeps the
+                            # run alive, but it is a downgrade the operator has
+                            # to know about: from here the agent is told about
+                            # a window it is not acting on. Warned once, since
+                            # the cause (an older driver, a refused consent)
+                            # will not change mid-run.
+                            if not target_window_warned:
+                                target_window_warned = True
+                                LOGGER.warning(
+                                    "cannot read %s's own window (%s); falling back "
+                                    "to the frontmost window, which in background "
+                                    "mode is not the one being acted on",
+                                    self._config.app,
+                                    exc,
+                                )
+                        else:
+                            if window.pid > 0:
+                                cached_pid = window.pid
+                            return window
                 current = client.focused_window()
                 if current.pid > 0:
                     cached_pid = current.pid
                 return current
 
             def _current_pid() -> int | None:
-                """The frontmost pid, re-read only when the cache is stale."""
+                """The last pid perception resolved, re-read when unset.
+
+                Frontmost in an ordinary run; in background mode the window
+                probe caches the *target* instead, which is the pid every
+                other probe in that mode wants anyway.
+                """
                 nonlocal cached_pid
                 if cached_pid is not None and cached_pid > 0:
                     return cached_pid

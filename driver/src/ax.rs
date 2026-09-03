@@ -308,6 +308,52 @@ pub fn focused_window() -> Result<FocusedWindow, BackendError> {
     Err(ax_error)
 }
 
+/// One application's focused window, whether or not that application is in
+/// front.
+///
+/// ``focused_window`` answers "what is the user looking at", which is the
+/// wrong question in background mode: the target is deliberately behind
+/// something else, so the system-wide reading describes a window the agent is
+/// not acting on and does not change when the agent's actions land. Measured
+/// on a real run, that froze the agent's only sense of place for twenty-five
+/// consecutive steps and it looped.
+///
+/// The cursor still comes from the system, because there is only one.
+pub fn app_window(pid: u32) -> Result<FocusedWindow, BackendError> {
+    let (cursor_x, cursor_y) = cursor_position()?;
+    if !trusted() {
+        return Err(BackendError(
+            "Accessibility consent required to read another application's \
+             window. Grant it in System Settings > Privacy & Security > \
+             Accessibility, then restart the driver."
+                .to_string(),
+        ));
+    }
+    // Create Rule: the application element reference is ours to release.
+    let app_ref = unsafe { AXUIElementCreateApplication(pid as i32) };
+    if app_ref.is_null() {
+        return Err(BackendError(format!(
+            "AXUIElementCreateApplication failed for pid {pid}"
+        )));
+    }
+    let app = unsafe { CFType::wrap_under_create_rule(app_ref) };
+    // An app that is not frontmost has no *focused* window, so fall back to
+    // its main one: that is the window a background agent is acting on.
+    let window = copy_attribute(app.as_CFTypeRef(), "AXFocusedWindow")
+        .or_else(|| copy_attribute(app.as_CFTypeRef(), "AXMainWindow"));
+    let window_title = window
+        .and_then(|window| string_attribute(window.as_CFTypeRef(), "AXTitle"))
+        .unwrap_or_default();
+    Ok(FocusedWindow {
+        pid: pid as i32,
+        bundle_id: bundle_id_for_pid(pid as i32),
+        app_name: string_attribute(app.as_CFTypeRef(), "AXTitle").unwrap_or_default(),
+        window_title,
+        cursor_x,
+        cursor_y,
+    })
+}
+
 /// The AX primary of :func:`focused_window` (system-wide focused application).
 fn focused_application_via_ax(cursor_x: f64, cursor_y: f64) -> Result<FocusedWindow, BackendError> {
     // Create Rule: the system-wide element reference is ours to release.
