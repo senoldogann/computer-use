@@ -116,6 +116,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "without stealing focus or the pointer. Falls back to an ordinary click "
         "wherever an element declines.",
     )
+    parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Connect the MCP servers declared in ~/.computeruse/mcp.json and "
+        "lend the agent their tools. Off by default: these are other people's "
+        "programs, started as subprocesses.",
+    )
     parser.add_argument("--socket", default=DEFAULT_SOCKET, help="Driver Unix socket path.")
     parser.add_argument(
         "--driver",
@@ -526,6 +533,7 @@ def build_config(
         enable_set_of_marks=getattr(args, "marks", True),
         display_id=getattr(args, "display", 0),
         background_actuation=getattr(args, "background", False),
+        enable_mcp=getattr(args, "mcp", False),
         # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
         # on a *real* backend is activated (the simulated backend never touches
         # the host — Law 1). An auto-discovered app is never activated:

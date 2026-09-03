@@ -125,6 +125,21 @@ class WebFetch(BaseModel):
     url: str = Field(min_length=1, max_length=2048)
 
 
+class CallTool(BaseModel):
+    """Invoke a tool borrowed from a Model Context Protocol server.
+
+    One action for every tool, rather than one action type per tool: the schema
+    stays closed — a model cannot invent an action shape the loop will not
+    recognise — while the set of tools stays open and is discovered at startup.
+    Which names are valid is stated in the prompt; an unknown one comes back as
+    a failed call listing what does exist.
+    """
+
+    type: Literal["call_tool"]
+    tool: str = Field(min_length=1, max_length=200)
+    arguments: dict[str, object] = Field(default_factory=dict)
+
+
 class Finish(BaseModel):
     type: Literal["finish"]
     status: Literal["success", "failed"]
@@ -141,6 +156,7 @@ Action = (
     | ClipboardPaste
     | WebSearch
     | WebFetch
+    | CallTool
     | PressHotkey
     | ActivateApp
     | LoadSkill
