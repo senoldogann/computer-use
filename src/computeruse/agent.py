@@ -62,7 +62,7 @@ from computeruse.security.autonomy import (
 )
 from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
-from computeruse.skills.registry import SkillRegistry
+from computeruse.skills.registry import SkillRegistry, refined_route, skill_for_goal
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.vision import AXElement
 from computeruse.vision.ax import (
@@ -245,6 +245,28 @@ def _display_viewport(
     )
 
 
+def _remember_route(registry: SkillRegistry, fresh: SkillDefinition) -> None:
+    """File a freshly distilled skill under one-skill-per-goal (Law 3.3).
+
+    Signature de-duplication only catches workflows too small to vary. Measured
+    on the real store, three of four repeated goals distilled a brand-new skill
+    every run, because the agent had genuinely taken a different route — and
+    each new skill started with an empty track record while the one it had just
+    mounted kept the credit. Repetition, which is the only thing that can teach
+    this store anything, was filling it with rivals instead.
+    """
+    existing = skill_for_goal(
+        registry.index(), app=fresh.app, description=fresh.description
+    )
+    if existing is None:
+        registry.save(fresh)
+        return
+    refined = refined_route(fresh, registry.load(existing.skill_id))
+    if refined is not None:
+        registry.save(refined)
+
+
+
 class Agent:
     """Imperative shell composing every tier into one run.
 
@@ -322,7 +344,7 @@ class Agent:
                 # duplicate (Law 3.3 wired through Law 4 memory).
                 distilled = distill(trajectory, episodes_store.known_signatures())
                 if distilled.kind == "skill" and distilled.definition is not None:
-                    skills_registry.save(distilled.definition)
+                    _remember_route(skills_registry, distilled.definition)
             episodes_store.record(
                 episode_from_trace(
                     app=trajectory.app,

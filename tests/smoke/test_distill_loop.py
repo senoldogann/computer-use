@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 import pytest
 
+from computeruse.agent import _remember_route
 from computeruse.memory.episodic import (
     EpisodicStore,
     episode_from_trace,
@@ -28,7 +29,7 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick, Wait
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
-from computeruse.skills.registry import RelevanceMatch
+from computeruse.skills.registry import RelevanceMatch, SkillRegistry
 from computeruse.skills.schemas import SkillDefinition, summary_of
 
 
@@ -240,6 +241,46 @@ def test_full_chain_episode_feeds_skill_dedup(tmp_path) -> None:
     episodes = store.episodes()
     assert len(episodes) == 2
     assert episodes[0].signature == results[0].signature
+
+
+def _route(skill_id: str, signature: str, steps: int) -> SkillDefinition:
+    """A distilled skill for one fixed goal, differing only in route length."""
+    return SkillDefinition(
+        skill_id=skill_id,
+        description="Open Finder and navigate to Downloads folder",
+        app="Finder",
+        steps=tuple(f"step {i}" for i in range(steps)),
+        signature=signature,
+    )
+
+
+def test_a_repeat_run_refines_one_skill_instead_of_adding_a_rival(tmp_path) -> None:
+    """One skill per goal, and repetition improves it rather than crowding it.
+
+    Signature de-dup catches only workflows too small to vary: measured on the
+    real store, three of four repeated goals distilled a brand-new skill every
+    run because the route had genuinely changed, each starting at zero uses
+    while the skill it had just mounted kept the credit. Evidence split across
+    rivals is evidence no route ever accumulates.
+    """
+    registry = SkillRegistry(tmp_path)
+
+    _remember_route(registry, _route("finder.aaa", "aaa", steps=4))
+    registry.record_outcome("finder.aaa", succeeded=True)
+
+    _remember_route(registry, _route("finder.bbb", "bbb", steps=2))
+
+    assert [p.name for p in sorted(tmp_path.glob("*.json"))] == ["finder.aaa.json"]
+    stored = registry.load("finder.aaa")
+    assert len(stored.steps) == 2, "the shorter route should have replaced the longer"
+    assert stored.signature == "bbb"
+    assert (stored.uses, stored.wins) == (1, 1), "the track record belongs to the goal"
+    assert stored.version == 2
+
+    # A longer route is a worse answer to a question already answered.
+    _remember_route(registry, _route("finder.ccc", "ccc", steps=5))
+    assert [p.name for p in sorted(tmp_path.glob("*.json"))] == ["finder.aaa.json"]
+    assert len(registry.load("finder.aaa").steps) == 2
 
 
 def test_episode_from_trace_computes_signature_and_id() -> None:

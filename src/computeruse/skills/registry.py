@@ -62,6 +62,68 @@ def track_record_bonus(summary: SkillSummary) -> int:
     return 1 if summary.wins > 0 else -1
 
 
+def skill_for_goal(
+    summaries: Iterable[SkillSummary], *, app: str, description: str
+) -> SkillSummary | None:
+    """The skill already covering this exact goal in this app (pure).
+
+    De-duplication by action-sequence signature only ever catches trivial
+    workflows. Measured on the real store: of four goals run more than once,
+    three produced a fresh skill every time, because the routes genuinely
+    differed — two presses one run and four the next, eight actions one run and
+    twelve the next. A signature over the exact sequence is doing its job when
+    it calls those different; the mistake is asking it to answer "have I
+    learned this goal?", which is a question about the goal.
+
+    So the goal is the key. Matching is exact after case-folding, which is
+    enough for the case that matters: a repeat run is the same goal text again,
+    verbatim. Two phrasings of one intent stay two skills, and that is the
+    honest answer — nothing here can tell that they meant the same thing.
+
+    A store written before this rule can hold several skills for one goal, so
+    the best-established one is returned rather than whichever file sorts
+    first: that is where the track record already is, and refining it is what
+    lets the leftovers fade instead of competing.
+    """
+    wanted = description.strip().casefold()
+    candidates = [
+        summary
+        for summary in summaries
+        if summary.app == app and summary.description.strip().casefold() == wanted
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda s: (-s.wins, -s.uses, s.skill_id))
+
+
+def refined_route(
+    fresh: SkillDefinition, stored: SkillDefinition
+) -> SkillDefinition | None:
+    """``stored`` rewritten to a shorter route, or None to leave it alone (pure).
+
+    A repeat run used to write a second skill for the same goal, starting at
+    zero uses, while the skill it had just mounted kept the credit for a run
+    the new one would answer next time. The store filled with near-duplicates
+    that split the evidence between them, so no route ever accumulated a track
+    record worth trusting — the opposite of learning from repetition.
+
+    Identity and track record stay with the goal; only the route is replaced,
+    and only by a shorter one. A longer route is a worse answer to a question
+    already answered.
+    """
+    if len(fresh.steps) >= len(stored.steps):
+        return None
+    return stored.model_copy(
+        update={
+            "steps": fresh.steps,
+            "signature": fresh.signature,
+            "tags": fresh.tags,
+            "parameters": fresh.parameters,
+            "version": stored.version + 1,
+        }
+    )
+
+
 def _content_tokens(text: str) -> frozenset[str]:
     """Lowercased content words of a phrase, punctuation stripped (pure)."""
     cleaned = re.sub(r"[^\w]+", " ", text.lower(), flags=re.UNICODE)
