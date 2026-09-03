@@ -28,6 +28,8 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick, Wait
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
+from computeruse.skills.registry import RelevanceMatch
+from computeruse.skills.schemas import SkillDefinition, summary_of
 
 
 def _turn(action: object) -> AgentTurn:
@@ -52,7 +54,7 @@ def test_runner_fires_on_complete_with_executed_trajectory() -> None:
         provider=provider,
         execute_physical=lambda _a: None,
         app="Safari",
-        on_complete=lambda t, o, r: received.append((t, o, r)),
+        on_complete=lambda t, o, r, _s: received.append((t, o, r)),
         max_steps=10,
     )
     runner.run(goal="open the menu")
@@ -78,7 +80,7 @@ def test_failed_finish_reports_failure_outcome() -> None:
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _a: None,
-        on_complete=lambda _t, o, _r: received.append(o),
+        on_complete=lambda _t, o, _r, _s: received.append(o),
         max_steps=5,
     )
     runner.run(goal="click")
@@ -120,7 +122,7 @@ def test_aborted_run_is_remembered_as_a_failure() -> None:
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _a: None,
-        on_complete=lambda _t, o, r: received.append((o, r)),
+        on_complete=lambda _t, o, r, _s: received.append((o, r)),
         max_steps=3,
     )
     # The bounded-termination contract: the truncation raises a typed error
@@ -153,7 +155,7 @@ def test_kill_switch_takeover_is_remembered_as_a_failure() -> None:
         provider=provider,
         execute_physical=lambda _a: None,
         kill_switch=TripsOnceAStepIsOnTheRecord(),  # type: ignore[arg-type]
-        on_complete=lambda _t, o, r: received.append((o, r)),
+        on_complete=lambda _t, o, r, _s: received.append((o, r)),
         max_steps=5,
     )
     with pytest.raises(KillSwitchTripped):
@@ -192,7 +194,10 @@ def test_full_chain_episode_feeds_skill_dedup(tmp_path) -> None:
     results: list[DistillResult] = []
 
     def on_complete(
-        trajectory: Trajectory, outcome: EpisodeOutcome, retrospective: str | None
+        trajectory: Trajectory,
+        outcome: EpisodeOutcome,
+        retrospective: str | None,
+        mounted_skill_id: str | None,
     ) -> None:
         # Distill against known history first, then remember — so the fresh
         # run is novel, and any future identical run is a duplicate.
@@ -251,3 +256,59 @@ def test_episode_from_trace_computes_signature_and_id() -> None:
     assert episode.outcome == "failure"
     assert episode.retrospective == "coordinates were stale"
     assert episode.episode_id.startswith("safari.")
+
+
+def test_a_skill_that_made_the_run_trivial_is_still_credited() -> None:
+    """The strongest evidence a recipe works produced no trajectory at all.
+
+    A run whose mounted skill was right can finish in one step, executing
+    nothing physical. The guard that skips remembering a trajectory used to
+    skip the whole callback with it, so the skill's verdict never reached the
+    store and every counter stayed at zero — measured on two real runs.
+    """
+    received: list[tuple[EpisodeOutcome, str | None]] = []
+    runner = OodaRunner(
+        provider=lambda _s: AgentTurn(
+            thought="already done",
+            sub_goal="nothing to do",
+            action=Finish(type="finish", status="success", summary="already satisfied"),
+        ),
+        execute_physical=lambda _a: None,
+        # Mounted the way a real run mounts one: retrieval finds it and the
+        # loader loads it.
+        app="Google Chrome",
+        skill_scan=lambda _goal: [
+            RelevanceMatch(summary=summary_of(_a_skill()), score=99)
+        ],
+        skill_loader=lambda _sid: _a_skill(),
+        on_complete=lambda t, o, _r, sid: received.append((o, sid)) or None,
+        max_steps=3,
+    )
+    runner.run(goal="a goal already satisfied")
+    assert received == [("success", "chrome.mounted")]
+
+
+def test_a_run_with_no_skill_and_no_actions_still_leaves_no_trace() -> None:
+    """The original contract is unchanged: nothing ran, nothing to remember."""
+    received: list[object] = []
+    OodaRunner(
+        provider=lambda _s: AgentTurn(
+            thought="",
+            sub_goal="",
+            action=Finish(type="finish", status="success", summary="nothing"),
+        ),
+        execute_physical=lambda _a: None,
+        on_complete=lambda *args: received.append(args) or None,
+        max_steps=3,
+    ).run(goal="nothing to do")
+    assert received == []
+
+
+def _a_skill() -> SkillDefinition:
+    return SkillDefinition(
+        skill_id="chrome.mounted",
+        description="open the comments",
+        app="Google Chrome",
+        steps=("click the comments link",),
+        signature="deadbeef",
+    )

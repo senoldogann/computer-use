@@ -769,8 +769,12 @@ class OodaRunner:
     # on a failure — the trajectory says what was tried, the retrospective says
     # why it stopped. The caller decides what to do with each outcome (Law 3.1
     # only ever wanted a *successful* flow distilled into a skill).
+    #: Called once a run ends, with the trajectory, its outcome, a
+    #: retrospective, and the id of the skill that was mounted (``None`` when
+    #: none was). The skill id is what lets a caller record how a recipe
+    #: actually fared, which distillation alone never did.
     on_complete: (
-        Callable[[Trajectory, EpisodeOutcome, str | None], None] | None
+        Callable[[Trajectory, EpisodeOutcome, str | None, str | None], None] | None
     ) = None
     # Goal-completion auditor (VERIFY, terminal): given the final state and the
     # model's own summary, decide whether the goal is *observably* satisfied.
@@ -2002,7 +2006,16 @@ class OodaRunner:
         become a skill; that is the caller's call, and the retrospective is
         passed so it can make it.
         """
-        if self.on_complete is None or not self._executed:
+        # Two different questions were behind one guard. "Is there a
+        # trajectory worth remembering?" is answered by whether anything ran.
+        # "How did the mounted skill fare?" is not: a run that finished in one
+        # step *because* the skill was right executed nothing, and that is the
+        # strongest evidence the recipe works — which the caller never received,
+        # so every counter stayed at zero. Measured: a second run mounted a
+        # distilled skill, finished immediately, and recorded uses=0.
+        if self.on_complete is None:
+            return
+        if not self._executed and self._skill is None:
             return
         self.on_complete(
             Trajectory(
@@ -2013,6 +2026,7 @@ class OodaRunner:
             ),
             outcome,
             retrospective,
+            self._skill.skill_id if self._skill is not None else None,
         )
 
     @property

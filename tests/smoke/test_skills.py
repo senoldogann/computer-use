@@ -21,7 +21,9 @@ from computeruse.skills.distiller import (
 )
 from computeruse.skills.registry import (
     SkillRegistry,
+    is_demoted,
     search,
+    track_record_bonus,
 )
 from computeruse.skills.schemas import SkillDefinition, SkillSummary, summary_of
 
@@ -233,3 +235,75 @@ def test_a_distilled_skill_carries_no_coordinates() -> None:
     # What transfers is still there: the intent and the non-positional params.
     assert "Click the comments link." in rendered
     assert "hello" in rendered
+
+
+# --- reinforcement: a skill is a claim, and claims get tested ----------------
+
+
+def _scored(skill_id: str, uses: int, wins: int) -> SkillSummary:
+    return SkillSummary(
+        skill_id=skill_id,
+        description="open hacker news comments",
+        app="Google Chrome",
+        uses=uses,
+        wins=wins,
+    )
+
+
+def test_a_skill_that_only_ever_fails_stops_being_offered() -> None:
+    """Distillation used to be the end of a skill's story.
+
+    A recipe that led three runs astray was handed to a fourth with exactly the
+    confidence of one that had worked every time. Withheld rather than ranked
+    last: an actively harmful recipe offered as a fallback is still offered.
+    """
+    summaries = [_scored("bad", uses=3, wins=0), _scored("good", uses=3, wins=2)]
+    found = [hit.summary.skill_id for hit in search(summaries, "hacker news comments")]
+    assert found == ["good"]
+
+
+def test_one_win_protects_a_skill_from_demotion() -> None:
+    """Later failures are then far likelier to be about the screen it met than
+    the route it describes."""
+    assert is_demoted(_scored("proven", uses=9, wins=1)) is False
+    assert is_demoted(_scored("unproven", uses=2, wins=0)) is False  # not yet
+    assert is_demoted(_scored("failing", uses=3, wins=0)) is True
+
+
+def test_an_untried_skill_is_neither_rewarded_nor_punished() -> None:
+    """A new skill has said nothing yet; it should not be ranked as though it
+    had failed, or nothing new would ever get tried."""
+    assert track_record_bonus(_scored("new", uses=0, wins=0)) == 0
+    assert track_record_bonus(_scored("proven", uses=1, wins=1)) == 1
+    assert track_record_bonus(_scored("missing", uses=1, wins=0)) == -1
+
+
+def test_a_proven_skill_wins_a_tie_but_does_not_beat_a_better_match() -> None:
+    """The store must not ossify around whatever happened to be tried first."""
+    proven_but_unrelated = SkillSummary(
+        skill_id="proven", description="open the downloads folder", app="Finder",
+        uses=5, wins=5,
+    )
+    untried_but_matching = SkillSummary(
+        skill_id="matching", description="open hacker news comments", app="Chrome",
+    )
+    ranked = [h.summary.skill_id for h in search(
+        [proven_but_unrelated, untried_but_matching], "hacker news comments"
+    )]
+    assert ranked[0] == "matching"
+
+
+def test_outcomes_are_written_back_to_the_store(tmp_path) -> None:
+    """Without this the counters stay at zero and the ranking is dead code."""
+    registry = SkillRegistry(tmp_path)
+    registry.save(_definition(skill_id="chrome.x"))
+    registry.record_outcome("chrome.x", succeeded=True)
+    registry.record_outcome("chrome.x", succeeded=False)
+    stored = registry.load("chrome.x")
+    assert (stored.uses, stored.wins) == (2, 1)
+
+
+def test_recording_against_a_missing_skill_is_survivable(tmp_path) -> None:
+    """The run has already finished; failing its bookkeeping would turn a
+    completed task into an error."""
+    SkillRegistry(tmp_path).record_outcome("nope.gone", succeeded=True)

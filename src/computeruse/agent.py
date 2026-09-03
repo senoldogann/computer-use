@@ -296,6 +296,7 @@ class Agent:
             trajectory: Trajectory,
             outcome: EpisodeOutcome,
             retrospective: str | None,
+            mounted_skill_id: str | None,
         ) -> None:
             # A failed run is remembered but never distilled. Both halves
             # matter: a workflow that did not work must not become a skill the
@@ -303,6 +304,18 @@ class Agent:
             # steps before hitting a wall is exactly the trace worth keeping
             # (Law 4.1 failure retrospectives).
             nonlocal distilled
+            # Reinforcement: a mounted skill is a claim about how to do this,
+            # and the run just tested it. Recording the verdict is what turns
+            # the store from a pile of recipes into one that gets better —
+            # a skill that keeps failing is eventually withheld.
+            if mounted_skill_id is not None:
+                skills_registry.record_outcome(
+                    mounted_skill_id, succeeded=outcome == "success"
+                )
+            if not trajectory.steps:
+                # Nothing ran, so there is nothing to remember or distil — the
+                # skill's verdict above is the whole point of this call.
+                return
             if outcome == "success":
                 # Distill against known history FIRST, then remember — so the
                 # fresh run is novel, and any future identical run is a
