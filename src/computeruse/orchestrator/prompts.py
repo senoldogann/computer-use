@@ -238,6 +238,12 @@ COMPLETION_AUDIT_CONTRACT: Final[str] = (
     "  can never be on screen together. That list is read from the machine, not written by the\n"
     "  agent, so trust it exactly as much as the current screen. The FINAL state must still be\n"
     "  visible now — use the earlier text only for the parts that have moved out of view.\n"
+    "- When a goal relies on data fetched via internal/MCP tools, verify the final displayed\n"
+    "  content against the tool output recorded in earlier observed data. A tool answer listed\n"
+    "  under 'External tool results observed in this run' is machine-read evidence, like the\n"
+    "  screen: the screen must show that answer where the goal says it should — not merely\n"
+    "  something shaped like an answer. Rejecting for lack of screen evidence of a fact the\n"
+    "  tool output already establishes repeats the work instead of checking it.\n"
     "- When a goal asks to search for, locate, or find an item and then open or display it\n"
     "  (“search for X and open the top result”, “find file Y and open it”), the opened target\n"
     "  itself is the primary evidence: if the item now on screen visibly pertains to the\n"
@@ -814,11 +820,14 @@ def scaffolded_provider(
 def completion_prompt(state: WorkingState, claim: str, *, app: str) -> str:
     """The verification checker's prompt for one completion claim (pure).
 
-    Deliberately narrow. The auditor sees the goal, the claim, and the current
-    perception — but *not* the acting model's reasoning, its plan, or its step
-    history. Sharing those would let the story that produced a wrong claim also
+    Deliberately narrow. The auditor sees the goal, the claim, the current
+    perception, and the transcript of what the run's tools answered — but
+    *not* the acting model's reasoning, its plan, or its step history.
+    Sharing those would let the story that produced a wrong claim also
     justify it: the whole value of a second read is that it is uncontaminated
-    by the first one's beliefs.
+    by the first one's beliefs. The tool transcript is admitted for the
+    opposite reason: it is machine-read evidence the screen alone cannot
+    replace, and without it a goal built on fetched data is unverifiable.
     """
     lines = [
         COMPLETION_AUDIT_CONTRACT,
@@ -847,6 +856,16 @@ def completion_prompt(state: WorkingState, claim: str, *, app: str) -> str:
                 "machine, not the agent's account of it) — use it for parts of "
                 "the goal whose evidence is no longer on screen:",
                 state.observed_trail,
+            )
+        )
+    if state.tool_history:
+        # The transcript of what the run's tools answered, oldest first. This
+        # is what a goal built on fetched data is verified against: the screen
+        # shows where the answer landed, this list shows what the answer was.
+        observed.append(
+            ObservedSection(
+                "External tool results observed in this run:",
+                state.tool_history,
             )
         )
     block = render_observed_data(tuple(observed))

@@ -524,3 +524,40 @@ And here is the decision:
     assert turn.action.type == "mouse_click"
     assert turn.action.x == 10  # type: ignore[union-attr]
 
+
+
+# --- the auditor sees what the tools answered ----------------------------------
+
+
+def test_auditor_sees_tool_results() -> None:
+    """A goal built on fetched data is unverifiable from the screen alone.
+
+    Measured live: the agent wrote a note from search results, the auditor —
+    blind to the tool output — rejected the finish for "unchecked input", and
+    the agent opened a second note and did the work again. The run transcript
+    travels with the audit so the screen is checked against the answer, not
+    against a void.
+    """
+    state = WorkingState(
+        goal="write the news summary in Notes",
+        active_window="Notes — new note",
+        tool_history=(
+            "web_search 'latest AI news' via tavily.search returned:\n- Title <https://a.example>",
+        ),
+    )
+    prompt = completion_prompt(state, "the note shows the summary", app="Notes")
+    assert "External tool results observed in this run:" in prompt
+    assert "tavily.search" in prompt
+    # Inside the fence, like every other machine-read fact.
+    before, _, after = prompt.partition("tavily.search")
+    assert before.count("<observed_data>") > before.count("</observed_data>")
+    assert "</observed_data>" in after
+    # And the contract tells the auditor what the transcript is for.
+    assert "verify the final displayed" in COMPLETION_AUDIT_CONTRACT
+    assert "External tool results observed in this run" in COMPLETION_AUDIT_CONTRACT
+
+
+def test_auditor_without_tool_history_asks_for_nothing_new() -> None:
+    """No tools, no section: the contract rule stays, the evidence list goes."""
+    prompt = completion_prompt(WorkingState(goal="x"), "done", app="Safari")
+    assert "External tool results observed in this run:" not in prompt

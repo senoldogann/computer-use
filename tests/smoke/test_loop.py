@@ -15,9 +15,12 @@ import pytest
 
 from computeruse.orchestrator.failures import FailureKind, UnrecoverableFailureError
 from computeruse.orchestrator.loop import (
+    TOOL_REPEAT_ABORT_AFTER,
+    TOOL_REPEAT_WARN_AFTER,
     AxProbeResult,
     MaxStepsError,
     OodaRunner,
+    StuckLoopError,
     WorkingState,
     _extend_trail,
     decide_step,
@@ -29,6 +32,7 @@ from computeruse.orchestrator.loop import (
 from computeruse.orchestrator.prompts import completion_auditor, completion_prompt
 from computeruse.orchestrator.schemas import (
     AgentTurn,
+    CallTool,
     Finish,
     MouseClick,
     MouseMove,
@@ -158,6 +162,70 @@ def test_equivalent_action_tolerates_small_coordinate_jitter() -> None:
         MouseMove(type="mouse_move", x=10, y=10, duration_ms=180),
         MouseMove(type="mouse_move", x=10, y=10, duration_ms=250),
     )
+
+
+def _tool_call(tool: str = "tavily.search", query: str = "current BTC") -> CallTool:
+    return CallTool(type="call_tool", tool=tool, arguments={"query": query})
+
+
+def test_stuck_loop_catches_repeated_tool_calls() -> None:
+    """Word-shuffled re-asks are the same question (guard regression).
+
+    A stuck model re-asks "current BTC" as "BTC current", and the exact
+    payload comparison reset the counter every time — the loop that asked
+    six times in three minutes never tripped anything. The guard now
+    compares the question, not the string.
+    """
+    same = _tool_call()
+    assert equivalent_action(same, _tool_call())
+    # Same words, shuffled order: still the same question.
+    assert equivalent_action(same, _tool_call(query="BTC current"))
+    assert equivalent_action(same, _tool_call(query="  Current   BTC?! "))
+    # A different tool, a different key, or a genuinely different question.
+    assert not equivalent_action(same, _tool_call(tool="brave.web_search"))
+    assert not equivalent_action(
+        same, CallTool(type="call_tool", tool="tavily.search", arguments={"q": "current BTC"})
+    )
+    assert not equivalent_action(same, _tool_call(query="weather in Berlin"))
+    # A bare subset is still the same question, asked with less.
+    assert equivalent_action(same, _tool_call(query="BTC"))
+    # Non-string values only ever match exactly: a new page is a new question.
+    paged = CallTool(
+        type="call_tool", tool="tavily.search", arguments={"query": "x", "page": 1}
+    )
+    assert equivalent_action(
+        paged,
+        CallTool(
+            type="call_tool", tool="tavily.search", arguments={"query": "x", "page": 1}
+        ),
+    )
+    assert not equivalent_action(
+        paged,
+        CallTool(
+            type="call_tool", tool="tavily.search", arguments={"query": "x", "page": 2}
+        ),
+    )
+    # The tool-tier hint names the way out.
+    assert "different question" in repetition_diagnostic(same, 3)
+
+
+def test_tool_repeats_hint_on_the_third_and_refuse_on_the_fifth() -> None:
+    """Law 2.2 tool tier: roomier than the physical tier, still finite."""
+    assert TOOL_REPEAT_WARN_AFTER == 3
+    assert TOOL_REPEAT_ABORT_AFTER == 5
+    runner = OodaRunner(
+        provider=lambda state: _turn(_tool_call()),
+        execute_physical=lambda _action: None,
+    )
+    repeats = [runner._note_tool_call(_tool_call(), "g") for _ in range(4)]
+    assert repeats[0] is None and repeats[1] is None
+    assert repeats[2] is not None and "different question" in repeats[2]
+    assert repeats[3] is not None
+    with pytest.raises(StuckLoopError):
+        runner._note_tool_call(_tool_call(), "g")
+    # A different question starts a new count rather than continuing the old.
+    runner._reset_tool_streak()
+    assert runner._note_tool_call(_tool_call(query="weather in Berlin"), "g") is None
 
 
 def test_map_action_to_screen_converts_image_picks_to_screen_points() -> None:

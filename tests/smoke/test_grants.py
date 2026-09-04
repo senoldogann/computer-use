@@ -333,3 +333,20 @@ def test_an_unreadable_stored_action_delegates_nothing() -> None:
     """A queue entry nothing can parse is the one nothing should be inferred from."""
     assert action_from_payload({"type": "not_a_real_action"}) is None
     assert action_from_payload({"type": "mouse_click", "x": -1, "y": 0}) is None
+
+
+def test_grant_matches_localized_app_alias() -> None:
+    """A grant for "Hesap Makinesi" covers Calculator without asking.
+
+    The operator delegates in their own locale; the frontmost app arrives in
+    the system's. Both resolve to one canonical name before comparing, in
+    both directions — while an unrelated app still does not match.
+    """
+    grant = _grant(app="Hesap Makinesi", target_pattern=ANY)
+    assert _decide((grant,), app="Calculator", label="Sil") == (
+        "granted",
+        PermissionDecision.ALLOW,
+    )
+    mirrored = _grant(app="Calculator", target_pattern=ANY)
+    assert _decide((mirrored,), app="hesap makinesi")[0] == "granted"
+    assert scope_matches(grant, app="Finder", target_label="Sil") is False
