@@ -36,6 +36,11 @@ class Episode(BaseModel):
     # Identity of the *flow*, shared with the distiller so memory feeds skill
     # distillation. Recomputable from (app, steps); stored to keep indexing O(1).
     signature: str
+    # Which run produced this episode, matching UsageRecord.run_id so a score
+    # can join what happened to what it cost. Optional on purpose: episodes
+    # recorded before this field existed are still on disk, and they must keep
+    # validating — they join to no usage instead of breaking the read path.
+    run_id: str | None = Field(default=None)
     recorded_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp, frozen at creation.",

@@ -49,6 +49,13 @@ from computeruse.autonomous import (
     propose_goal,
     run_autonomously,
 )
+from computeruse.eval.runner import build_record, run_all
+from computeruse.eval.score import ALL_CATEGORIES as ALL_EVAL_CATEGORIES
+from computeruse.eval.score import render as render_eval
+from computeruse.eval.score import render_json as render_eval_json
+from computeruse.eval.score import summarize as summarize_eval
+from computeruse.eval.store import BenchmarkStore, new_benchmark_id
+from computeruse.eval.tasks import BATTERY_VERSION, TASK_BATTERY, tasks_in
 from computeruse.memory.episodic import EpisodicStore
 from computeruse.orchestrator.budget import (
     BudgetExceededError,
@@ -97,6 +104,7 @@ from computeruse.orchestrator.schemas import (
     action_from_payload,
 )
 from computeruse.orchestrator.supervisor import supervisor_for
+from computeruse.orchestrator.trace import new_run_id
 from computeruse.providers.openai import (
     DEFAULT_MODEL,
     ModelCallStats,
@@ -279,6 +287,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="REQUEST_ID",
         help="Refuse a parked action. Its mission returns to the queue so the "
         "rest of the work can proceed without it.",
+    )
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run the self-evaluation battery and print the score: twelve "
+        "offline tasks over grounding, permission, recovery and reporting. "
+        "Snapshots the score to --store/benchmarks; actuates nothing on the "
+        "host, needs no driver and no model.",
+    )
+    parser.add_argument(
+        "--eval-json",
+        action="store_true",
+        help="With --eval: print the score as JSON records instead of prose.",
+    )
+    parser.add_argument(
+        "--eval-only",
+        default=None,
+        metavar="CATS",
+        help="With --eval: run a comma-separated subset of the battery "
+        "(grounding,permission,recovery,report) instead of the whole thing.",
     )
     parser.add_argument(
         "--app",
@@ -1181,6 +1209,66 @@ def _record_usage(
         LOGGER.warning("could not record usage for run %s: %s", run_id, exc)
 
 
+def _parse_eval_filter(raw: str | None) -> tuple[str, ...]:
+    """Named eval categories from --eval-only, or the whole battery (pure).
+
+    Empty entries are ignored so "--eval-only grounding," still means
+    grounding; a wholly empty value means the caller named nothing, which
+    is the whole battery. Unknown names are rejected downstream by
+    ``tasks_in``, which owns the vocabulary.
+    """
+    if raw is None:
+        return ALL_EVAL_CATEGORIES
+    named = tuple(part.strip() for part in raw.split(","))
+    named = tuple(part for part in named if part)
+    if not named:
+        return ALL_EVAL_CATEGORIES
+    return named
+
+
+def _run_eval(args: argparse.Namespace) -> int:
+    """Run the battery, snapshot the score, print it (I/O around pure parts).
+
+    Returns 0 only when every selected task passed: a red battery is a
+    finding, and CI must see it as one rather than as a green run with
+    red text in it.
+    """
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    try:
+        selected = tasks_in(TASK_BATTERY, _parse_eval_filter(args.eval_only))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    started = now_utc()
+    results = run_all(selected)
+    finished = now_utc()
+    record = build_record(
+        benchmark_id=new_benchmark_id(started),
+        battery_version=BATTERY_VERSION,
+        run_id=new_run_id(),
+        started_at=started,
+        finished_at=finished,
+        results=results,
+    )
+    try:
+        BenchmarkStore(store / "benchmarks").save(record)
+    except OSError as exc:
+        # The score on stdout is the instrument reading; a store that
+        # cannot be written degrades to a warning rather than failing a
+        # battery that may itself be red (Law 6.3: carry the reason).
+        print(f"warning: could not save benchmark {record.benchmark_id}: {exc}", file=sys.stderr)
+    summary = summarize_eval(
+        battery_version=record.battery_version,
+        run_id=record.run_id if record.run_id is not None else record.benchmark_id,
+        results=results,
+    )
+    if args.eval_json:
+        print(render_eval_json(summary), end="")
+    else:
+        print(render_eval(summary), end="")
+    return 0 if summary.passed_count == summary.total else 1
+
+
 def _print_report(args: argparse.Namespace) -> int:
     """Read the five stores together and print what happened (I/O + pure render)."""
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
@@ -1387,11 +1475,15 @@ def _apply_resume(args: argparse.Namespace) -> int | None:
 
 
 def _dispatch_store_command(args: argparse.Namespace) -> int | None:
-    """Run the read-only store commands, or ``None`` to continue to a run.
+    """Run the offline store commands, or ``None`` to continue to a run.
 
-    These need no driver, no model and no goal, so they are dispatched before
-    every check that assumes a run is about to start.
+    Report/grant/approval reads need no driver, model or goal; eval neither
+    actuates nor calls a model, it only executes pure checks and snapshots
+    the score — so all of them dispatch before every check that assumes a
+    run is about to start.
     """
+    if args.eval or args.eval_json or args.eval_only is not None:
+        return _run_eval(args)
     if args.report:
         return _print_report(args)
     if args.grants or args.grant is not None or args.revoke is not None:

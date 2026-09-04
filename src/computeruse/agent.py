@@ -440,6 +440,9 @@ class Agent:
                     step_descriptions=trajectory.step_descriptions,
                     outcome=outcome,
                     retrospective=retrospective,
+                    # The join key to this run's UsageRecord: without it a
+                    # score can say what happened but never what it cost.
+                    run_id=run_id,
                 )
             )
             if outcome == "success":
