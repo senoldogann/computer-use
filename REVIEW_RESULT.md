@@ -1,6 +1,8 @@
 # Kapsamlı Proje Code-Review Raporu
 
-> **Durum (3 Eylül 2026, güncel):** Aşağıdaki bulgular yeniden doğrulandı.
+> **Durum (4 Eylül 2026, güncel):** Aşağıdaki bulgular yeniden doğrulandı.
+> Ölçülen zemin: `pytest` 645/645, `cargo test` 55 passed + 1 ignored,
+> `ruff`/`pyright`/`clippy -D warnings` temiz, `--eval` 12/12.
 >
 > **Kapatıldı, regresyon testiyle sabitlendi:** CLI-01, SEC-01, SEC-02,
 > SEC-03, NET-01, ve rapora sonradan eklenen AUT-02 (ölen driver'ı geri getiren
@@ -12,10 +14,25 @@
 > ya da canlı bir alt süreç gerektirdiği için mevcut `cargo test` süitiyle
 > kapsanamıyor — davranış elle doğrulandı, otomatik testi yok.
 >
-> **Hâlâ açık:** AUT-01 (checkpoint yazılıyor ama hiç okunmuyor) ve orta
-> öncelikli dört bulgu — LOG-01 (uygulama doğrulamasında çift yönlü alt dize),
-> RUL-01 (`_normalize_action_dict` girdi mutasyonu), MEM-01 (ekran yakalamada
-> çift tahsis), GUI-01 (çoklu monitörde hale kayması).
+> **Kapatıldı (önceden "hâlâ açık" yazan beş bulgu, 4 Eylül 2026'da kodda
+> yeniden doğrulandı):**
+> * AUT-01 — checkpoint artık okunuyor: `cli.py:1431` (`_apply_resume`,
+>   `remaining_goal` ile aynı "ne kaldı" tanımı); `test_mission.py` resume
+>   testleri.
+> * LOG-01 — çift yönlü alt dize gitti: `evidence.py:341` tek yönlü
+>   `expected in observed` + `evidence.py:348` (`APP_TOKEN_MIN_CHARS` belirteç
+>   eşiği); `test_focus.py` / `test_visual_verification.py` app-evidence
+>   testleri.
+> * RUL-01 — normalizer artık kopyalıyor: `prompts.py:476`
+>   (`action = dict(action)`); `test_prompts.py` içinde
+>   `test_normalize_action_dict_copies_instead_of_mutating`.
+> * MEM-01 — çift tahsis gitti: `quartz.rs:685` (tek tahsis, `to_vec`
+>   kopyası yok). Rust tarafı + gerçek ekran gerektirir, otomatik testi yok —
+>   kodda doğrulandı.
+> * GUI-01 — hale ana ekran yüksekliğiyle çevriliyor ve bu doğru:
+>   `indicator.rs:185-201` (gerekçesi kodda, ikinci monitörde el hesabıyla
+>   doğrulandı: 1530 doğru, -450 regresyon). Donanım gerektirir, otomatik
+>   testi yok — "düzeltmeyin" notu kodda.
 
 Bu rapor, `computeruse` projesinin mimari, güvenlik, bellek yönetimi, IPC ve kural uyumluluğu boyutlarında fazlara ayrılarak gerçekleştirilen derinlemesine statik ve dinamik kod incelemesini içermektedir. Tüm bulgular dosya yolları, satır numaraları, kök neden analizleri ve somut kanıtlarla belgelenmiştir.
 
