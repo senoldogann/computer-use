@@ -388,6 +388,12 @@ def test_inbox_end_to_end_through_a_real_session(tmp_path: Path) -> None:
         env=env,
     )
     assert session.returncode == 0, f"session failed:\n{session.stdout}\n{session.stderr}"
+    # The operator's order ran exactly once. The first run distills a skill
+    # whose description is the goal verbatim; without the session exclusion
+    # the memory pool would re-propose it as "unproven" for run two — and on
+    # a physical host that repeats the action, not just the thought.
+    assert session.stderr.count("autonomous run ") == 1
+    assert "1 run(s) attempted" in session.stdout
     # The broken file quarantined in passing, visibly, consuming no run.
     assert "broken.json" in session.stderr
     assert ".failed" in session.stderr

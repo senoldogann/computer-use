@@ -118,7 +118,7 @@ Arayüzdeki tüm emojiler kaldırıldı; yerlerine yüksek çözünürlüklü ve
 |---|---|---|
 | **Rust Micro-Driver** | `cargo test` | **55 passed + 1 ignored** |
 | **Rust Linter** | `cargo clippy --all-targets -- -D warnings` | **0 Uyarı** |
-| **Python Backend** | `pytest tests/` | **686 / 686 Test Başarılı** |
+| **Python Backend** | `pytest tests/` | **690 / 690 Test Başarılı** |
 | **Öz-değerlendirme Bataryası** | `computeruse --eval` | **12 / 12 passed** |
 | **Python Linter** | `ruff check src/ tests/` | **0 Hata / 0 Uyarı** |
 | **Python Tip Denetimi** | `pyright` | **0 Hata / 0 Uyarı** |

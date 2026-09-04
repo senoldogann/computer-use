@@ -944,6 +944,11 @@ def _run_autonomous_session(
     # execute() of the same run — run_autonomously strictly pairs one propose
     # with its execute, so a plain holder is enough: no queue, no lookup.
     pending_claim: dict[str, ClaimedTask | None] = {"claim": None}
+    # Operator orders handled this session. A freshly distilled skill carries
+    # the goal's exact text as its description, so without this the next
+    # propose() would re-run the order through the "unproven" step — and on a
+    # physical host that repeats the action, not just the thought.
+    operator_goals: set[str] = set()
     if watch_dir is not None:
         # Fail fast on an unsafe or missing folder, before any run starts.
         check_inbox_writable(watch_dir)
@@ -1017,6 +1022,11 @@ def _run_autonomous_session(
         # so a later run can never settle (or inherit) another run's file.
         claim = pending_claim["claim"]
         pending_claim["claim"] = None
+        if claim is not None:
+            # Recorded before the run starts, not after it ends: a crashed
+            # run must not be re-proposed either. All three endings (success,
+            # parked, failure) count the same — the file is consumed.
+            operator_goals.add(proposal.goal)
         attempted_goals.append(proposal.goal)
         mark = (tokens["total"], cost["usd"], time.monotonic())
         # The mission is opened *before* the run, so a session killed
@@ -1194,14 +1204,13 @@ def _run_autonomous_session(
                     f"finished ({mission.attempts} attempt(s) so far)"
                 ),
             )
-        proposal = propose_goal(skills, episodes, rng=rng)
-        if proposal is not None and proposal.goal in waiting:
-            LOGGER.info(
-                "autonomous: %r is already waiting on a decision; nothing else to do",
-                proposal.goal,
-            )
-            return None
-        return proposal
+        # Exclusion filters the pools before the die is cast: rejecting after
+        # rng.choice would discard the legitimate candidates left in the pool
+        # along with the excluded one and end the session early. A None here
+        # therefore means the pools are genuinely empty — not an unlucky roll.
+        return propose_goal(
+            skills, episodes, rng=rng, exclude=waiting | operator_goals
+        )
 
     done = run_autonomously(
         SessionLimits(

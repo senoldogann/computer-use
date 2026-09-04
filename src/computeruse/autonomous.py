@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from dataclasses import dataclass
 from typing import Final
 
@@ -118,6 +118,7 @@ def propose_goal(
     episodes: EpisodicStore,
     *,
     rng: random.Random,
+    exclude: Container[str],
 ) -> GoalProposal | None:
     """Choose something worth doing, from what memory says is unfinished.
 
@@ -129,13 +130,18 @@ def propose_goal(
     that has been used once earns a second data point — but it is the weakest
     of the three and is chosen last.
 
+    ``exclude`` names goals decided against this session (parked questions,
+    already-worked operator orders). It filters the pools *before* the die is
+    cast: rejecting after ``rng.choice`` would throw away the legitimate
+    candidates left in the pool along with the excluded one.
+
     Returns ``None`` when memory has nothing to say. An agent with nothing
     grounded to do should do nothing, not invent a task.
     """
     demoted = [
         summary
         for summary in skills.index()
-        if is_demoted(summary)
+        if is_demoted(summary) and summary.description not in exclude
     ]
     if demoted:
         target = rng.choice(demoted)
@@ -152,7 +158,9 @@ def propose_goal(
     failures = [
         episode
         for episode in episodes.episodes()
-        if episode.outcome == "failure" and episode.description
+        if episode.outcome == "failure"
+        and episode.description
+        and episode.description not in exclude
     ]
     if failures:
         target = rng.choice(failures)
@@ -165,7 +173,7 @@ def propose_goal(
     unproven = [
         summary
         for summary in skills.index()
-        if summary.uses <= 1
+        if summary.uses <= 1 and summary.description not in exclude
     ]
     if unproven:
         target = rng.choice(unproven)

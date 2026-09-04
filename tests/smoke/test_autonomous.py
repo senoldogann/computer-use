@@ -114,6 +114,7 @@ def test_nothing_in_memory_means_nothing_to_do(tmp_path: Path) -> None:
         SkillRegistry(tmp_path / "skills"),
         EpisodicStore(tmp_path / "episodes"),
         rng=random.Random(0),
+        exclude=frozenset(),
     )
     assert proposal is None
 
@@ -125,7 +126,10 @@ def test_a_broken_skill_is_chosen_first(tmp_path: Path) -> None:
     skills.save(_skill("chrome.broken", uses=3, wins=0))
     skills.save(_skill("chrome.fine", uses=3, wins=3))
     proposal = propose_goal(
-        skills, EpisodicStore(tmp_path / "episodes"), rng=random.Random(0)
+        skills,
+        EpisodicStore(tmp_path / "episodes"),
+        rng=random.Random(0),
+        exclude=frozenset(),
     )
     assert proposal is not None
     assert "chrome.broken" in proposal.reason
@@ -149,7 +153,9 @@ def test_a_failed_episode_is_chosen_before_re_running_a_success(
             retrospective="never found the folder",
         )
     )
-    proposal = propose_goal(skills, episodes, rng=random.Random(0))
+    proposal = propose_goal(
+        skills, episodes, rng=random.Random(0), exclude=frozenset()
+    )
     assert proposal is not None
     assert proposal.goal == "empty the downloads folder listing"
     assert "failed" in proposal.reason
@@ -161,11 +167,87 @@ def test_an_unproven_skill_is_the_last_resort(tmp_path: Path) -> None:
     skills = SkillRegistry(tmp_path / "skills")
     skills.save(_skill("chrome.unproven", uses=1, wins=1))
     proposal = propose_goal(
-        skills, EpisodicStore(tmp_path / "episodes"), rng=random.Random(0)
+        skills,
+        EpisodicStore(tmp_path / "episodes"),
+        rng=random.Random(0),
+        exclude=frozenset(),
     )
     assert proposal is not None
     assert isinstance(proposal, GoalProposal)
     assert "chrome.unproven" in proposal.reason
+
+
+# --- exclusion filters the pools before the die is cast -----------------------
+
+
+def _failed_episode(description: str):
+    return episode_from_trace(
+        app="Finder",
+        description=description,
+        steps=(MouseClick(type="mouse_click", x=1, y=1),),
+        step_descriptions=("click",),
+        outcome="failure",
+        retrospective="lost",
+    )
+
+
+def test_an_excluded_unproven_skill_leaves_its_pool_mate(tmp_path: Path) -> None:
+    """Filtering must happen before rng.choice, not after.
+
+    Rolling first and rejecting afterwards would discard the survivor along
+    with the excluded candidate whenever the die lands wrong — an early end
+    to a session that still had work.
+    """
+    skills = SkillRegistry(tmp_path / "skills")
+    skills.save(_skill("chrome.done", uses=1, wins=1))
+    skills.save(_skill("chrome.next", uses=1, wins=1))
+    proposal = propose_goal(
+        skills,
+        EpisodicStore(tmp_path / "episodes"),
+        rng=random.Random(0),
+        exclude={"do the thing for chrome.done"},
+    )
+    assert proposal is not None
+    assert proposal.goal == "do the thing for chrome.next"
+
+
+def test_an_excluded_failure_leaves_its_pool_mate(tmp_path: Path) -> None:
+    skills = SkillRegistry(tmp_path / "skills")
+    episodes = EpisodicStore(tmp_path / "episodes")
+    episodes.record(_failed_episode("first lost task"))
+    episodes.record(_failed_episode("second lost task"))
+    proposal = propose_goal(
+        skills, episodes, rng=random.Random(0), exclude={"first lost task"}
+    )
+    assert proposal is not None
+    assert proposal.goal == "second lost task"
+
+
+def test_an_excluded_demoted_skill_leaves_its_pool_mate(tmp_path: Path) -> None:
+    skills = SkillRegistry(tmp_path / "skills")
+    skills.save(_skill("chrome.old", uses=3, wins=0))
+    skills.save(_skill("chrome.older", uses=4, wins=0))
+    proposal = propose_goal(
+        skills,
+        EpisodicStore(tmp_path / "episodes"),
+        rng=random.Random(0),
+        exclude={"do the thing for chrome.old"},
+    )
+    assert proposal is not None
+    assert "chrome.older" in proposal.reason
+
+
+def test_a_fully_excluded_pool_means_nothing_to_do(tmp_path: Path) -> None:
+    """None must mean the pools are genuinely empty — never an unlucky roll."""
+    skills = SkillRegistry(tmp_path / "skills")
+    skills.save(_skill("chrome.only", uses=1, wins=1))
+    proposal = propose_goal(
+        skills,
+        EpisodicStore(tmp_path / "episodes"),
+        rng=random.Random(0),
+        exclude={"do the thing for chrome.only"},
+    )
+    assert proposal is None
 
 
 # --- the session ------------------------------------------------------------
