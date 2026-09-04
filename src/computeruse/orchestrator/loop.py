@@ -244,6 +244,12 @@ class AxProbeResult:
     #: model. Kept separate from ``summaries`` so noticing that a label changed
     #: does not cost the model any of its element budget.
     content: tuple[str, ...] = ()
+    #: Whether a password box is anywhere on the observed screen. Computed from
+    #: the tree rather than from the summaries because the tree is the
+    #: authoritative source and this probe already holds it — and because the
+    #: answer gates a keystroke, so it must not depend on an element having
+    #: survived the summary budget.
+    asks_for_credential: bool = False
 
 
 @dataclass(frozen=True)
@@ -795,6 +801,8 @@ class Observation:
     #: resolves against, so a selected target lands on the element's own centre
     #: rather than on a coordinate estimated from a 3x-downscaled image.
     marks: tuple[MarkElement, ...] = ()
+    #: A password box is on screen; typing is refused while it is (Law 5).
+    asks_for_credential: bool = False
 
     @property
     def app_name(self) -> str | None:
@@ -1158,15 +1166,54 @@ class OodaRunner:
             decision_marks = self._observation.marks
             for batch_index, batch_action in enumerate(batch):
                 if batch_index > 0:
-                    # Mid-batch: the previous action changed the screen, so
-                    # the model's pre-batch screenshot is stale. Refresh
-                    # perception (cheap — no LLM turn) so the next action
-                    # decides against the current frame, never the old one.
+                    # Mid-batch: the previous action may have changed the
+                    # screen — refresh perception (cheap, no LLM turn) so the
+                    # next action decides against the current frame.
+                    # Raw-coordinate actions were aimed at the pre-batch frame;
+                    # marks are pinned to the decision frame, raw coordinates
+                    # are not. Stop only when the screen actually moved (modal,
+                    # navigation, scroll) — halting every multi-click batch
+                    # would trade one LLM turn for three.
+                    # Frame identity only (screenshot signature + window):
+                    # the AX list legitimately renumbers between reads, and
+                    # counting that as "the screen moved" would halt batches
+                    # whose target never budged.
+                    _win = self._observation.window
+                    pre_frame = (
+                        self._observation.signature,
+                        f"{_win.app_name}|{_win.window_title}" if _win is not None else "",
+                    )
                     state = self._observe(state)
                     # The batch's later actions were chosen from the pre-batch
                     # frame; accept them against the refreshed one rather than
                     # tripping the staleness gate on our own re-observation.
                     self._decision_window = self._decision_window_of(self._observation)
+                    _win2 = self._observation.window
+                    post_frame = (
+                        self._observation.signature,
+                        f"{_win2.app_name}|{_win2.window_title}" if _win2 is not None else "",
+                    )
+                    if (
+                        batch_action.type in ("mouse_click", "mouse_drag")
+                        and post_frame != pre_frame
+                    ):
+                        # Onto the *state*, not ``self._last_error``: only the
+                        # state reaches the provider. ``_observe`` rebuilds the
+                        # state without consulting that attribute, so a message
+                        # left there is one the model never sees — it would be
+                        # told nothing about why its batch was truncated, and
+                        # could reasonably emit the same batch again.
+                        state = replace(
+                            state,
+                            last_error=(
+                                "batch stopped: the screen changed after the "
+                                "previous action, so a later action using raw "
+                                "pre-batch coordinates would misclick. Re-derive "
+                                "the target from the current screen (prefer "
+                                "click_mark)."
+                            ),
+                        )
+                        break
                 single = decision.model_copy(
                     update={"action": batch_action, "actions": None}
                 )
@@ -1503,6 +1550,11 @@ class OodaRunner:
             # is silence, not a miss, and the recovery ladder must not treat it
             # as one.
             return Evidence.INCONCLUSIVE
+        # Before anything else, including the quiet-actuation paths: those
+        # reach the same field through the accessibility API rather than the
+        # keyboard, which changes how the text arrives and nothing about
+        # whether it should.
+        self._refuse_credential_entry(action)
         quiet = self._pressed_quietly(action) or self._typed_quietly(action)
         if not quiet:
             self._warn_if_leaving_the_background(action)
@@ -1877,6 +1929,32 @@ class OodaRunner:
                 "requires human confirmation before it can run"
             )
 
+    def _refuse_credential_entry(self, action: Action) -> None:
+        """Fail-closed: never put keystrokes into a screen asking for a password.
+
+        Not a permission question, so deliberately not in :meth:`_validate`
+        with the autonomy guard: no level, no grant and no human approval makes
+        this acceptable. The agent has no business knowing the user's password,
+        and a model improvising one into a redacted box is a category of
+        mistake with no recovery — the string is gone into a field nobody can
+        read back, possibly a *different* field than intended, possibly
+        submitted.
+
+        Both text actions are covered, because ``clipboard_paste`` reaches the
+        same field by another route. Nothing else is: clicking, scrolling and
+        reading a sign-in screen are all fine, and stopping those would make
+        the agent unable to even report what it is looking at.
+        """
+        if not isinstance(action, (TypeText, ClipboardPaste)):
+            return
+        if not self._observation.asks_for_credential:
+            return
+        raise CredentialEntryRefused(
+            f"{action.type} was refused: a password field is on screen, and the "
+            "agent never types into one. Signing in is the person's to do — "
+            "nothing about this screen can be completed without them"
+        )
+
     def _validate_bounds(self, action: Action, capture: ScreenCapture) -> None:
         """Fail-closed: reject coordinates outside the display being observed.
 
@@ -2020,12 +2098,16 @@ class OodaRunner:
         raw_ui_elements = previous.raw_ui_elements
         content = previous.content
         open_tabs = previous.open_tabs
+        # Carried forward with the rest of the perception when a probe fails:
+        # losing sight of a password box must not read as "there isn't one".
+        asks_for_credential = previous.asks_for_credential
         if self.ax_probe is not None:
             try:
                 ax_result = self.ax_probe()
                 raw_ui_elements = ax_result.summaries
                 content = ax_result.content
                 open_tabs = ax_result.open_tabs
+                asks_for_credential = ax_result.asks_for_credential
             except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
                 if self._ax_probe_warned:
                     LOGGER.debug("ui-element probe still failing: %s", exc)
@@ -2071,6 +2153,7 @@ class OodaRunner:
             # click in screen points, and the model's [N] indices line up
             # because the image-space rewrite preserves order and count.
             marks=parse_ax_elements_to_marks(raw_ui_elements),
+            asks_for_credential=asks_for_credential,
         )
         active_window = window_summary(window) if window is not None else state.active_window
         return replace(
@@ -2681,6 +2764,16 @@ class UnknownMarkError(RuntimeError):
             "turn, so re-read it and use a number it actually shows — or click "
             "a coordinate from the screenshot if the target is not listed"
         )
+
+
+class CredentialEntryRefused(RuntimeError):
+    """The agent tried to type while a password field was on screen.
+
+    A boundary, not a failure of skill: no retry, no alternate route and no
+    approval makes typing a credential acceptable, so the guidance attached to
+    this one tells the model to stop and say why rather than to try again
+    differently.
+    """
 
 
 class StaleMarkError(RuntimeError):

@@ -989,6 +989,34 @@
     justify-content: center;
   }
 
+  .trust-toggle-btn {
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 2px 7.5px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    outline: none;
+    line-height: 1.2;
+  }
+  .trust-toggle-btn.on {
+    color: var(--success);
+    background: rgba(120, 140, 93, 0.15);
+    border: 0.5px solid rgba(120, 140, 93, 0.4);
+  }
+  .trust-toggle-btn.on:hover {
+    background: rgba(120, 140, 93, 0.25);
+    box-shadow: 0 0 8px var(--success-glow);
+  }
+  .trust-toggle-btn.off {
+    color: var(--text-tertiary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 0.5px solid rgba(255, 255, 255, 0.10);
+  }
+
   .pos-toggle-btn {
     font-size: 9.5px;
     font-weight: 600;
@@ -1605,6 +1633,12 @@
             </span>
             <span id="mcpLabel">MCP</span>
           </button>
+          <button class="trust-toggle-btn off" id="trustToggleBtn" type="button" title="Trust mode (--yes): CONFIRM adımlarını sormadan otomatik onayla. BLOCK ve kill-switch aktif kalır.">
+            <span class="mcp-icon">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+            </span>
+            <span id="trustLabel">Trust: Off</span>
+          </button>
           <button class="pos-toggle-btn" id="posToggleBtn" type="button" title="Konum: Ekranın alt ortası (Claude Dock stili) veya Menü Barı">
             <span class="pos-icon" id="posIcon">
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="16" width="16" height="4" rx="1"/><circle cx="12" cy="8" r="3"/><line x1="12" y1="11" x2="12" y2="16"/></svg>
@@ -1672,6 +1706,28 @@
     var savedLvl = parseInt(localStorage.getItem("cu_autonomy_level"), 10);
     if (savedLvl === 2 || savedLvl === 3) currentAutonomyLevel = savedLvl;
   } catch(e){}
+  // Trust mode (--yes): auto-approve CONFIRM, keep BLOCK + kill-switch.
+  // Default ON per operator request: uninterrupted autonomy, still auditable.
+  var trustMode = true;
+  try {
+    var savedTrust = localStorage.getItem("cu_trust_mode");
+    if (savedTrust === "0") trustMode = false;
+    else if (savedTrust === "1") trustMode = true;
+  } catch(e){}
+  function updateTrustUI() {
+    var btn = document.getElementById("trustToggleBtn");
+    var label = document.getElementById("trustLabel");
+    if (!btn || !label) return;
+    if (trustMode) {
+      btn.className = "trust-toggle-btn on";
+      label.textContent = "Trust: On";
+      btn.title = "Trust mode AÇIK (--yes): CONFIRM adımları loglanarak otomatik onaylanır. Tıklayarak kapatabilirsiniz.";
+    } else {
+      btn.className = "trust-toggle-btn off";
+      label.textContent = "Trust: Off";
+      btn.title = "Trust mode KAPALI: yıkıcı adımlarda onay istenir. Tıklayarak kesintisiz otonomiye geçebilirsiniz.";
+    }
+  }
 
   var autonomyIcon = document.getElementById("autonomyIcon");
 
@@ -1910,7 +1966,7 @@
   function submit(){
     var g = goal.value.trim();
     if(!g) return;
-    var m = {cmd:"run", goal:g, level:currentAutonomyLevel};
+    var m = {cmd:"run", goal:g, level:currentAutonomyLevel, trust:trustMode, mcp:window._mcpEnabled};
     var a = app.value.trim();
     if(a) m.app = a;
 
@@ -1921,6 +1977,7 @@
     window._lastCalls = 0;
     statsTokens.innerHTML = BOLT_ICON + ' <span>0 tok</span>';
     statsElapsed.innerHTML = CLOCK_ICON + ' <span>0s</span>';
+    window.trustModeActive = trustMode;
     renderConnectCard();
     renderGoalCard(g, a, currentAutonomyLevel);
     setRunning(true);
@@ -2088,7 +2145,7 @@
       : '<span style="font-size:9.5px;font-weight:600;color:var(--accent);background:rgba(217,119,87,0.12);padding:1.5px 6px;border-radius:4px;border:0.5px solid rgba(217,119,87,0.3);margin-left:8px;display:inline-flex;align-items:center;gap:4px;"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Full Auto</span>';
     var html = 
       '<div class="feed-line feed-head"><span class="feed-icon">' + ICONS.laptop + '</span>' +
-      '<span class="feed-text">' + escapeHtml(goalText) + levelBadge + '</span></div>';
+      '<span class="feed-text">' + escapeHtml(goalText) + levelBadge + (window.trustModeActive ? ' <span style="font-size:9px;font-weight:600;color:var(--success);background:rgba(120,140,93,0.15);padding:1.5px 6px;border-radius:4px;border:0.5px solid rgba(120,140,93,0.35);margin-left:6px;">Trust</span>' : '') + '</span></div>';
     if (appText) {
       html += '<div class="feed-sub"><span class="feed-icon">' + ICONS.globe + '</span>' +
         '<span>Hedef uygulama · ' + escapeHtml(appText) + '</span></div>';
@@ -2652,6 +2709,17 @@
     setStatus(r ? "Running" : (window._lastErr ? "Error" : "Idle"), r ? "w" : (window._lastErr ? "e" : ""));
   }
 
+  var trustToggleBtn = document.getElementById("trustToggleBtn");
+  updateTrustUI();
+  if (trustToggleBtn) {
+    trustToggleBtn.addEventListener("click", function(){
+      trustMode = !trustMode;
+      try { localStorage.setItem("cu_trust_mode", trustMode ? "1" : "0"); } catch(e){}
+      updateTrustUI();
+      showToast(trustMode ? "Trust Açık: kesintisiz otonomi (--yes)" : "Trust Kapalı: onay istenecek");
+    });
+  }
+
   /* ----- MCP Store Logic & State ---------------------------------------- */
   window._installedMcp = {};
   window._mcpEnabled = true;
@@ -2798,6 +2866,81 @@
       desc: "Headless Chrome otomasyonu, sayfa kazıma ve ekran görüntüleri.",
       command: "npx",
       args: ["-y", "@modelcontextprotocol/server-puppeteer"]
+    },
+    {
+      id: "playwright",
+      name: "Playwright Browser",
+      category: "Developer",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#6A9BCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>',
+      desc: "Modern headless browser, dinamik sayfalar icin Puppeteer alternatifi.",
+      command: "npx",
+      args: ["-y", "@playwright/mcp@latest"]
+    },
+    {
+      id: "sequential-thinking",
+      name: "Sequential Thinking",
+      category: "Reasoning",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#9D79BC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04z"/></svg>',
+      desc: "Cok adimli planlama oncesi adim adim akil yurutme.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    {
+      id: "time",
+      name: "Time & Timezone",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D4A359" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+      desc: "Guncel saat, timezone cevrim ve zamanlama yardimcilari.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-time"]
+    },
+    {
+      id: "google-maps",
+      name: "Google Maps",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D05548" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.5-2.5v-13L9 7l6-2.5L20.5 7v13L15 17.5 9 20z"/></svg>',
+      desc: "Adres cozumleme, mekan arama ve yol tarifi.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-google-maps"],
+      envFields: [{key: "GOOGLE_MAPS_API_KEY", label: "Google Maps API Key", secret: true, placeholder: "AIza..."}]
+    },
+    {
+      id: "google-drive",
+      name: "Google Drive",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#6A9BCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16l-4-7 4-7h8l4 7-4 7H8z"/></svg>',
+      desc: "Drive dosya listeleme, arama, okuma ve olusturma.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-gdrive"],
+      envFields: [{key: "GDRIVE_CREDENTIALS_PATH", label: "Credentials JSON Path", secret: false, placeholder: "/Users/.../credentials.json"}]
+    },
+    {
+      id: "gmail",
+      name: "Gmail",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D05548" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 6L2 7"/></svg>',
+      desc: "Gmail arama, okuma, taslak ve gonderme.",
+      command: "npx",
+      args: ["-y", "@gongrzhe/server-gmail-autoauth-mcp"]
+    },
+    {
+      id: "youtube-transcript",
+      name: "YouTube Transcript",
+      category: "Media",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D05548" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><polygon points="10 9 15 12 10 15 10 9"/></svg>',
+      desc: "YouTube altyazi cekme, izlemeden ozet icin.",
+      command: "npx",
+      args: ["-y", "@kimtaeyoon83/mcp-server-youtube-transcript"]
+    },
+    {
+      id: "obsidian",
+      name: "Obsidian Vault",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D4A359" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8v8l8-8v8"/></svg>',
+      desc: "Yerel Obsidian vault icinde not okuma, arama ve ekleme.",
+      command: "npx",
+      args: ["-y", "mcp-obsidian", "{vault_path}"],
+      fields: [{key: "vault_path", label: "Vault Path", placeholder: "/Users/.../vault"}]
     }
   ];
 

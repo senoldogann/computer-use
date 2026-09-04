@@ -10,7 +10,7 @@ These models are pure data transformers and never perform OS I/O (Law 6).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -176,6 +176,17 @@ Action = (
     | Finish
 )
 
+#: The discriminated form, shared by the single action and the batch list so
+#: both validate through one tag lookup instead of Pydantic's smart-union
+#: trial-and-error (which can settle on the wrong member for two models with
+#: compatible fields).
+#:
+#: Derived from :data:`Action` rather than re-listing the members: the union is
+#: this project's wire contract, and two copies of it would eventually disagree
+#: about which actions exist — the drift test compares Python against Rust, not
+#: against another copy of Python.
+ActionUnion = Annotated[Action, Field(discriminator="type")]
+
 
 class AgentTurn(BaseModel):
     """Single OODA loop decision frame emitted by the LLM.
@@ -192,11 +203,11 @@ class AgentTurn(BaseModel):
 
     thought: str
     sub_goal: str
-    action: Action = Field(discriminator="type")
+    action: ActionUnion
     # Optional ordered batch executed within this single turn. Validated to be
     # non-empty and to place ``finish`` (if present) strictly last — a batch
     # must never continue acting after the run has ended.
-    actions: list[Action] | None = None
+    actions: list[ActionUnion] | None = None
 
     @model_validator(mode="after")
     def _validate_batch(self) -> AgentTurn:
@@ -213,7 +224,7 @@ class AgentTurn(BaseModel):
 class _ActionEnvelope(BaseModel):
     """Internal: the discriminated union, addressable on its own."""
 
-    action: Action = Field(discriminator="type")
+    action: ActionUnion
 
 
 def action_from_payload(payload: dict[str, object]) -> Action | None:

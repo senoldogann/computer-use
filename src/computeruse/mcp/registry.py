@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
@@ -135,11 +136,25 @@ def sanitize_for_prompt(text: str, *, limit: int) -> str:
     forge the structure of the prompt around it — the same defence the screen's
     text already gets, for the same reason: this text was written by someone
     other than the user, and it is about to be read by something that follows
-    instructions.
+    instructions. Also defangs the observed-data delimiter and strips bidi /
+    Unicode line separators so a tool description cannot break out of its block.
     """
+
     flattened = "".join(
         " " if character < " " or character == "\x7f" else character
         for character in text
+    )
+    # Strip the same structural characters the screen sanitizer removes.
+    flattened = re.sub(
+        "[\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]",
+        " ",
+        flattened,
+    )
+    flattened = re.sub(
+        r"</?\s*observed[_\s-]*data\s*/?>",
+        "[escaped-tag]",
+        flattened,
+        flags=re.IGNORECASE,
     )
     collapsed = " ".join(flattened.split())
     if len(collapsed) <= limit:

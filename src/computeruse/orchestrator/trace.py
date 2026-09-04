@@ -132,6 +132,20 @@ class RunTracer:
         self._steps_path = self._directory / STEPS_FILENAME
         self._warned = False
         self._directory.mkdir(parents=True, exist_ok=True)
+        # Traces carry screenshots, actions and tool output — possibly secrets
+        # — so they must not be world-readable.
+        try:
+            self._directory.chmod(0o700)
+        except OSError as exc:
+            # Not fatal — a trace on a filesystem without POSIX modes (a network
+            # share, a FAT volume) is still worth writing — but never silent:
+            # the caller should know the run's screenshots are readable by
+            # anyone with an account on this machine (Law 6.3).
+            LOGGER.warning(
+                "could not restrict trace directory %s to owner-only: %s",
+                self._directory,
+                exc,
+            )
 
     @property
     def run_id(self) -> str:

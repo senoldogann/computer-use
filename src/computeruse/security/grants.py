@@ -38,9 +38,11 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
+import re
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -152,6 +154,32 @@ def new_grant(
     )
 
 
+def _grant_argument_strings(value: object, *, depth: int) -> tuple[str, ...]:
+    """Every string reachable inside a tool's arguments (pure).
+
+    Mirrors the guard's walk so grant matching agrees with classification:
+    a nested ``{"exec": {"argv": ["rm", "-rf"]}}`` is a shell payload in both
+    places, not just in the guard.
+    """
+    if depth > 6:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, dict):
+        return tuple(
+            found
+            for item in cast(dict[str, object], value).values()
+            for found in _grant_argument_strings(item, depth=depth + 1)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            found
+            for item in cast(Sequence[object], value)
+            for found in _grant_argument_strings(item, depth=depth + 1)
+        )
+    return ()
+
+
 def action_verbs(action: Action, *, sub_goal: str, target_label: str | None) -> frozenset[str]:
     """Which destructive families this action belongs to (pure).
 
@@ -176,13 +204,21 @@ def action_verbs(action: Action, *, sub_goal: str, target_label: str | None) -> 
     if isinstance(action, (TypeText, ClipboardPaste, CallTool)):
         # The payload is inspected for command words the same way the guard
         # inspects it; a grant for "shell" is what covers those.
-        payload = (
-            action.text
-            if isinstance(action, (TypeText, ClipboardPaste))
-            else " ".join(str(value) for value in action.arguments.values())
-        )
+        if isinstance(action, (TypeText, ClipboardPaste)):
+            payload = action.text
+        else:
+            payload = " ".join(_grant_argument_strings(action.arguments, depth=0))
         if is_command_payload(payload):
             found.add(SHELL_FAMILY)
+        # Deep verb scan mirrors the guard: a nested delete/send/pay verb
+        # must be visible to grants too, or a live grant would miss what the
+        # guard flagged (fail-closed, but confusing).
+        if isinstance(action, CallTool):
+            nested = " ".join(_grant_argument_strings(action.arguments, depth=0)).lower()
+            nested_words = intent_words(nested)
+            for family, markers in DESTRUCTIVE_FAMILIES.items():
+                if nested_words & markers:
+                    found.add(family)
     return frozenset(found)
 
 
@@ -305,13 +341,25 @@ class GrantStore:
     def __init__(self, directory: Path) -> None:
         self._directory = directory
 
+    def _safe_path(self, grant_id: str) -> Path:
+
+        if not re.fullmatch(r"^[a-z0-9][a-z0-9._-]*$", grant_id):
+            raise KeyError(f"invalid grant id {grant_id!r}")
+        candidate = self._directory / f"{grant_id}.json"
+        try:
+            if candidate.resolve().parent != self._directory.resolve():
+                raise KeyError(f"invalid grant id {grant_id!r}")
+        except OSError as exc:
+            raise KeyError(f"invalid grant id {grant_id!r}: {exc}") from exc
+        return candidate
+
     @property
     def directory(self) -> Path:
         return self._directory
 
     def save(self, grant: CapabilityGrant) -> Path:
         self._directory.mkdir(parents=True, exist_ok=True)
-        target = self._directory / f"{grant.grant_id}.json"
+        target = self._safe_path(grant.grant_id)
         target.write_text(grant.model_dump_json(indent=2) + "\n", encoding="utf-8")
         return target
 
@@ -344,7 +392,7 @@ class GrantStore:
         direction: a count that under-reports is a permission the user has
         already lost, while one that over-reports is authority they never gave.
         """
-        path = self._directory / f"{grant_id}.json"
+        path = self._safe_path(grant_id)
         if not path.is_file():
             raise KeyError(f"no capability grant {grant_id!r} in {self._directory}")
         grant = CapabilityGrant.model_validate(
@@ -367,7 +415,7 @@ class GrantStore:
         permission stayed live, which is the one mistake this operation must
         not make.
         """
-        path = self._directory / f"{grant_id}.json"
+        path = self._safe_path(grant_id)
         if not path.is_file():
             raise KeyError(f"no capability grant {grant_id!r} in {self._directory}")
         path.unlink()

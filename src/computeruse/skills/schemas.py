@@ -129,6 +129,8 @@ def instantiate_skill(
         tags=definition.tags,
         parameters=definition.parameters,
         version=definition.version,
+        uses=definition.uses,
+        wins=definition.wins,
         steps=tuple(new_steps),
         signature=definition.signature,
         phase=definition.phase,

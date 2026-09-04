@@ -92,7 +92,15 @@ DESTRUCTIVE_FAMILIES: Final[dict[str, frozenset[str]]] = {
     # Destroying something that exists.
     "delete": frozenset(
         {
-            "delete", "remove", "erase", "wipe", "terminate",
+            "delete", "remove", "erase", "wipe", "terminate", "destroy",
+            # Gerunds only. A model narrating intent may write "deleting the
+            # old export", so those earn their place — but "deleted" and
+            # "removes" describe something that already happened, and a
+            # verification step ("check the file was deleted") is not a
+            # request to delete anything. "drop" is gone for a blunter
+            # reason: `intent_words` splits "Drop-down", so every dropdown
+            # in every app classified as destructive.
+            "deleting", "removing",
             "sil", "kaldır", "kaldir", "yoket",
             "supprimer", "supprime", "effacer", "efface", "détruire", "detruire",
             "löschen", "lösche", "loeschen", "entfernen", "zerstören", "zerstoren",
@@ -152,9 +160,16 @@ DESTRUCTIVE_FAMILIES: Final[dict[str, frozenset[str]]] = {
     "overwrite": frozenset(
         {
             "overwrite", "format",
-            "sıfırla", "sifirla", "formatla",
-            "formatieren",
-            "formatear",
+            "sıfırla", "sifirla", "formatla", "üzerineyaz",
+            "formatieren", "überschreiben",
+            "formatear", "sobrescribir",
+            # "write" and its translations are deliberately NOT here. Writing
+            # text is most of what this agent does, and the module's own
+            # history records where that ends: a live full-autonomy run of
+            # "research the AI news and write me a summary in Notes" already
+            # died once to a false positive on its own payload. "saveas" never
+            # matched anything either — `intent_words` splits "Save As..." into
+            # two tokens — and "replace" makes find-and-replace destructive.
             # Throwing away work in progress is destroying it, whatever the
             # button calls itself: "Discard Changes", "Revert", "Reset".
             "discard", "revert", "reset",
@@ -162,14 +177,38 @@ DESTRUCTIVE_FAMILIES: Final[dict[str, frozenset[str]]] = {
             "réinitialiser", "reinitialiser",
         }
     ),
+    # Statements that change stored data. Matched ONLY inside tool arguments
+    # (see :data:`ARGUMENT_ONLY_FAMILIES`) — the intent was already written
+    # down here, but nothing enforced it, so a tool named ``notes.update`` and
+    # a sub-goal "update the spreadsheet" both classified as destructive.
+    "execute": frozenset(
+        {
+            "insert", "update", "upsert", "alter", "truncate",
+        }
+    ),
     # Acting as the machine's administrator.
     "admin": frozenset({"sudo"}),
 }
 
-#: Every destructive marker, whatever family it belongs to. Derived rather than
-#: repeated, so a verb added to a family is a verb the guard fires on — the two
-#: cannot drift apart because there is only one of them.
+#: Families whose verbs are ordinary English outside a payload, and are
+#: therefore matched only inside tool *arguments* — never against a tool's name
+#: or the model's own prose. "UPDATE users SET ..." in a SQL body is a database
+#: write; "update the spreadsheet" is a Tuesday.
+ARGUMENT_ONLY_FAMILIES: Final[frozenset[str]] = frozenset({"execute"})
+
+#: Markers matched against the *subject* — the model's sub-goal, the control's
+#: accessibility title, a tool's name. Excludes the argument-only families.
 _DESTRUCTIVE_MARKERS: frozenset[str] = frozenset(
+    marker
+    for family, markers in DESTRUCTIVE_FAMILIES.items()
+    if family not in ARGUMENT_ONLY_FAMILIES
+    for marker in markers
+)
+
+#: Markers matched inside tool arguments: every family, including the ones too
+#: ambiguous to read off prose. A payload is not prose — nobody passes a
+#: paragraph about updating things as a tool's ``sql`` parameter.
+_ARGUMENT_MARKERS: frozenset[str] = frozenset(
     marker for family in DESTRUCTIVE_FAMILIES.values() for marker in family
 )
 
@@ -226,6 +265,10 @@ class AutonomyPolicy:
     """The safety policy governing classification (tunable, pure data)."""
 
     destructive_markers: frozenset[str] = _DESTRUCTIVE_MARKERS
+    #: Matched inside tool arguments only. A superset of
+    #: ``destructive_markers``: a payload can carry verbs ("update", "insert")
+    #: that are too ordinary to read off a tool's name or the model's prose.
+    argument_markers: frozenset[str] = _ARGUMENT_MARKERS
     routine_markers: frozenset[str] = _ROUTINE_MARKERS
     typed_commands: frozenset[str] = _TYPED_COMMANDS
 
@@ -294,7 +337,7 @@ class AutonomyPolicy:
             return Risk.DESTRUCTIVE
         if isinstance(turn.action, CallTool):
             if _arguments_are_destructive(
-                turn.action.arguments, self.typed_commands, self.destructive_markers
+                turn.action.arguments, self.typed_commands, self.argument_markers
             ):
                 return Risk.DESTRUCTIVE
             if words & self.routine_markers:
@@ -341,6 +384,11 @@ def _looks_like_a_command(text: str, commands: frozenset[str]) -> bool:
     A command lives at the start of a line, so a line beginning with one counts
     however long the payload is. Short text counts wherever the word falls,
     because `echo hi; rm -rf ~` is a command line whichever half you read.
+    Long single-line prose is never a command: window-slicing it would invent
+    fake line-starts mid-sentence (measured: a 480-char news body sliced at
+    200 chars starts its tail with 'shutdown ...', a false positive). Long-text
+    smuggling is answered at the tool-semantic level instead (a delete/execute
+    tool with a destructive verb is DESTRUCTIVE whatever its length).
     """
     lowered = text.lower()
     for line in lowered.splitlines():
@@ -410,6 +458,11 @@ def _arguments_are_destructive(
     for text in _argument_strings(arguments, depth=0):
         if _looks_like_a_command(text, commands):
             return True
+        # Verbs count only inside short values: a document body that talks
+        # about deleting things is prose, not an instruction (measured
+        # false-positive on a 1,575-char news summary). Long-text smuggling
+        # is answered by the command tail-check above, which requires an
+        # imperative line shape rather than a bare verb.
         if len(text) <= COMMAND_LENGTH_MAX and intent_words(text.lower()) & markers:
             return True
     return False

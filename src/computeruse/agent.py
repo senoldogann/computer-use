@@ -73,6 +73,7 @@ from computeruse.skills.registry import SkillRegistry, refined_route, skill_for_
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.vision import AXElement
 from computeruse.vision.ax import (
+    asks_for_a_credential,
     content_digest,
     interactive_summaries,
     open_tabs_from_tree,
@@ -706,6 +707,11 @@ class Agent:
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),
                     content=content_digest(tree, viewport),
+                    # Read from the whole tree, not from the summaries: the
+                    # summary list is budgeted and viewport-culled, and a
+                    # password box that fell off the end of it is still a
+                    # password box on the screen.
+                    asks_for_credential=asks_for_a_credential(tree),
                 )
 
             def focused_text_value_probe() -> str | None:

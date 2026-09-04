@@ -141,7 +141,7 @@ def test_resuming_hands_over_only_what_is_left() -> None:
         plan=_plan("completed", "in_progress", "pending"),
         now=NOW,
     )
-    assert remaining_goal(mission) == "send it, then archive the thread"
+    assert remaining_goal(mission) == "send it then archive the thread"
 
 
 def test_a_mission_with_no_progress_resumes_at_the_whole_goal() -> None:

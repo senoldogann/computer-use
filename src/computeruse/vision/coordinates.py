@@ -198,8 +198,26 @@ class ScreenMap:
 
     @property
     def points_per_pixel(self) -> float:
-        """Logical screen points per image pixel (aspect is preserved)."""
+        """Logical screen points per image pixel, on the X axis.
+
+        Kept as the axis-agnostic name because callers that only need a rough
+        scale (a tolerance, a threshold) should not have to pick an axis.
+        Anything converting a *coordinate* uses :attr:`points_per_pixel_x` and
+        :attr:`points_per_pixel_y`, which differ slightly: the downscale rounds
+        both dimensions to whole pixels, so the two ratios are not identical.
+        """
         return self.logical.width / self.image.width
+
+    @property
+    def points_per_pixel_x(self) -> float:
+        """X-axis scale (differs from Y by rounding, see to_screen)."""
+        return self.logical.width / self.image.width
+
+    @property
+    def points_per_pixel_y(self) -> float:
+        """Y-axis scale: rounding in downscale_to_max_side makes this differ
+        microscopically from X, enough to miss a 12pt link on odd ratios."""
+        return self.logical.height / self.image.height
 
     @property
     def is_identity(self) -> bool:
@@ -222,10 +240,14 @@ class ScreenMap:
 
     def to_screen(self, point: Point) -> Point:
         """Map a model-reported image-space point to global screen points."""
-        factor = self.points_per_pixel
-        return Point(point.x * factor + self.origin.x, point.y * factor + self.origin.y)
+        return Point(
+            point.x * self.points_per_pixel_x + self.origin.x,
+            point.y * self.points_per_pixel_y + self.origin.y,
+        )
 
     def to_image(self, point: Point) -> Point:
         """Map a global screen point (e.g. an AX rect) into image space."""
-        factor = self.points_per_pixel
-        return Point((point.x - self.origin.x) / factor, (point.y - self.origin.y) / factor)
+        return Point(
+            (point.x - self.origin.x) / self.points_per_pixel_x,
+            (point.y - self.origin.y) / self.points_per_pixel_y,
+        )

@@ -105,6 +105,8 @@ static WEBVIEW_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
 
 /// Active autonomy level (3 = Full Autonomy, 2 = Guarded Mode).
 static AUTONOMY_LEVEL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(3);
+/// Trust mode (--yes): auto-approve CONFIRM without prompting.
+static TRUST_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Whether MCP servers are active for agent runs.
 static MCP_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
@@ -728,7 +730,15 @@ fn handle_script_message(message: &WKScriptMessage) {
                 .map(|v| v as u8)
                 .unwrap_or_else(|| AUTONOMY_LEVEL.load(core::sync::atomic::Ordering::SeqCst));
             AUTONOMY_LEVEL.store(level, core::sync::atomic::Ordering::SeqCst);
-            run_agent(&goal, app.as_deref(), level);
+            let trust = value
+                .get("trust")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| TRUST_MODE.load(core::sync::atomic::Ordering::SeqCst));
+            // Per-run MCP override from the panel toggle; persists like level.
+            if let Some(mcp) = value.get("mcp").and_then(serde_json::Value::as_bool) {
+                MCP_ENABLED.store(mcp, core::sync::atomic::Ordering::SeqCst);
+            }
+            run_agent(&goal, app.as_deref(), level, trust);
         }
         Some("set_level") => {
             if let Some(level) = value.get("level").and_then(serde_json::Value::as_u64) {
@@ -736,7 +746,14 @@ fn handle_script_message(message: &WKScriptMessage) {
             }
         }
         Some("get_mcp") => {
-            let json_str = read_mcp_servers_json();
+            let raw = read_mcp_servers_json();
+            // K-01: the config file is attacker-influenced text; never embed
+            // it raw. Re-parse and re-serialize so only valid JSON reaches
+            // the panel, falling back to empty on corruption.
+            let json_str = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| serde_json::to_string(&v).ok())
+                .unwrap_or_else(|| "{\"mcpServers\":{}}".to_string());
             let enabled = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
             let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
             if !ptr.is_null() {
@@ -774,7 +791,8 @@ fn handle_script_message(message: &WKScriptMessage) {
                 let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
                 if !ptr.is_null() {
                     let wv = unsafe { &*(ptr as *const WKWebView) };
-                    let js = format!("if(window.onMcpSaved)window.onMcpSaved('{id}');");
+                    let js_id = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
+                    let js = format!("if(window.onMcpSaved)window.onMcpSaved({js_id});");
                     call_js(wv, &js);
                 }
             }
@@ -795,7 +813,8 @@ fn handle_script_message(message: &WKScriptMessage) {
                 let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
                 if !ptr.is_null() {
                     let wv = unsafe { &*(ptr as *const WKWebView) };
-                    let js = format!("if(window.onMcpDeleted)window.onMcpDeleted('{id}');");
+                    let js_id = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
+                    let js = format!("if(window.onMcpDeleted)window.onMcpDeleted({js_id});");
                     call_js(wv, &js);
                 }
             }
@@ -848,6 +867,7 @@ fn handle_script_message(message: &WKScriptMessage) {
 /// run drives the real model. ``--model openai`` is *mandatory* here:
 /// omitting it falls back to the CLI's default scripted demo provider (two
 /// fixed clicks, then finish), which on a real host reads as a broken agent.
+#[allow(clippy::too_many_arguments)]
 fn agent_args(
     goal: &str,
     app: Option<&str>,
@@ -856,6 +876,7 @@ fn agent_args(
     store: &str,
     level: u8,
     mcp: bool,
+    trust: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -880,13 +901,19 @@ fn agent_args(
     if mcp {
         args.push("--mcp".to_string());
     }
+    // Trust mode (--yes): operator asked for uninterrupted autonomy.
+    // BLOCK still blocks; kill-switch, budgets and verification keep running.
+    if trust {
+        args.push("--yes".to_string());
+    }
     if let Some(app_name) = app {
         args.extend(["--app".to_string(), app_name.to_string()]);
     }
     args
 }
 
-fn run_agent(goal: &str, app: Option<&str>, level: u8) {
+fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool) {
+    TRUST_MODE.store(trust, core::sync::atomic::Ordering::SeqCst);
     // Guard: never double-run while one is in flight.
     let already = SHARED.lock().unwrap().child_pid.is_some();
     if already {
@@ -940,7 +967,9 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8) {
     }
     let driver_bin_str = driver_bin.to_string_lossy().into_owned();
     let mcp = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
-    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp));
+    // `trust` arrives as a run_agent parameter; see signature.
+    let trust = TRUST_MODE.load(core::sync::atomic::Ordering::SeqCst);
+    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp, trust));
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
     cmd.env("OPENAI_API_KEY", key.expect("checked above"));
@@ -1353,7 +1382,7 @@ mod tests {
 
     #[test]
     fn agent_always_uses_the_real_model() {
-        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true);
+        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true, false);
         assert!(
             argv.windows(2).any(|w| w == ["--model", "openai"]),
             "launcher must pass --model openai, never the demo provider"
@@ -1364,7 +1393,7 @@ mod tests {
     #[test]
     fn agent_passes_required_flags_and_target_app() {
         let argv =
-            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false);
+            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false, false);
         for required in ["--goal", "--real", "--model", "--driver", "--socket", "--store"] {
             assert!(
                 argv.iter().any(|a| a == required),

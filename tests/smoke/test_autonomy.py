@@ -440,3 +440,87 @@ def test_a_document_body_that_mentions_deleting_is_not_a_deletion() -> None:
     ) * 4
     turn = _tool_turn("save the summary", "notes.create", {"body": body})
     assert classify_risk(turn) is not Risk.DESTRUCTIVE
+
+
+# --- the guard has to stay quiet to stay useful -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("sub_goal", "target_label"),
+    [
+        # `intent_words` splits on hyphens, so a "drop" marker made every
+        # dropdown in every application destructive.
+        ("open the country list", "Drop-down"),
+        # The module's own history: a full-autonomy run of exactly this goal
+        # died to a false positive on its own payload.
+        ("write a summary in Notes", None),
+        ("Notlara özeti yaz", None),
+        # Describing something that already happened is not asking for it.
+        ("verify the file was deleted", None),
+        # Too ordinary to read off prose; still caught inside a SQL payload.
+        ("update the spreadsheet", None),
+        ("find and replace the text", "Replace All"),
+    ],
+)
+def test_ordinary_work_does_not_ask_permission(
+    sub_goal: str, target_label: str | None
+) -> None:
+    """A guard that fires on everything is a guard nobody reads.
+
+    Fail-closed is the right instinct for one decision and the wrong one in
+    aggregate: an approval queue full of dropdowns trains its reader to approve
+    without looking, which costs more safety than it buys.
+    """
+    turn = AgentTurn(
+        thought="t",
+        sub_goal=sub_goal,
+        action=MouseClick(type="mouse_click", x=1, y=1),
+    )
+    assert classify_risk(turn, target_label=target_label) is not Risk.DESTRUCTIVE
+
+
+@pytest.mark.parametrize(
+    ("sub_goal", "target_label"),
+    [
+        # The macOS delete verb is the Trash, not the word "delete".
+        ("clean up the desktop", "Move to Trash"),
+        ("tidy up", "Empty Trash"),
+        ("continue with the flow", "Buy now"),
+        # A gerund is how a model narrates an intention it is about to act on.
+        ("deleting the old export", None),
+    ],
+)
+def test_the_quieting_did_not_open_a_hole(
+    sub_goal: str, target_label: str | None
+) -> None:
+    turn = AgentTurn(
+        thought="t",
+        sub_goal=sub_goal,
+        action=MouseClick(type="mouse_click", x=1, y=1),
+    )
+    assert classify_risk(turn, target_label=target_label) is Risk.DESTRUCTIVE
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sql": "TRUNCATE users"},
+        {"sql": "UPDATE users SET admin = 1"},
+        {"command": "rm -rf /"},
+    ],
+)
+def test_a_statement_inside_a_payload_is_still_caught(
+    payload: dict[str, object],
+) -> None:
+    """Verbs too ordinary for prose stay dangerous inside an argument.
+
+    Nobody passes a paragraph about updating things as a tool's ``sql``
+    parameter, so the argument set can be broader than the subject set without
+    costing a single false positive.
+    """
+    turn = AgentTurn(
+        thought="t",
+        sub_goal="run it",
+        action=CallTool(type="call_tool", tool="db", arguments=payload),
+    )
+    assert classify_risk(turn) is Risk.DESTRUCTIVE

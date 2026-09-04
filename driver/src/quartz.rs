@@ -149,7 +149,9 @@ impl QuartzBackend {
         self.move_instant(at)?;
         std::thread::sleep(Duration::from_millis(30));
 
-        let total = click_count.max(1);
+        // Clamp to the contract (1..=2): a raw socket value of 255 would
+        // otherwise loop for ~18s blocking the driver (protocol hardening).
+        let total = click_count.clamp(1, 2);
         for index in 0..total {
             // 1-based click position; a double click's second press is state 2.
             let click_state: i64 = index as i64 + 1;
@@ -624,12 +626,22 @@ fn image_to_bgra(
     use core_graphics::context::CGContext;
     use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 
-    let bytes_per_row = width * 4;
-    let mut buffer = vec![0u8; bytes_per_row * height];
+    // Typed error rather than `expect`: this function already returns one, and
+    // a panic here takes the whole driver down for a condition the orchestrator
+    // could report and recover from (Law 6.3).
+    let bytes_per_row = width
+        .checked_mul(4)
+        .ok_or_else(|| BackendError(format!("capture width {width} overflows a row stride")))?;
+    let size = bytes_per_row
+        .checked_mul(height)
+        .ok_or_else(|| BackendError(format!("capture {width}x{height} overflows a buffer size")))?;
+    // Single allocation: the bitmap context draws directly into `buffer`,
+    // so it is returned as-is instead of a second `to_vec()` copy (MEM-01).
+    let mut buffer = vec![0u8; size];
     let color_space = CGColorSpace::create_device_rgb();
     // Alpha-first + 32-bit little-endian is the canonical BGRA byte layout
     // (alpha occupies the high byte of each little-endian 32-bit word).
-    let mut context = CGContext::create_bitmap_context(
+    let context = CGContext::create_bitmap_context(
         Some(buffer.as_mut_ptr() as *mut core::ffi::c_void),
         width,
         height,
@@ -645,7 +657,8 @@ fn image_to_bgra(
         ),
         image,
     );
-    Ok(context.data().to_vec())
+    drop(context);
+    Ok(buffer)
 }
 
 /// Map the contract's (dx, dy) deltas onto CGEvent scroll wheels.

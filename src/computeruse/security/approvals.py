@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal
@@ -44,6 +45,26 @@ from computeruse.slug import ascii_slug
 LOGGER: Final = logging.getLogger(__name__)
 
 ApprovalDecision = Literal["pending", "approved", "denied"]
+
+#: IDs become filenames, so they must never climb out of the directory.
+ID_PATTERN: Final = r"^[a-z0-9][a-z0-9._-]*$"
+
+
+def _safe_id_path(directory: Path, request_id: str) -> Path:
+    """Resolve an ID to a path inside the store, fail-closed (pure I/O guard).
+
+    Rejects traversal (``../../``), absolute paths and separators before any
+    filesystem access, then verifies the resolved path stays inside the store.
+    """
+    if not re.fullmatch(ID_PATTERN, request_id):
+        raise KeyError(f"invalid request id {request_id!r}")
+    candidate = directory / f"{request_id}.json"
+    try:
+        if candidate.resolve().parent != directory.resolve():
+            raise KeyError(f"invalid request id {request_id!r}")
+    except OSError as exc:
+        raise KeyError(f"invalid request id {request_id!r}: {exc}") from exc
+    return candidate
 
 #: How much of a sub-goal survives into a request id. Long enough to tell two
 #: parked actions apart when reading the queue, short enough to stay a filename.
@@ -205,7 +226,7 @@ class ApprovalQueue:
     def submit(self, request: ApprovalRequest) -> Path:
         """Write a request to the queue and return where it landed."""
         self._directory.mkdir(parents=True, exist_ok=True)
-        target = self._directory / f"{request.request_id}.json"
+        target = _safe_id_path(self._directory, request.request_id)
         target.write_text(request.model_dump_json(indent=2) + "\n", encoding="utf-8")
         LOGGER.info(
             "approval parked: %s (%s for %r)",
@@ -243,7 +264,7 @@ class ApprovalQueue:
         question nobody asked is a caller bug, and silently creating the record
         would put an "approval" on disk that no run ever requested.
         """
-        path = self._directory / f"{request_id}.json"
+        path = _safe_id_path(self._directory, request_id)
         if not path.is_file():
             raise KeyError(f"no approval request {request_id!r} in {self._directory}")
         request = ApprovalRequest.model_validate(

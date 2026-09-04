@@ -76,7 +76,12 @@ from computeruse.orchestrator.mission import (
     remaining_goal,
     resumable,
 )
-from computeruse.orchestrator.planner import GoalPlan
+from computeruse.orchestrator.planner import (
+    GoalPlan,
+    SessionCheckpoint,
+    goal_from_sub_goals,
+    outstanding_sub_goals,
+)
 from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
 from computeruse.orchestrator.report import (
     UsageRecord,
@@ -1334,48 +1339,116 @@ def _review_approvals(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
-    # Live step visibility: the runner logs every executed physical action at
-    # INFO, and a real run takes seconds per LLM decision — without this the
-    # terminal stays silent mid-run and the user sees "Chrome opened, nothing
-    # happens". Stream the runner's lines to stderr so the run is observable
-    # while the final summary block still lands on stdout at the end.
-    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
-    # Reviewing the queue is a store operation, not a run: it needs no driver,
-    # no model and no goal, so it is dispatched before every check below.
+def _apply_resume(args: argparse.Namespace) -> int | None:
+    """Rewrite the goal to whatever a checkpointed plan has left (AUT-01).
+
+    Returns an exit code when the run should not start — the checkpoint could
+    not be read, or its plan is already finished — and ``None`` to carry on
+    with ``args.goal`` replaced by the outstanding sub-goals.
+
+    ``--resume`` names a plan id in the store. A path to a checkpoint file is
+    also accepted, deliberately and only here: this value comes from the person
+    at the keyboard, never from the model, and pointing at a file someone moved
+    is a reasonable thing for them to want. Nothing else in the system resolves
+    a caller-supplied string to an arbitrary path.
+    """
+    if args.resume is None:
+        return None
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    checkpoint_path = store / "checkpoints" / f"{args.resume}.json"
+    if not checkpoint_path.is_file():
+        supplied = Path(args.resume).expanduser()
+        if supplied.is_file():
+            checkpoint_path = supplied
+    try:
+        checkpoint = SessionCheckpoint.load(checkpoint_path)
+    except (OSError, ValueError) as exc:
+        print(
+            f"error: cannot load checkpoint {args.resume!r}: {exc}", file=sys.stderr
+        )
+        return 2
+    # One definition of "what is left", shared with the mission store: two
+    # would eventually disagree about whether a half-done plan resumes at step
+    # two or step one.
+    outstanding = outstanding_sub_goals(checkpoint.plan)
+    if not outstanding:
+        print(
+            f"checkpoint {checkpoint.session_id}: plan already complete",
+            file=sys.stderr,
+        )
+        return 0
+    args.goal = goal_from_sub_goals(outstanding)
+    print(
+        f"resuming checkpoint {checkpoint.session_id}: "
+        f"{checkpoint.plan.progress_summary}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _dispatch_store_command(args: argparse.Namespace) -> int | None:
+    """Run the read-only store commands, or ``None`` to continue to a run.
+
+    These need no driver, no model and no goal, so they are dispatched before
+    every check that assumes a run is about to start.
+    """
     if args.report:
         return _print_report(args)
     if args.grants or args.grant is not None or args.revoke is not None:
         return _review_grants(args)
     if args.approvals or args.approve is not None or args.deny is not None:
         return _review_approvals(args)
+    return None
+
+
+def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
+    """Exit code for a combination that cannot start, else ``None``."""
     if args.autonomous is None and not args.goal:
         print("error: --goal is required unless --autonomous is given", file=sys.stderr)
         return 2
-    if args.autonomous is not None:
-        if args.autonomous < 1:
-            print("error: --autonomous needs a positive run count", file=sys.stderr)
-            return 2
-        # An unattended process without a bound is not autonomy, it is a leak,
-        # and a bound reached by forgetting a flag is not a bound. The run
-        # count alone is not enough: one run can spend indefinitely.
-        if (
-            args.deadline_seconds is None
-            and args.max_tokens is None
-            and args.max_cost is None
-        ):
-            print(
-                "error: --autonomous requires at least one of --deadline-seconds, "
-                "--max-tokens or --max-cost. Nobody is watching an unattended run, "
-                "so its ceiling has to be set before it starts.",
-                file=sys.stderr,
-            )
-            return 2
+    if args.autonomous is None:
+        return None
+    if args.autonomous < 1:
+        print("error: --autonomous needs a positive run count", file=sys.stderr)
+        return 2
+    # An unattended process without a bound is not autonomy, it is a leak, and
+    # a bound reached by forgetting a flag is not a bound. The run count alone
+    # is not enough: one run can spend indefinitely.
+    if (
+        args.deadline_seconds is None
+        and args.max_tokens is None
+        and args.max_cost is None
+    ):
+        print(
+            "error: --autonomous requires at least one of --deadline-seconds, "
+            "--max-tokens or --max-cost. Nobody is watching an unattended run, "
+            "so its ceiling has to be set before it starts.",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
+def _warn_about_degraded_modes(args: argparse.Namespace) -> None:
+    """Say plainly when a run will be less than it looks (Law 6.3)."""
+    if getattr(args, "yes", False) and args.autonomous is not None:
+        # The one combination the rest of the safety floor does not cover.
+        # Budgets bound what a run spends and the kill switch ends one you are
+        # watching; neither helps against a deletion nobody saw at 3am. Said,
+        # not refused: it is the operator's machine and an explicit opt-in.
+        print(
+            "WARNING: --yes with --autonomous means every destructive action — "
+            "deletions, sends, purchases — is auto-approved while nobody is "
+            "watching, and nothing is queued for you to review afterwards. "
+            "Consider --grant instead: it delegates one verb, in one app, for "
+            "a set number of uses, and expires. Anything it does not cover "
+            "waits for you rather than proceeding.",
+            file=sys.stderr,
+        )
     if args.model is None and args.provider == DEMO_PROVIDER:
         # The demo provider does two fixed clicks then finishes — deliberately
         # so the stack runs end-to-end without an LLM. On a *real* host that
-        # reads as a broken agent, so never run it silently (Law 6.3).
+        # reads as a broken agent, so never run it silently.
         print(
             "WARNING: no --model set, so the scripted DEMO provider (two fixed "
             "clicks, then finish) will run, not an LLM. Pass --model openai to "
@@ -1383,9 +1456,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
     if args.verify is None and resolve_verify(args):
-        # Verification now defaults ON for real LLM runs: a miss must be
-        # caught and folded into the model's next decision, or the agent
-        # keeps clicking the same wrong spot (the observed failure mode).
+        # Verification defaults ON for real LLM runs: a miss must be caught and
+        # folded into the model's next decision, or the agent keeps clicking
+        # the same wrong spot (the observed failure mode).
         print(
             "note: --verify auto-enabled for this real run (a click that "
             "misses is caught and reported to the agent); pass --no-verify "
@@ -1411,6 +1484,74 @@ def main(argv: Sequence[str] | None = None) -> int:
             "closed loop.",
             file=sys.stderr,
         )
+
+
+def _resolve_target_app(args: argparse.Namespace) -> tuple[bool, bool]:
+    """Settle which application the run targets, rewriting ``args`` in place.
+
+    The goal may carry an explicit ``[App Name]`` prefix or name the target
+    implicitly ("Excel'de aç", "YouTube'da arat"). Resolving it here means the
+    provider sees the cleaned goal and the run can bring the right app forward
+    without the user passing ``--app`` — autonomy by design, not by
+    configuration.
+
+    Returns ``(named_by_user, inferred_from_goal)``, which the caller needs
+    apart: an inferred app that turns out not to be installed must degrade to
+    the frontmost window, while one the user named is a setup error.
+    """
+    explicit_app, cleaned_goal = extract_goal_app(args.goal)
+    args.goal = cleaned_goal
+    named_app = args.app is not None
+    if args.app is not None:
+        return named_app, explicit_app is not None
+    # The running-app list disambiguates service goals ("YouTube'da" -> the
+    # running browser) but never restricts the result: `open -a` can launch a
+    # not-running app. Best-effort by contract — a probe failure degrades to
+    # inference without the list.
+    running_apps: tuple[str, ...] = ()
+    try:
+        with ActuationClient(args.socket, connect_retries=1) as client:
+            running_apps = client.list_apps()
+    except Exception as exc:  # noqa: BLE001 - inference is best-effort
+        print(
+            f"warning: could not list running apps ({exc}); inferring without them",
+            file=sys.stderr,
+        )
+    inferred_app = explicit_app or infer_target_app(args.goal, running_apps)
+    if inferred_app is not None:
+        args.app = inferred_app
+        return named_app, True
+    # OBSERVE before DECIDE: no explicit or inferable app — discover the
+    # frontmost one so the provider (and its scaffold prompt) names the real
+    # app from the first turn.
+    args.app = discover_app(args.socket)
+    return named_app, explicit_app is not None
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Parse, dispatch, and run one goal.
+
+    Kept short on purpose. It grew to three hundred lines of interleaved
+    dispatch, validation and warnings, and crossed the type checker's
+    complexity limit — at which point pyright stopped analysing the function
+    at all and reported every name it used as unreachable. Type checking was
+    silently off for the whole entry point; splitting the preamble out is what
+    turns it back on.
+    """
+    args = parse_args(argv)
+    # Live step visibility: the runner logs every executed physical action at
+    # INFO, and a real run takes seconds per LLM decision — without this the
+    # terminal stays silent mid-run and the user sees "Chrome opened, nothing
+    # happens". Stream the runner's lines to stderr so the run is observable
+    # while the final summary block still lands on stdout at the end.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+    dispatched = _dispatch_store_command(args)
+    if dispatched is not None:
+        return dispatched
+    rejected = _reject_unusable_arguments(args)
+    if rejected is not None:
+        return rejected
+    _warn_about_degraded_modes(args)
     driver_process: subprocess.Popen[bytes] | None = None
     # ADR-1 promises the driver can die without taking the run with it, and
     # that promise is only kept by something that brings it back. Supervision
@@ -1446,67 +1587,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.autonomous is not None:
             return _run_autonomous_session(args, driver_recover=driver_recover)
 
-        if getattr(args, "resume", None) is not None:
-            # AUT-01: checkpoints were written but never read. --resume loads
-            # the plan and continues from the first pending sub-goal, so an
-            # interrupted --plan run does not restart completed work.
-            from computeruse.orchestrator.planner import SessionCheckpoint
+        resume_exit = _apply_resume(args)
+        if resume_exit is not None:
+            return resume_exit
 
-            store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
-            checkpoint_path = store / "checkpoints" / f"{args.resume}.json"
-            if not checkpoint_path.is_file():
-                # Also accept a full filename or path the user copied.
-                alt = Path(args.resume)
-                checkpoint_path = alt if alt.is_file() else checkpoint_path
-            try:
-                checkpoint = SessionCheckpoint.load(checkpoint_path)
-            except Exception as exc:
-                print(f"error: cannot load checkpoint {args.resume!r}: {exc}", file=sys.stderr)
-                return 2
-            pending = [
-                sg.description
-                for sg in checkpoint.plan.sub_goals
-                if sg.status in ("pending", "in_progress")
-            ]
-            if not pending:
-                print(f"checkpoint {checkpoint.session_id}: plan already complete", file=sys.stderr)
-                return 0
-            # Continue with what is left, never the original goal: re-running
-            # a completed sub-goal on a physical host repeats its side effects.
-            args.goal = " then ".join(pending)
-            print(
-                f"resuming checkpoint {checkpoint.session_id}: "
-                f"{len(pending)} sub-goal(s) left",
-                file=sys.stderr,
-            )
-
-        explicit_app, cleaned_goal = extract_goal_app(args.goal)
-        args.goal = cleaned_goal
-        named_app = args.app is not None
-        app_inferred_from_goal = explicit_app is not None
-        if args.app is None:
-            # The running-app list disambiguates service goals ("YouTube'da"
-            # -> the running browser) but never restricts the result: `open
-            # -a` can launch a not-running app. Best-effort by contract — a
-            # probe failure degrades to inference without the list.
-            running_apps: tuple[str, ...] = ()
-            try:
-                with ActuationClient(args.socket, connect_retries=1) as client:
-                    running_apps = client.list_apps()
-            except Exception as exc:  # noqa: BLE001 - inference is best-effort
-                print(
-                    f"warning: could not list running apps ({exc}); inferring without them",
-                    file=sys.stderr,
-                )
-            inferred_app = explicit_app or infer_target_app(args.goal, running_apps)
-            if inferred_app is not None:
-                args.app = inferred_app
-                app_inferred_from_goal = True
-            else:
-                # OBSERVE before DECIDE: no explicit or inferable app —
-                # discover the frontmost one so the provider (and its scaffold
-                # prompt) names the real app from the first turn.
-                args.app = discover_app(args.socket)
+        named_app, app_inferred_from_goal = _resolve_target_app(args)
         # Live usage telemetry: every successful model call reports its token
         # usage and per-call latency; each report is streamed to stderr as a
         # compact "st :" line the menu panel parses into its header counters

@@ -38,7 +38,11 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
-from computeruse.orchestrator.planner import GoalPlan
+from computeruse.orchestrator.planner import (
+    GoalPlan,
+    goal_from_sub_goals,
+    outstanding_sub_goals,
+)
 from computeruse.slug import ascii_slug
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -203,14 +207,13 @@ def remaining_goal(mission: Mission) -> str:
     """
     if mission.plan is None:
         return mission.goal
-    outstanding = [
-        sub_goal.description
-        for sub_goal in mission.plan.sub_goals
-        if sub_goal.status != "completed"
-    ]
+    outstanding = outstanding_sub_goals(mission.plan)
     if not outstanding or len(outstanding) == len(mission.plan.sub_goals):
+        # Finished, or not started. Either way the mission's own goal is the
+        # honest answer, and it keeps the user's wording — commas and all —
+        # instead of handing back a reconstruction of it.
         return mission.goal
-    return ", then ".join(outstanding)
+    return goal_from_sub_goals(outstanding)
 
 
 class MissionStore:

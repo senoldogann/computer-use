@@ -176,6 +176,37 @@ def focused_text_value(root: AXElement) -> str | None:
     return walk(root)
 
 
+#: The role macOS gives a field whose contents it redacts — a password box.
+#: Its *presence* is perfectly visible in the accessibility tree even though
+#: its value is not, which is what makes it a reliable signal that the screen
+#: is asking for a credential.
+SECURE_FIELD_ROLE: Final[str] = "SecureTextField"
+
+
+def asks_for_a_credential(root: AXElement) -> bool:
+    """Is a password field on screen at all (pure)?
+
+    Deliberately broader than "is one focused". Focus can move between the
+    snapshot the model decided from and the moment a keystroke lands, and
+    typing a password into the wrong field is worse than not typing it — so
+    the presence of the box anywhere on screen is the signal, and it fails
+    closed.
+
+    The apparent false positive is the wanted behaviour: on a sign-in form the
+    agent cannot complete the sign-in anyway, so filling the username field
+    achieves nothing except leaving a half-filled form and a person who now has
+    to work out what happened. "This one needs you" is the honest answer to the
+    whole screen, not to one field on it.
+    """
+
+    def walk(node: AXElement) -> bool:
+        if node.role == SECURE_FIELD_ROLE:
+            return True
+        return any(walk(child) for child in node.children)
+
+    return walk(root)
+
+
 def is_actionable(node: AXElement, viewport: Rect | None = None) -> bool:
     """Can the agent actually aim at this element (pure)?
 
@@ -399,14 +430,18 @@ def summaries_to_image_space(
     """
     if screen_map.is_identity or not summaries:
         return summaries
-    points_per_pixel = screen_map.points_per_pixel
+    # Per axis, matching ``to_image``: rounding in the downscale makes the two
+    # ratios differ slightly, and a width scaled by the Y factor describes a
+    # box the model is not looking at.
+    per_pixel_x = screen_map.points_per_pixel_x
+    per_pixel_y = screen_map.points_per_pixel_y
 
     def rescale(match: re.Match[str]) -> str:
         x, y, width, height = (int(g) for g in match.groups())
         centre = screen_map.to_image(Point(float(x), float(y)))
         return (
             f"at ({round(centre.x)},{round(centre.y)}) "
-            f"{round(width / points_per_pixel)}x{round(height / points_per_pixel)}"
+            f"{round(width / per_pixel_x)}x{round(height / per_pixel_y)}"
         )
 
     pattern = re.compile(r"at \((\d+),(\d+)\) (\d+)x(\d+)")

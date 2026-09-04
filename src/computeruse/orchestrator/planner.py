@@ -161,6 +161,33 @@ def decompose_goal(
     return GoalPlan(plan_id=plan_id, goal=clean_goal, sub_goals=sub_goals)
 
 
+def outstanding_sub_goals(plan: GoalPlan) -> tuple[str, ...]:
+    """The sub-goals a plan has not finished, in order (pure).
+
+    Data, not a formatted goal, because the two callers need different things
+    from it: a checkpoint resume wants whatever is left, while a mission with
+    *nothing* done should hand back the user's own wording rather than a
+    reconstruction of it — and only the count tells them apart.
+    """
+    return tuple(
+        sub_goal.description
+        for sub_goal in plan.sub_goals
+        if sub_goal.status != "completed"
+    )
+
+
+def goal_from_sub_goals(parts: tuple[str, ...]) -> str:
+    """Join outstanding sub-goals back into one goal string (pure).
+
+    Uses the planner's own sequence marker, so the result round-trips:
+    :func:`split_sequential_goal` reads it back into exactly these parts. A
+    resume that re-ran a completed step would not merely waste time on a
+    physical host, it would repeat whatever that step did — "send the invoice,
+    then file it" restarted from the top sends the invoice twice.
+    """
+    return " then ".join(parts)
+
+
 def _with_status(
     sub_goal: PlannedSubGoal,
     status: SubGoalStatus,
