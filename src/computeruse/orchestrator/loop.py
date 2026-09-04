@@ -665,25 +665,33 @@ def _extend_trail(
     content: tuple[str, ...],
     max_entries: int,
 ) -> tuple[str, ...]:
-    """Append this observation's evidence, one entry per window (pure).
+    """Append this observation's evidence, one entry per window *page* (pure).
 
-    Keyed by window so revisiting an app *replaces* its entry rather than
-    appending a near-duplicate: the agent switches back and forth, and a trail
-    full of the same two windows would push out the very evidence it exists to
-    preserve. The newest observation of a window wins, and the window keeps its
-    original position so the order still reads as the order things were seen.
+    Entries are identical only when both the window title and the observed
+    text match: re-seeing the same page changes nothing, so the trail does
+    not grow. A new page under a known title — a search-results list giving
+    way to the article it linked — is a different fact and is appended while
+    the older one survives, newest last, oldest evicted past the cap.
+
+    The old rule replaced a window's entry on every revisit, which was right
+    for an app switching between two stable views and wrong for navigation:
+    measured in the field, opening the top search result erased the results
+    list that proved it *was* the top result, and the auditor then demanded
+    both on screen at once — a state that can never exist. Identity is
+    title-plus-text now, so both readings coexist within the same budget.
     """
     if window is None or not content:
         return trail
     title = window.window_title or window.app_name
     if not title:
         return trail
-    return _extend_trail_entry(
-        trail,
-        title=title,
-        text=_informative_text(content, max_chars=TRAIL_MAX_CHARS),
-        max_entries=max_entries,
-    )
+    text = _informative_text(content, max_chars=TRAIL_MAX_CHARS)
+    if not text:
+        return trail
+    entry = f"{title}: {text}"
+    if entry in trail:
+        return trail
+    return (*trail, entry)[-max_entries:]
 
 
 def _tool_trail_title(action: Action) -> str:

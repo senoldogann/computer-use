@@ -1035,27 +1035,33 @@ def test_a_silent_region_is_not_a_denial_when_the_screen_moved() -> None:
 
 
 def test_trail_keeps_one_entry_per_window() -> None:
-    """Revisiting an app replaces its entry instead of appending a duplicate.
+    """An identical re-observation adds nothing; a new page is new evidence.
 
-    The agent switches back and forth between two applications, so an
-    append-only trail would fill with the same two windows and push out the
-    very evidence it exists to preserve.
+    The agent switches back and forth between applications, so re-seeing the
+    same page must not grow the trail — but navigating within one window must
+    not erase where it came from either. Measured in the field: opening the
+    top search result replaced the results list that proved it *was* the top
+    result, and the auditor then demanded both on screen at once. Identity is
+    title-plus-text, so the two readings coexist within the same budget.
     """
     chrome = FocusedWindow(pid=1, app_name="Chrome", window_title="Issues · repo")
     calc = FocusedWindow(pid=2, app_name="Calculator", window_title="Calculator")
 
     trail = _extend_trail((), chrome, ("StaticText=46 Open",), 6)
     trail = _extend_trail(trail, calc, ("StaticText=46",), 6)
-    trail = _extend_trail(trail, chrome, ("StaticText=46 Open", "Link=Issues"), 6)
-
+    # Same page seen again: no duplicate, trail unchanged.
+    trail = _extend_trail(trail, chrome, ("StaticText=46 Open",), 6)
     assert len(trail) == 2
-    # Order still reads as the order things were first seen.
     assert trail[0].startswith("Issues · repo: ")
     assert trail[1].startswith("Calculator: ")
-    # The newest reading of a window wins. Roles are dropped and repeats
-    # collapsed: the trail is read as evidence, and a page names its own
-    # furniture three times before it says anything worth remembering.
-    assert trail[0] == "Issues · repo: 46 Open | Issues"
+    # Same window, different page: appended, older evidence survives.
+    # Roles are dropped and repeats collapsed: the trail is read as evidence,
+    # and a page names its own furniture three times before it says anything
+    # worth remembering.
+    trail = _extend_trail(trail, chrome, ("StaticText=46 Open", "Link=Issues"), 6)
+    assert len(trail) == 3
+    assert trail[0] == "Issues · repo: 46 Open"
+    assert trail[2] == "Issues · repo: 46 Open | Issues"
 
 
 def test_trail_is_bounded_and_ignores_empty_observations() -> None:
