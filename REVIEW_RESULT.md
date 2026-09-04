@@ -1,7 +1,7 @@
 # Kapsamlı Proje Code-Review Raporu
 
 > **Durum (4 Eylül 2026, güncel):** Aşağıdaki bulgular yeniden doğrulandı.
-> Ölçülen zemin: `pytest` 645/645, `cargo test` 55 passed + 1 ignored,
+> Ölçülen zemin: `pytest` 661/661, `cargo test` 55 passed + 1 ignored,
 > `ruff`/`pyright`/`clippy -D warnings` temiz, `--eval` 12/12.
 >
 > **Kapatıldı, regresyon testiyle sabitlendi:** CLI-01, SEC-01, SEC-02,
