@@ -55,7 +55,7 @@ def test_runner_fires_on_complete_with_executed_trajectory() -> None:
         provider=provider,
         execute_physical=lambda _a: None,
         app="Safari",
-        on_complete=lambda t, o, r, _s: received.append((t, o, r)),
+        on_complete=lambda t, o, r, _s, _f: received.append((t, o, r)),
         max_steps=10,
     )
     runner.run(goal="open the menu")
@@ -81,7 +81,7 @@ def test_failed_finish_reports_failure_outcome() -> None:
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _a: None,
-        on_complete=lambda _t, o, _r, _s: received.append(o),
+        on_complete=lambda _t, o, _r, _s, _f: received.append(o),
         max_steps=5,
     )
     runner.run(goal="click")
@@ -123,7 +123,7 @@ def test_aborted_run_is_remembered_as_a_failure() -> None:
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _a: None,
-        on_complete=lambda _t, o, r, _s: received.append((o, r)),
+        on_complete=lambda _t, o, r, _s, _f: received.append((o, r)),
         max_steps=3,
     )
     # The bounded-termination contract: the truncation raises a typed error
@@ -156,7 +156,7 @@ def test_kill_switch_takeover_is_remembered_as_a_failure() -> None:
         provider=provider,
         execute_physical=lambda _a: None,
         kill_switch=TripsOnceAStepIsOnTheRecord(),  # type: ignore[arg-type]
-        on_complete=lambda _t, o, r, _s: received.append((o, r)),
+        on_complete=lambda _t, o, r, _s, _f: received.append((o, r)),
         max_steps=5,
     )
     with pytest.raises(KillSwitchTripped):
@@ -179,7 +179,7 @@ def test_a_run_that_never_acted_leaves_nothing() -> None:
         provider=lambda _s: _turn(_click(10, 10)),
         execute_physical=lambda _a: None,
         kill_switch=AlwaysTripped(),  # type: ignore[arg-type]
-        on_complete=lambda _t, _o, _r: calls.append(True),
+        on_complete=lambda _t, _o, _r, _s, _f: calls.append(True),
         max_steps=5,
     )
     with pytest.raises(KillSwitchTripped):
@@ -199,6 +199,7 @@ def test_full_chain_episode_feeds_skill_dedup(tmp_path) -> None:
         outcome: EpisodeOutcome,
         retrospective: str | None,
         mounted_skill_id: str | None,
+        forced_completion: bool,
     ) -> None:
         # Distill against known history first, then remember — so the fresh
         # run is novel, and any future identical run is a duplicate.
@@ -322,7 +323,7 @@ def test_a_skill_that_made_the_run_trivial_is_still_credited() -> None:
             RelevanceMatch(summary=summary_of(_a_skill()), score=99)
         ],
         skill_loader=lambda _sid: _a_skill(),
-        on_complete=lambda t, o, _r, sid: received.append((o, sid)) or None,
+        on_complete=lambda t, o, _r, sid, _f: received.append((o, sid)) or None,
         max_steps=3,
     )
     runner.run(goal="a goal already satisfied")

@@ -937,11 +937,14 @@ class OodaRunner:
     # why it stopped. The caller decides what to do with each outcome (Law 3.1
     # only ever wanted a *successful* flow distilled into a skill).
     #: Called once a run ends, with the trajectory, its outcome, a
-    #: retrospective, and the id of the skill that was mounted (``None`` when
-    #: none was). The skill id is what lets a caller record how a recipe
-    #: actually fared, which distillation alone never did.
+    #: retrospective, the id of the skill that was mounted (``None`` when
+    #: none was), and whether the finish was force-accepted after the
+    #: auditor kept rejecting it. The skill id is what lets a caller record
+    #: how a recipe actually fared, which distillation alone never did; the
+    #: forced flag is what keeps an unverified flow out of the skill store
+    #: (a stalemate-avoidance accept is not a verified success).
     on_complete: (
-        Callable[[Trajectory, EpisodeOutcome, str | None, str | None], None] | None
+        Callable[[Trajectory, EpisodeOutcome, str | None, str | None, bool], None] | None
     ) = None
     # Goal-completion auditor (VERIFY, terminal): given the final state and the
     # model's own summary, decide whether the goal is *observably* satisfied.
@@ -1064,6 +1067,11 @@ class OodaRunner:
         self._failure_streaks = {}
         self._consecutive_failures = 0
         self._rejected_finishes = 0
+        # Whether the run ended on a finish the auditor never accepted:
+        # the stalemate guard below force-accepts after MAX_FINISH_REJECTIONS,
+        # and that accept must travel with the trajectory so the caller can
+        # refuse to distill it (an unverified flow is not a skill).
+        self._forced_finish = False
         self._physical_since_capture = False
         self._last_state = state
         # Every abnormal ending — the step budget, an exhausted recovery
@@ -1088,6 +1096,7 @@ class OodaRunner:
                 self._last_state,
                 outcome="failure",
                 retrospective=failure_retrospective(exc),
+                forced_completion=False,
             )
             raise
 
@@ -2284,10 +2293,14 @@ class OodaRunner:
         LOGGER.info("ooda finished goal=%r at step %s", goal, state.step_index)
         # DISTILL: hand the executed trajectory to the caller so a successful
         # run can become a reusable skill and every terminal run is remembered.
+        # The forced flag travels with it: a finish accepted only because the
+        # stalemate guard fired was never verified, and verifying is what
+        # makes a flow worth distilling.
         self._finalize(
             state,
             outcome="success" if action.status == "success" else "failure",
             retrospective=action.summary,
+            forced_completion=self._forced_finish,
         )
         return state, True, False
 
@@ -2316,7 +2329,11 @@ class OodaRunner:
         if self._rejected_finishes >= MAX_FINISH_REJECTIONS:
             # The auditor and the actor disagree persistently. Accept the
             # model's own verdict rather than looping: the run's honest
-            # outcome is recorded in ``last_error`` either way.
+            # outcome is recorded in ``last_error`` either way. This accept
+            # is flagged, not laundered — the caller must treat the flow as
+            # unverified (never distill it), which is why the flag exists
+            # rather than a quieter outcome downgrade here.
+            self._forced_finish = True
             LOGGER.warning(
                 "accepting finish after %d rejected completion claims",
                 self._rejected_finishes,
@@ -2345,6 +2362,7 @@ class OodaRunner:
         *,
         outcome: EpisodeOutcome,
         retrospective: str | None,
+        forced_completion: bool,
     ) -> None:
         """Trigger the DISTILL/remember hooks on a terminal run.
 
@@ -2382,6 +2400,7 @@ class OodaRunner:
             outcome,
             retrospective,
             self._skill.skill_id if self._skill is not None else None,
+            forced_completion,
         )
 
     @property
