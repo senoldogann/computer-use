@@ -60,8 +60,10 @@ from computeruse.inbox import (
     FAILED_DIRNAME,
     PROCESSED_DIRNAME,
     ClaimedTask,
+    InboxError,
     check_inbox_writable,
     claim_next_task,
+    count_inbox,
     settle_failed,
     settle_processed,
     sweep_processing,
@@ -1360,8 +1362,9 @@ def _run_eval(args: argparse.Namespace) -> int:
 
 
 def _print_report(args: argparse.Namespace) -> int:
-    """Read the five stores together and print what happened (I/O + pure render)."""
+    """Read the five stores (plus the watched folder) together and print what happened (I/O + pure render)."""
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    watch = Path(args.watch).expanduser() if getattr(args, "watch", None) else None
     report = summarize(
         episodes=tuple(EpisodicStore(store / "episodes").episodes()),
         usage=UsageStore(store / "usage").records(),
@@ -1369,6 +1372,7 @@ def _print_report(args: argparse.Namespace) -> int:
         approvals=ApprovalQueue(store / "approvals").requests(),
         grants=GrantStore(store / "grants").grants(),
         period=period_ending(now_utc(), hours=args.since_hours),
+        inbox=count_inbox(watch) if watch is not None else None,
     )
     print(render(report), end="")
     return 0
@@ -1588,10 +1592,17 @@ def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
     if args.autonomous is None and not args.goal:
         print("error: --goal is required unless --autonomous is given", file=sys.stderr)
         return 2
-    if getattr(args, "watch", None) is not None and args.autonomous is None:
+    if (
+        getattr(args, "watch", None) is not None
+        and args.autonomous is None
+        and not args.report
+    ):
         # Watching proposes work; without a session nothing polls the folder,
         # so the flag would silently do nothing — refuse it loudly instead.
-        print("error: --watch needs --autonomous", file=sys.stderr)
+        # --report is the one other reader: it counts the folder's archives
+        # without running anything. Which folder is read stays on the command
+        # line — no "last watched folder" is remembered anywhere (YAGNI).
+        print("error: --watch needs --autonomous or --report", file=sys.stderr)
         return 2
     if args.autonomous is None:
         return None
@@ -1937,6 +1948,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # instead of a silent stop.
         print(f"max steps: {exc}", file=sys.stderr)
         return 1
+    except InboxError as exc:
+        # A bad --watch folder is an argument problem, in the same style as
+        # _reject_unusable_arguments: one line, exit 2, no traceback.
+        # Placed before RuntimeError because InboxError derives from it.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except RuntimeError as exc:
         # Setup/startup failures (driver spawn, fail-fast sensor probe) are
         # user-facing conditions, not bugs: one clean line beats a traceback.

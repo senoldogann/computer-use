@@ -33,6 +33,7 @@ from typing import Final
 
 from pydantic import BaseModel, Field
 
+from computeruse.inbox import InboxCounts
 from computeruse.memory.schemas import Episode
 from computeruse.orchestrator.mission import Mission, blocked_missions
 from computeruse.security.approvals import ApprovalRequest, pending_requests
@@ -87,6 +88,10 @@ class RunReport:
     blocked: tuple[Mission, ...]
     waiting: tuple[ApprovalRequest, ...]
     grants_used: tuple[CapabilityGrant, ...]
+    #: What the watched folder holds, when the report was asked with
+    #: ``--watch``. ``None`` otherwise — no folder was named, so there is
+    #: nothing to count rather than an empty count to show.
+    inbox: InboxCounts | None = None
 
     @property
     def succeeded(self) -> int:
@@ -107,7 +112,10 @@ class RunReport:
     @property
     def is_quiet(self) -> bool:
         """Nothing ran, nothing is waiting — the period has nothing to say."""
-        return not (self.episodes or self.blocked or self.waiting)
+        inbox_open = self.inbox is not None and bool(
+            self.inbox.failed or self.inbox.orphaned
+        )
+        return not (self.episodes or self.blocked or self.waiting or inbox_open)
 
 
 def summarize(
@@ -118,15 +126,17 @@ def summarize(
     approvals: tuple[ApprovalRequest, ...],
     grants: tuple[CapabilityGrant, ...],
     period: ReportPeriod,
+    inbox: InboxCounts | None = None,
 ) -> RunReport:
     """Select what belongs in the period (pure).
 
     Two different rules on purpose. *Activity* — what ran, what it cost — is
     filtered to the window, because "last night" means last night. *Open
-    items* — blocked missions, unanswered questions — are never filtered: a
-    question parked three days ago is more urgent than one parked an hour ago,
-    and a report that hid it because it fell outside the window would be
-    actively misleading about what the agent is waiting for.
+    items* — blocked missions, unanswered questions, quarantined inbox files
+    and orphaned claims — are never filtered: a question parked three days
+    ago is more urgent than one parked an hour ago, and a report that hid it
+    because it fell outside the window would be actively misleading about
+    what the agent is waiting for.
     """
     in_window = tuple(
         episode
@@ -148,6 +158,7 @@ def summarize(
         # opposed to what merely exists. A standing permission nobody used is
         # not news; one that was used three times is.
         grants_used=tuple(grant for grant in grants if grant.used > 0),
+        inbox=inbox,
     )
 
 
@@ -166,12 +177,41 @@ def _ellipsis(text: str, limit: int) -> str:
     return collapsed[: limit - 1] + "…"
 
 
+def _inbox_lines(inbox: InboxCounts) -> list[str]:
+    """The watched folder's archives, one section (pure).
+
+    Rendered whenever a folder was named, even an all-clear one: the reader
+    asked about *that folder*, and the section is the receipt that it was
+    read. Failures carry their reasons — a quarantined task order must never
+    read as quietly vanished work.
+    """
+    lines = [
+        (
+            f"inbox {inbox.watch_dir} — "
+            f"{inbox.processed} processed, {len(inbox.failed)} failed, "
+            f"{inbox.orphaned} orphaned"
+        )
+    ]
+    for item in inbox.failed:
+        reason = item.reason if item.reason else "(no reason recorded)"
+        lines.append(f"  lost {item.name}: {_ellipsis(reason, GOAL_LINE_MAX_CHARS)}")
+    if inbox.orphaned:
+        lines.append(
+            f"  {inbox.orphaned} claim(s) still in .processing/ — "
+            "the next session sweeps them to .failed/"
+        )
+    lines.append("")
+    return lines
+
+
 def render(report: RunReport) -> str:
     """The report a person reads over coffee (pure).
 
     Ordered by what a reader needs first, which is not chronological: what is
     waiting for *them* comes before what the agent managed on its own, because
-    the first is the only part that will not resolve itself.
+    the first is the only part that will not resolve itself. Quarantined inbox
+    files sit right behind the pending decisions, for the same reason — a
+    failed task order is an unanswered question in another shape.
     """
     hours = (report.period.until - report.period.since).total_seconds() / 3600
     lines: list[str] = [
@@ -183,6 +223,9 @@ def render(report: RunReport) -> str:
     ]
     if report.is_quiet:
         lines.append("nothing ran, and nothing is waiting on you.")
+        if report.inbox is not None:
+            lines.append("")
+            lines.extend(_inbox_lines(report.inbox))
         return "\n".join(lines)
 
     if report.waiting:
@@ -203,6 +246,9 @@ def render(report: RunReport) -> str:
             if mission.blocked_reason:
                 lines.append(f"      {_ellipsis(mission.blocked_reason, GOAL_LINE_MAX_CHARS)}")
         lines.append("")
+
+    if report.inbox is not None:
+        lines.extend(_inbox_lines(report.inbox))
 
     lines.append(
         f"ran — {len(report.episodes)} run(s): "
