@@ -56,6 +56,16 @@ from computeruse.eval.score import render_json as render_eval_json
 from computeruse.eval.score import summarize as summarize_eval
 from computeruse.eval.store import BenchmarkStore, new_benchmark_id
 from computeruse.eval.tasks import BATTERY_VERSION, TASK_BATTERY, tasks_in
+from computeruse.inbox import (
+    FAILED_DIRNAME,
+    PROCESSED_DIRNAME,
+    ClaimedTask,
+    check_inbox_writable,
+    claim_next_task,
+    settle_failed,
+    settle_processed,
+    sweep_processing,
+)
 from computeruse.memory.episodic import EpisodicStore
 from computeruse.orchestrator.budget import (
     BudgetExceededError,
@@ -187,6 +197,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=AUTONOMOUS_REST_SECONDS,
         help="How long to wait between unattended runs "
         f"(default: {AUTONOMOUS_REST_SECONDS:.0f}).",
+    )
+    parser.add_argument(
+        "--watch",
+        default=None,
+        metavar="DIR",
+        help="Watch a folder for task files (.txt/.md/.json): each file is "
+        "claimed once and proposed as the next goal of an --autonomous "
+        "session, then archived to .processed/ (or .failed/). Requires "
+        "--autonomous; off unless given.",
     )
     parser.add_argument(
         "--report",
@@ -916,6 +935,23 @@ def _run_autonomous_session(
     missions = MissionStore(store / "missions")
     approvals = ApprovalQueue(store / "approvals")
     rng = random.Random()
+    # A watched folder, when the operator passed --watch. Off (None) unless
+    # given: watching is an explicit opt-in to world-born work.
+    watch_dir = Path(args.watch).expanduser() if getattr(args, "watch", None) else None
+    # The inbox claim being worked on. Set by propose(), consumed by the
+    # execute() of the same run — run_autonomously strictly pairs one propose
+    # with its execute, so a plain holder is enough: no queue, no lookup.
+    pending_claim: dict[str, ClaimedTask | None] = {"claim": None}
+    if watch_dir is not None:
+        # Fail fast on an unsafe or missing folder, before any run starts.
+        check_inbox_writable(watch_dir)
+        # A claim left in .processing/ belongs to a session that will never
+        # settle it. Quarantine it now, with the reason written down, so no
+        # work is silently lost and none runs twice.
+        for orphan in sweep_processing(
+            watch_dir, reason="a previous session ended while the task was claimed"
+        ):
+            print(f"autonomous  : orphaned claim {orphan!r} moved to .failed/")
     attempted_goals: list[str] = []
     budget = RunBudget(
         deadline_seconds=args.deadline_seconds,
@@ -975,6 +1011,10 @@ def _run_autonomous_session(
             raise BudgetExceededError(reason)
 
     def execute(proposal: GoalProposal) -> None:
+        # The inbox claim for this run, if propose() claimed one. Popped now
+        # so a later run can never settle (or inherit) another run's file.
+        claim = pending_claim["claim"]
+        pending_claim["claim"] = None
         attempted_goals.append(proposal.goal)
         mark = (tokens["total"], cost["usd"], time.monotonic())
         # The mission is opened *before* the run, so a session killed
@@ -1056,14 +1096,36 @@ def _run_autonomous_session(
                 f"autonomous  : {proposal.goal!r} -> parked for approval "
                 f"({exc.request.request_id})"
             )
+            # Parked is processed, not failed: the mission waits as blocked,
+            # and re-reading the file would ask the same question twice.
+            if claim is not None and watch_dir is not None:
+                settle_processed(
+                    claim.processing_path, processed_dir=watch_dir / PROCESSED_DIRNAME
+                )
             return
-        except Exception:
+        except Exception as exc:
             missions.save(
                 mission_finished(
                     mission, plan=progress["plan"], succeeded=False, now=now_utc()
                 )
             )
             record(f"unfinished-{mission.mission_id}", "failure", 0)
+            if claim is not None and watch_dir is not None:
+                try:
+                    settle_failed(
+                        claim.processing_path,
+                        failed_dir=watch_dir / FAILED_DIRNAME,
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                except OSError as settle_exc:
+                    # The original failure is the finding; a stuck archive
+                    # must not replace it (the orphan sweep quarantines the
+                    # claim at the next session start instead).
+                    print(
+                        f"warning: could not archive failed inbox task "
+                        f"({settle_exc})",
+                        file=sys.stderr,
+                    )
             raise
         missions.save(
             mission_finished(
@@ -1072,16 +1134,21 @@ def _run_autonomous_session(
         )
         record(result.run_id, "success", len(result.state.completed_steps))
         print(f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps")
+        if claim is not None and watch_dir is not None:
+            settle_processed(
+                claim.processing_path, processed_dir=watch_dir / PROCESSED_DIRNAME
+            )
 
     def propose() -> GoalProposal | None:
-        """Unfinished work first, then something new.
+        """Inbox first, then unfinished work, then something new.
 
-        A mission left half-done by a killed run is the most concrete thing
-        memory holds — more concrete than a failed skill, because it is a task
-        that was actually started — and resuming it is what makes work survive
-        the session that began it. ``remaining_goal`` hands over what is left,
-        never the original goal: re-running a completed sub-goal on a physical
-        host is not merely wasteful, it repeats whatever that step did.
+        A claimed inbox file is consumed by the claim itself — it leaves the
+        folder the moment it is picked up, so it can never produce forever
+        and starve the mission queue. Missions come second for the usual
+        reason: a half-done task is the most concrete thing memory holds, and
+        ``remaining_goal`` hands over what is left, never the original goal
+        (re-running a completed sub-goal on a physical host repeats whatever
+        that step did).
         """
         # A parked run is still recorded as a failed episode (its work is worth
         # keeping), and that record is what ``propose_goal`` reads — so without
@@ -1089,6 +1156,28 @@ def _run_autonomous_session(
         # same question again. Its mission is already held back; this closes
         # the same hole in the episode channel.
         waiting = goals_awaiting_decision(approvals.requests())
+        if watch_dir is not None:
+            while True:
+                claimed = claim_next_task(watch_dir, now=time.time(), pid=os.getpid())
+                if claimed is None:
+                    break
+                if claimed.task.goal in waiting:
+                    # Its question is already parked: archiving (not failing)
+                    # consumes the file without asking twice.
+                    settle_processed(
+                        claimed.processing_path,
+                        processed_dir=watch_dir / PROCESSED_DIRNAME,
+                    )
+                    continue
+                pending_claim["claim"] = claimed
+                return GoalProposal(
+                    goal=claimed.task.goal,
+                    app=claimed.task.app,
+                    reason=(
+                        f"task file {claimed.task.source_name!r} claimed "
+                        f"from watched folder {watch_dir}"
+                    ),
+                )
         open_work = resumable(
             missions.missions(), max_attempts=DEFAULT_MAX_ATTEMPTS
         )
@@ -1498,6 +1587,11 @@ def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
     """Exit code for a combination that cannot start, else ``None``."""
     if args.autonomous is None and not args.goal:
         print("error: --goal is required unless --autonomous is given", file=sys.stderr)
+        return 2
+    if getattr(args, "watch", None) is not None and args.autonomous is None:
+        # Watching proposes work; without a session nothing polls the folder,
+        # so the flag would silently do nothing — refuse it loudly instead.
+        print("error: --watch needs --autonomous", file=sys.stderr)
         return 2
     if args.autonomous is None:
         return None
