@@ -58,6 +58,7 @@ from computeruse.orchestrator.evidence import (
 )
 from computeruse.orchestrator.failures import (
     MAX_CONSECUTIVE_FAILURES,
+    FailureKind,
     RecoveryAction,
     UnrecoverableFailureError,
     classify_failure,
@@ -78,6 +79,7 @@ from computeruse.orchestrator.schemas import (
     MouseDrag,
     MouseMove,
     MouseScroll,
+    PressHotkey,
     TypeText,
     Wait,
     WebFetch,
@@ -173,6 +175,13 @@ SETTLE_INTERVAL_S: Final[float] = 0.1
 # actor that permanently disagree would trade turns until the step budget
 # ran out — a stalemate is a worse outcome than an honestly-reported finish.
 MAX_FINISH_REJECTIONS: Final[int] = 2
+
+#: Consecutive target-app AX probe failures that declare the app frozen.
+#: One failed snapshot is a driver hiccup; three in a row while the window
+#: probe still answers means the app stopped talking, not the driver. Low
+#: enough to stop clicking into a beachball promptly, high enough that a
+#: single flaky read never triggers first aid.
+AX_FROZEN_AFTER_FAILURES: Final[int] = 3
 
 # Physical actions whose identical repetition signals a stuck loop. mouse_move
 # is deliberately excluded: re-positioning the cursor to the same point is a
@@ -1046,6 +1055,11 @@ class OodaRunner:
         # Rejected finish claims, so a model that cannot prove completion still
         # terminates instead of arguing with the auditor forever.
         self._rejected_finishes: int = 0
+        # P1 frozen-app signal: consecutive target-AX probe failures, plus
+        # whether the window probe answered on the current turn. The pair
+        # distinguishes "the app stopped talking" from "the driver is down".
+        self._ax_probe_failures: int = 0
+        self._window_probe_ok: bool = False
         # Whether a physical action ran since ``_observation`` was taken.
         self._physical_since_capture: bool = False
         # The most recent working state the stepping loop produced. Mirrored
@@ -1080,6 +1094,11 @@ class OodaRunner:
         # and that accept must travel with the trajectory so the caller can
         # refuse to distill it (an unverified flow is not a skill).
         self._forced_finish = False
+        # P1 frozen-app signal: consecutive target-AX failures, and whether
+        # the window probe answered on the current turn. Both reset per run;
+        # neither survives it, so one run's beachball never arms the next.
+        self._ax_probe_failures = 0
+        self._window_probe_ok = False
         self._physical_since_capture = False
         self._last_state = state
         # Every abnormal ending — the step budget, an exhausted recovery
@@ -1125,7 +1144,17 @@ class OodaRunner:
                 self.budget_guard()
 
             # OBSERVE: one snapshot feeds the decision, the gates, and VERIFY.
-            state = self._observe(state)
+            try:
+                state = self._observe(state)
+            except AppFrozenError as exc:
+                # The target app stopped answering mid-run. Fold it into the
+                # ladder like any other failure — its kind arms the
+                # deterministic first aid — instead of crashing the run on a
+                # perception gap the next turn might already have survived.
+                hint = self._register_failure(exc, None, goal)
+                state = replace(state, last_error=hint)
+                LOGGER.warning("ooda observe failed: %s", hint)
+                continue
             # The fresh observation is also the verdict on the previous
             # action: did anything actually move? (Stuck-loop guard.)
             state = self._settle_progress(state)
@@ -1200,7 +1229,16 @@ class OodaRunner:
                         self._observation.signature,
                         f"{_win.app_name}|{_win.window_title}" if _win is not None else "",
                     )
-                    state = self._observe(state)
+                    try:
+                        state = self._observe(state)
+                    except AppFrozenError as exc:
+                        # Frozen mid-batch: register the failure so the streak
+                        # (and its reflex) advances, then stop the batch — the
+                        # remaining actions were aimed at an app that no longer
+                        # answers, and the next turn re-decides from the hint.
+                        hint = self._register_failure(exc, None, goal)
+                        state = replace(state, last_error=hint)
+                        break
                     # The batch's later actions were chosen from the pre-batch
                     # frame; accept them against the refreshed one rather than
                     # tripping the staleness gate on our own re-observation.
@@ -2025,6 +2063,8 @@ class OodaRunner:
             raise UnrecoverableFailureError(
                 failure=failure, streak=self._consecutive_failures, goal=goal
             )
+        if failure.kind is FailureKind.APP_FROZEN and streak <= 2:
+            self._frozen_reflex(streak)
         if recovery_for(streak) is RecoveryAction.REPLAN and self._skill is not None:
             # A mounted workflow that keeps failing is actively misleading the
             # model — unmount it so the replan starts from the real screen.
@@ -2033,6 +2073,36 @@ class OodaRunner:
         hint = recovery_hint(failure, streak)
         self._last_error = hint
         return hint
+
+    def _frozen_reflex(self, streak: int) -> None:
+        """Deterministic first aid for an unresponsive app (RECOVER reflex).
+
+        Streak 1 sends Escape — dismisses a stuck sheet, modal dialog or open
+        menu, the cheapest possible un-wedger, and benign anywhere else.
+        Streak 2 re-asserts the target app to the front, since focus drift
+        reads identically to a freeze from the AX side. Both go straight
+        through ``execute_physical``: asking the model would spend an LLM turn
+        stating the obvious, and a weak model might "improve" on it into a
+        click at the frozen window.
+
+        Never during a human takeover, and never loudly: a reflex that raises
+        would replace the failure it came to treat, so it degrades to the
+        hint text instead. Past streak 2 the ladder's own rungs (REPLAN, then
+        ABORT) own the ending — the run fails loudly with the frozen cause
+        rather than hanging on a beachball.
+        """
+        if self.kill_switch is not None and self.kill_switch.tripped():
+            return
+        if streak == 1:
+            action: Action = PressHotkey(type="press_hotkey", modifiers=[], key="escape")
+        elif streak == 2 and (self.working_app or self.app):
+            action = ActivateApp(type="activate_app", app=self.working_app or self.app)
+        else:
+            return
+        try:
+            self.execute_physical(action)
+        except Exception as exc:  # noqa: BLE001 - a failed reflex degrades to the hint
+            LOGGER.warning("frozen-app reflex failed: %s", exc)
 
     def _record_for_progress(self, action: Action) -> None:
         """Remember an executed action so the NEXT observation can judge it.
@@ -2106,7 +2176,9 @@ class OodaRunner:
         if self.window_probe is not None:
             try:
                 window = self.window_probe()
+                self._window_probe_ok = True
             except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+                self._window_probe_ok = False
                 if self._window_probe_warned:
                     LOGGER.debug("focused-window probe still failing: %s", exc)
                 else:
@@ -2121,16 +2193,35 @@ class OodaRunner:
         if self.ax_probe is not None:
             try:
                 ax_result = self.ax_probe()
+                self._ax_probe_failures = 0
                 raw_ui_elements = ax_result.summaries
                 content = ax_result.content
                 open_tabs = ax_result.open_tabs
                 asks_for_credential = ax_result.asks_for_credential
-            except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+            except Exception as exc:
                 if self._ax_probe_warned:
                     LOGGER.debug("ui-element probe still failing: %s", exc)
                 else:
                     self._ax_probe_warned = True
                     LOGGER.warning("ui-element probe failed: %s", exc)
+                self._ax_probe_failures += 1
+                if (
+                    self._ax_probe_failures >= AX_FROZEN_AFTER_FAILURES
+                    and self._window_probe_ok
+                ):
+                    # Windows are still visible but this app's tree will not
+                    # answer: the accessible half of "not responding". One
+                    # failed snapshot is a hiccup and stays best-effort; a
+                    # streak is a diagnosis, and it travels as a typed
+                    # failure so the ladder answers with first aid instead
+                    # of another round of clicking into a beachball.
+                    app = self.working_app or self.app or "unknown"
+                    raise AppFrozenError(
+                        f"the accessibility tree of {app!r} has not answered "
+                        f"{self._ax_probe_failures} times in a row while its "
+                        "windows are still visible; the application is not "
+                        "responding"
+                    ) from exc
 
         frame = previous.frame
         screenshot_b64 = previous.screenshot_b64
@@ -2800,6 +2891,20 @@ class CredentialEntryRefused(RuntimeError):
     approval makes typing a credential acceptable, so the guidance attached to
     this one tells the model to stop and say why rather than to try again
     differently.
+    """
+
+
+class AppFrozenError(RuntimeError):
+    """The target app's accessibility tree stopped answering (P1 signal).
+
+    Raised by the runner itself — never by the model or the driver — after
+    :data:`AX_FROZEN_AFTER_FAILURES` consecutive AX probe failures while the
+    window probe still answers. That combination is the accessible half of
+    "not responding": the process lives (its windows are visible) but it no
+    longer serves the interface every click and keystroke depends on.
+    Classified as :attr:`FailureKind.APP_FROZEN`, which is what arms the
+    deterministic first aid (Escape, then re-assert) instead of another
+    round of hint text.
     """
 
 

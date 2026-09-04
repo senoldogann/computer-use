@@ -68,6 +68,10 @@ class FailureKind(str, Enum):
     MODEL_CONTRACT = "model_contract"
     #: A password field was on screen when the agent tried to type.
     CREDENTIALS = "credentials"
+    #: The target application stopped answering its accessibility interface
+    #: while its windows are still visible — the spinning-beachball state.
+    #: Clicking into it again is not a retry, it is a wait with extra steps.
+    APP_FROZEN = "app_frozen"
     #: Anything not recognised — treated conservatively.
     UNKNOWN = "unknown"
 
@@ -181,6 +185,9 @@ def classify_failure(exc: BaseException, action: Action | None) -> Failure:
         "DriverTimeoutError": FailureKind.DRIVER_UNAVAILABLE,
         "InvalidDecisionError": FailureKind.MODEL_CONTRACT,
         "CredentialEntryRefused": FailureKind.CREDENTIALS,
+        # Raised by the runner itself when the target app's AX tree stops
+        # answering while its windows remain visible (P1 frozen-app signal).
+        "AppFrozenError": FailureKind.APP_FROZEN,
     }
     kind = kinds.get(name, FailureKind.UNKNOWN)
     return Failure(
@@ -275,6 +282,17 @@ _KIND_GUIDANCE: Final[dict[FailureKind, str]] = {
         "can be reached without signing in, say how and do that; otherwise "
         "emit finish with status \"failed\" and state plainly that the person "
         "has to sign in before this can continue."
+    ),
+    FailureKind.APP_FROZEN: (
+        "The target application has stopped answering — its windows are still "
+        "visible but its accessibility interface is not responding, the "
+        "spinning-beachball state. Clicking into it again will not unstick "
+        "it, and typing into it may land nowhere. The loop fires its own "
+        "first aid for this (an Escape keypress, then re-asserting the app "
+        "to the front), so do not duplicate either — decide from whether the "
+        "app has started answering again. If the goal cannot proceed without "
+        "this app, emit finish with status \"failed\" and name the frozen "
+        "application plainly so the person knows what to restart."
     ),
     FailureKind.UNKNOWN: (
         "The step failed for a reason the orchestrator could not classify. "
