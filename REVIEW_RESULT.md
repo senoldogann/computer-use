@@ -1,14 +1,15 @@
 # Kapsamlı Proje Code-Review Raporu
 
 > **Durum (4 Eylül 2026, güncel):** Aşağıdaki bulgular yeniden doğrulandı.
-> Ölçülen zemin: `pytest` 698/698, `cargo test` 60 passed + 1 ignored,
+> Ölçülen zemin: `pytest` 701/701, `cargo test` 61 passed + 1 ignored,
 > `ruff`/`pyright`/`clippy -D warnings` temiz, `--eval` 12/12.
 >
 > **Kapatıldı, regresyon testiyle sabitlendi:** CLI-01, SEC-01, SEC-02,
 > SEC-03, NET-01, SYS-01, SYS-02, ve rapora sonradan eklenen AUT-02 (ölen
 > driver'ı geri getiren yoktu → `orchestrator/supervisor.py`; canlı olarak
 > SIGKILL'lenen bir driver geri getirilerek doğrulandı).
-> * SYS-01 — tap karar mantığı saf `handle_tap_event_type` + `TapAction`
+> * P2 (İkon ve Glif Körlüğü) — Rust micro-driver AXHelp/AXRoleDescription fallback zinciri (`driver/src/ax.rs`), model istemi `click_mark` resmi eylemi + başlıksız ikon yönlendirmesi (`prompts.py`), `test_prompts.py` ve `test_set_of_marks.py` regresyon testleriyle kapatıldı.
+* SYS-01 — tap karar mantığı saf `handle_tap_event_type` + `TapAction`
 >   enum'ına ayrıldı (`driver/src/hotkey.rs`): `TapDisabledByTimeout` /
 >   `TapDisabledByUserInput` → `Rearm`, kill-combo `KeyDown` → `Trip`,
 >   diğerleri → `Pass`. `tap_disable_notifications_rearm_instead_of_dying`

@@ -320,3 +320,20 @@ def test_a_batch_resolves_marks_against_the_frame_it_was_decided_from() -> None:
     # runner pins the decision frame for the whole batch.
     assert (from_decision.x, from_decision.y) == (300, 200)
     assert (from_live.x, from_live.y) == (100, 100)
+
+
+def test_click_mark_resolution_on_untitled_icon_elements() -> None:
+    """Untitled icon elements (hamburger ☰, close ✕, trash 🗑) resolve to centre."""
+    summaries = (
+        'Button "(untitled)" at (480, 24) 20x20',
+        'Button "(untitled)" at (120, 24) 16x16',
+    )
+    marks = parse_ax_elements_to_marks(summaries)
+    assert len(marks) == 2
+    resolved_menu = resolve_mark(ClickMark(type="click_mark", mark=1), marks)
+    assert isinstance(resolved_menu, MouseClick)
+    assert (resolved_menu.x, resolved_menu.y) == (480, 24)
+
+    resolved_close = resolve_mark(ClickMark(type="click_mark", mark=2), marks)
+    assert isinstance(resolved_close, MouseClick)
+    assert (resolved_close.x, resolved_close.y) == (120, 24)

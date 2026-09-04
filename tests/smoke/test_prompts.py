@@ -561,3 +561,23 @@ def test_auditor_without_tool_history_asks_for_nothing_new() -> None:
     """No tools, no section: the contract rule stays, the evidence list goes."""
     prompt = completion_prompt(WorkingState(goal="x"), "done", app="Safari")
     assert "External tool results observed in this run:" not in prompt
+
+
+def test_system_prompt_documents_click_mark() -> None:
+    """P2: ACTION_CONTRACT documents click_mark and prefers it over estimation."""
+    from computeruse.orchestrator.prompts import ACTION_CONTRACT
+
+    assert "click_mark" in ACTION_CONTRACT
+    assert '{"type": "click_mark", "mark": int' in ACTION_CONTRACT
+    assert "PREFERRED over coordinate estimation" in ACTION_CONTRACT
+
+
+def test_normalize_action_dict_normalizes_click_mark_aliases() -> None:
+    assert _normalize_action_dict({"type": "mark", "mark": 3}) == {
+        "type": "click_mark",
+        "mark": 3,
+    }
+    assert _normalize_action_dict({"type": "click_element", "mark": 5}) == {
+        "type": "click_mark",
+        "mark": 5,
+    }
