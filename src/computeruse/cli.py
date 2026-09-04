@@ -97,6 +97,7 @@ from computeruse.orchestrator.schemas import (
     action_from_payload,
 )
 from computeruse.orchestrator.supervisor import supervisor_for
+from computeruse.power import wake_lock
 from computeruse.providers.openai import (
     DEFAULT_MODEL,
     ModelCallStats,
@@ -1585,7 +1586,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # later is the point: running any of it on an absent goal is what
         # crashed the first attempt.
         if args.autonomous is not None:
-            return _run_autonomous_session(args, driver_recover=driver_recover)
+            # The night shift must not go blind: hold the display awake for
+            # the whole session, idle waits between runs included. No-op off
+            # macOS; always released, whatever ends the session.
+            with wake_lock():
+                return _run_autonomous_session(args, driver_recover=driver_recover)
 
         resume_exit = _apply_resume(args)
         if resume_exit is not None:
@@ -1652,7 +1657,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # for; recording only successes would make the report's total a
         # comfortable fiction.
         try:
-            result = Agent(config).run()
+            # Same display guarantee as the night shift, scoped to this run:
+            # SIGINT, kill-switch takeover and budget stops all unwind
+            # through __exit__, so the assertion never outlives its run.
+            with wake_lock():
+                result = Agent(config).run()
         except BaseException:
             _record_usage(
                 Path(args.store),
