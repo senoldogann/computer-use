@@ -406,26 +406,33 @@ class Agent:
             outcome: EpisodeOutcome,
             retrospective: str | None,
             mounted_skill_id: str | None,
+            forced_completion: bool,
         ) -> None:
             # A failed run is remembered but never distilled. Both halves
             # matter: a workflow that did not work must not become a skill the
             # next run is handed as a recipe, and a run that fought for twenty
             # steps before hitting a wall is exactly the trace worth keeping
             # (Law 4.1 failure retrospectives).
+            #
+            # A force-accepted finish counts as unverified, not as success:
+            # the auditor rejected every claim and the stalemate guard let it
+            # through to end the run, so neither the skill store, the skill's
+            # win counter, nor semantic memory may learn from this flow.
             nonlocal distilled
+            verified = outcome == "success" and not forced_completion
             # Reinforcement: a mounted skill is a claim about how to do this,
             # and the run just tested it. Recording the verdict is what turns
             # the store from a pile of recipes into one that gets better —
             # a skill that keeps failing is eventually withheld.
             if mounted_skill_id is not None:
                 skills_registry.record_outcome(
-                    mounted_skill_id, succeeded=outcome == "success"
+                    mounted_skill_id, succeeded=verified
                 )
             if not trajectory.steps:
                 # Nothing ran, so there is nothing to remember or distil — the
                 # skill's verdict above is the whole point of this call.
                 return
-            if outcome == "success":
+            if verified:
                 # Distill against known history FIRST, then remember — so the
                 # fresh run is novel, and any future identical run is a
                 # duplicate (Law 3.3 wired through Law 4 memory).
@@ -440,9 +447,13 @@ class Agent:
                     step_descriptions=trajectory.step_descriptions,
                     outcome=outcome,
                     retrospective=retrospective,
+                    # The join key to this run's UsageRecord: without it a
+                    # score can say what happened but never what it cost.
+                    run_id=run_id,
+                    forced_completion=forced_completion,
                 )
             )
-            if outcome == "success":
+            if verified:
                 from computeruse.memory.semantic import extract_facts_from_run
 
                 for fact in extract_facts_from_run(

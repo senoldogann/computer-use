@@ -65,6 +65,10 @@ def episode_from_trace(
     step_descriptions: tuple[str, ...] = (),
     retrospective: str | None = None,
     episode_id: str | None = None,
+    # Optional (not required) so every existing caller keeps compiling: a run
+    # that does not name itself leaves an episode that joins to no usage.
+    run_id: str | None = None,
+    forced_completion: bool = False,
 ) -> Episode:
     """Build a terminal-run Episode from the executed trace (pure factory).
 
@@ -81,6 +85,8 @@ def episode_from_trace(
         step_descriptions=step_descriptions,
         outcome=outcome,
         retrospective=retrospective,
+        run_id=run_id,
+        forced_completion=forced_completion,
         signature=signature_from_trace(
             app, steps, step_descriptions=step_descriptions
         ),

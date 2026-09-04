@@ -221,7 +221,11 @@ def test_the_runner_parks_instead_of_hanging_or_dying() -> None:
         raise ApprovalRequiredError(request=request)
 
     def on_complete(
-        _trajectory: object, outcome: str, retrospective: str | None, _skill: object
+        _trajectory: object,
+        outcome: str,
+        retrospective: str | None,
+        _skill: object,
+        _forced: object,
     ) -> None:
         recorded.append((outcome, retrospective))
 
