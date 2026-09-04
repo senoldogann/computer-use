@@ -116,9 +116,9 @@ Arayüzdeki tüm emojiler kaldırıldı; yerlerine yüksek çözünürlüklü ve
 
 | Bileşen | Çalıştırılan Doğrulama | Durum (4 Eylül 2026, ölçüldü) |
 |---|---|---|
-| **Rust Micro-Driver** | `cargo test` | **60 passed + 1 ignored** |
+| **Rust Micro-Driver** | `cargo test` | **61 passed + 1 ignored** |
 | **Rust Linter** | `cargo clippy --all-targets -- -D warnings` | **0 Uyarı** |
-| **Python Backend** | `pytest tests/` | **698 / 698 Test Başarılı** |
+| **Python Backend** | `pytest tests/` | **701 / 701 Test Başarılı** |
 | **Öz-değerlendirme Bataryası** | `computeruse --eval` | **12 / 12 passed** |
 | **Python Linter** | `ruff check src/ tests/` | **0 Hata / 0 Uyarı** |
 | **Python Tip Denetimi** | `pyright` | **0 Hata / 0 Uyarı** |
@@ -141,3 +141,19 @@ Arayüzdeki tüm emojiler kaldırıldı; yerlerine yüksek çözünürlüklü ve
 
 ---
 *Doküman Güncelleme Tarihi: 4 Eylül 2026*
+
+## 10. 🎯 P2: İkon ve Glif Körlüğünün Çözümü (Set-of-Marks & AX Zenginleştirmesi)
+
+* **Sorun**: Menü, arama, sekme kapatma gibi metinsiz simgelerde modeller koordinat tahminine kaçıyor ve çözünürlük ölçek farkları nedeniyle tıklamaları ıskalayabiliyordu.
+* **Rust Driver Çözümü (`driver/src/ax.rs`)**:
+  - `AXTitle` ve `AXDescription` boş olduğunda `AXHelp` (araç ipucu) ve `AXRoleDescription` nitelikleri okunacak şekilde hiyerarşi genişletildi.
+  - Safari kenar çubuğu ("Show Sidebar"), sekme kapatma ("Close Tab") ve benzeri ikonlar otomatik olarak anlamlı isimlere kavuştu.
+  - `test_ax_help_and_description_fallback` birim testi ile doğrulandı (61 test).
+* **Model İstemi & Normalizasyon (`prompts.py`)**:
+  - `ACTION_CONTRACT` içindeki `SUPPORTED ACTIONS` listesine `click_mark: {"type": "click_mark", "mark": int}` eklendi.
+  - `VISUAL GROUNDING` bölümünde başlıksız ikon butonlarında dahi yeşil kutunun hedef ikonu sarmalaması durumunda doğrudan `[mark]` ile tıklanması kuralı zorunlu kılındı.
+  - LLM modellerinin ürettiği `mark` ve `click_element` biçimleri otomatik olarak `click_mark` formatına normalize edildi.
+* **Testler**:
+  - `test_system_prompt_documents_click_mark` (istem dokümantasyonu doğrulaması)
+  - `test_normalize_action_dict_normalizes_click_mark_aliases` (aksiyon normalizasyonu)
+  - `test_click_mark_resolution_on_untitled_icon_elements` (başlıksız ikonların mark merkezine çözünmesi)

@@ -168,8 +168,12 @@ fn build_tree(
     // Many apps (Chrome's omnibox included) leave AXTitle empty and put the
     // human label in AXDescription; fall back so the element still has a
     // name a provider can reason about ("address bar", "search field").
+    // Icon-only buttons (Safari toolbar, tab close, navigation) often store
+    // their label in AXHelp (tooltips) or AXRoleDescription (P2).
     let title = string_attribute(element, "AXTitle")
         .or_else(|| string_attribute(element, "AXDescription"))
+        .or_else(|| string_attribute(element, "AXHelp"))
+        .or_else(|| string_attribute(element, "AXRoleDescription"))
         .unwrap_or_default();
     // AXValue: the element's current text content (text fields, sliders).
     // Absent on most elements; text inputs report it so the orchestrator can
@@ -794,4 +798,53 @@ fn enable_web_accessibility(app: CFTypeRef) {
 /// May this process read the accessibility tree (consent check)?
 pub fn trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+/// Resolve the element's human title from its attribute candidates in order of
+/// specificity (P2).
+///
+/// Order:
+/// 1. ``AXTitle`` — direct title when present
+/// 2. ``AXDescription`` — Chrome/Electron human label (e.g. omnibox)
+/// 3. ``AXHelp`` — tooltip description (e.g. icon-only buttons in Safari/macOS chrome)
+/// 4. ``AXRoleDescription`` — role-level label when no other text is present
+#[cfg(test)]
+pub(crate) fn resolve_title(
+    title: Option<&str>,
+    description: Option<&str>,
+    help: Option<&str>,
+    role_description: Option<&str>,
+) -> String {
+    title
+        .or(description)
+        .or(help)
+        .or(role_description)
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ax_help_and_description_fallback() {
+        assert_eq!(
+            resolve_title(Some("Direct"), Some("Desc"), Some("Help"), Some("Role")),
+            "Direct"
+        );
+        assert_eq!(
+            resolve_title(None, Some("Desc"), Some("Help"), Some("Role")),
+            "Desc"
+        );
+        assert_eq!(
+            resolve_title(None, None, Some("Close Tab"), Some("Button")),
+            "Close Tab"
+        );
+        assert_eq!(
+            resolve_title(None, None, None, Some("Menu Item")),
+            "Menu Item"
+        );
+        assert_eq!(resolve_title(None, None, None, None), "");
+    }
 }

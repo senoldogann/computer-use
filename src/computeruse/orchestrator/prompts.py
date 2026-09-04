@@ -81,6 +81,7 @@ ACTION_CONTRACT: Final[str] = (
     "\n"
     "2. SUPPORTED ACTIONS:\n"
     '- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2}\n'
+    '- click_mark: {"type": "click_mark", "mark": int} — clicks the exact centre of an element identified by its [mark] index in the AX UI elements list. PREFERRED over coordinate estimation whenever the target element has a mark.\n'
     '- mouse_move: {"type": "mouse_move", "x": int, "y": int, "duration_ms": int (default 180)} — ONLY when hover, tooltip, or drag preparation is explicitly needed\n'
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
@@ -106,6 +107,11 @@ ACTION_CONTRACT: Final[str] = (
     "\n"
     "4. VISUAL GROUNDING & DISPLAY COORDINATES:\n"
     "   - Never reuse a coordinate from an earlier turn. Windows move, pages scroll, layouts adapt.\n"
+    "   - Prefer `click_mark` with the element's [mark] number whenever the target is listed in\n"
+    "     the AX UI elements list. A mark click resolves directly to the element's exact centre.\n"
+    "   - Even when an icon button is untitled or marked `(untitled)` (e.g. ☰ menu, ✕ close, 🔍 search),\n"
+    "     if the emerald bounding box on the screenshot outlines your intended target icon, use\n"
+    "     `click_mark` with its [mark] index — never fall back to coordinate estimation if a mark exists.\n"
     "   - Derive every (x, y) from the CURRENT screenshot or the AX element list.\n"
     "   - Coordinate space: the screenshot is a SCALED-DOWN MAP of the screen (max 512px on its\n"
     "     longest side). Report x,y EXACTLY as they appear in that image. The system converts them\n"
@@ -498,6 +504,8 @@ def _normalize_action_dict(action: dict[str, object]) -> dict[str, object]:
     # Common aliases from LLM models
     if action_type == "click":
         action["type"] = "mouse_click"
+    elif action_type in ("click_mark", "mark", "click_element") and "mark" in action:
+        action["type"] = "click_mark"
     elif action_type == "double_click":
         action["type"] = "mouse_click"
         action["click_count"] = 2
