@@ -120,10 +120,10 @@ class WebSearch(BaseModel):
     """Look something up rather than hunting for it on screen.
 
     A non-physical action: no cursor, no focus, nothing the user has to share
-    the machine with. It exists because the alternative — opening a browser,
-    typing into a search box, reading results off a downscaled screenshot — is
-    a dozen fragile steps to obtain text the agent could simply have been
-    handed.
+    the machine with. It bridges to a connected MCP search tool (Tavily, Exa,
+    Brave) when one exists; otherwise it answers with instructions to use the
+    web browser directly (open Google Chrome, use Cmd+L, search, and read
+    results from the screen).
     """
 
     type: Literal["web_search"]

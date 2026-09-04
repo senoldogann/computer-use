@@ -5,6 +5,6 @@ it can run while the user works and needs none of the verification machinery
 that exists because a synthetic click may land on the wrong window.
 """
 
-from computeruse.tools.web import SearchResult, WebError, fetch_page, search_web
+from computeruse.tools.web import WebError, fetch_page
 
-__all__ = ["SearchResult", "WebError", "fetch_page", "search_web"]
+__all__ = ["WebError", "fetch_page"]
