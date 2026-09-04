@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
-from computeruse.orchestrator.loop import OodaRunner
+from computeruse.orchestrator.loop import OodaRunner, WorkingState
 from computeruse.orchestrator.schemas import AgentTurn, LoadSkill, MouseClick, Wait
 from computeruse.security.killswitch import CursorSample, KillSwitch, MouseShakeMonitor
 from computeruse.skills.schemas import SkillDefinition
@@ -168,3 +168,61 @@ def test_registry_index_is_cached_and_invalidated_on_save(tmp_path: Path, monkey
     registry.save(_definition("numbers.import.def", "sig-2"))
     assert len(registry.search("numbers")) == 2
     assert reads["count"] == 3
+
+
+# --- Volatile tool values: time-varying values never rejected on numerical mismatch ---
+
+
+def test_auditor_accepts_volatile_price_discrepancy_and_rejects_missing_price() -> None:
+    """Live/volatile values (e.g. Bitcoin price) change between tool calls and screen writes.
+
+    The completion auditor verifies format and entity type rather than demanding
+    a verbatim numerical match against an older tool output in history. If the requested
+    type of value is missing entirely, it rejects.
+    """
+    from computeruse.orchestrator.prompts import (
+        COMPLETION_AUDIT_CONTRACT,
+        completion_auditor,
+    )
+
+    assert "Live, time-varying values returned by tools" in COMPLETION_AUDIT_CONTRACT
+    assert "NOT required to match an earlier tool result in context verbatim" in COMPLETION_AUDIT_CONTRACT
+    assert "Numerical inequality alone is NEVER grounds for rejection" in COMPLETION_AUDIT_CONTRACT
+
+    def auditor_model(prompt: str, _image_b64: str | None = None) -> str:
+        # The auditor must see the contract clause and the earlier tool record
+        assert "Live, time-varying values returned by tools" in prompt
+        assert "$80,886.02" in prompt
+        # Following the contract: verify format and entity type (a price in USD),
+        # not numerical equality with the earlier fetch.
+        if "$81,287.00" in prompt:
+            return '{"satisfied": true, "evidence": "the note shows a live Bitcoin price in USD ($81,287.00)"}'
+        return '{"satisfied": false, "evidence": "no price or currency value appears in the note"}'
+
+    audit = completion_auditor(auditor_model, app="Notes")
+
+    # Case 1: Live price mismatch ($80,886.02 in tool output vs $81,287.00 in visible note) -> ACCEPT
+    state_with_price = WorkingState(
+        goal="Look up the current Bitcoin price on the web, then write it into a new note",
+        active_window="Notes",
+        tool_history=(
+            "web_search 'current Bitcoin price' returned: Bitcoin live price is $80,886.02 USD",
+        ),
+        ui_elements=('StaticText "Bitcoin price: $81,287.00 USD" at (200, 150) 250x30',),
+    )
+    verdict_accept = audit(state_with_price, "wrote current Bitcoin price into note")
+    assert verdict_accept.satisfied is True
+    assert "$81,287.00" in verdict_accept.evidence
+
+    # Case 2: Missing price entirely in visible note -> REJECT
+    state_without_price = WorkingState(
+        goal="Look up the current Bitcoin price on the web, then write it into a new note",
+        active_window="Notes",
+        tool_history=(
+            "web_search 'current Bitcoin price' returned: Bitcoin live price is $80,886.02 USD",
+        ),
+        ui_elements=('StaticText "Meeting agenda for tomorrow" at (200, 150) 250x30',),
+    )
+    verdict_reject = audit(state_without_price, "wrote current Bitcoin price into note")
+    assert verdict_reject.satisfied is False
+    assert "no price" in verdict_reject.evidence
