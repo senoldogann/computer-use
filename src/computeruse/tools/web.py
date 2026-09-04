@@ -1,4 +1,4 @@
-"""Web search and page reading, over the standard library only.
+"""Page reading, over the standard library only.
 
 This project carries exactly one runtime dependency, and the reason shows up
 here: an agent that drives a real desktop is already asking a lot of the
@@ -7,38 +7,29 @@ install, pin badly, or pull a transitive surprise onto a user's laptop. The
 OpenAI transport is hand-rolled over ``urllib`` for the same reason, so these
 follow it rather than reaching for ``httpx`` and ``trafilatura``.
 
-Search goes through SearXNG: it is open source, self-hostable, needs no API
-key or account, and aggregates the engines a person would otherwise query one
-at a time. Pointing at a local instance keeps the agent's queries on the user's
-own machine, which is the difference between "my assistant looked something up"
-and "my assistant told a third party what I am working on".
+Web search used to go through a local SearXNG instance. That dependency is
+gone: requiring Docker or a service on 127.0.0.1:8888 turned every lookup
+into a connection failure, and the failure looped against the browser. Search
+now resolves through a connected MCP search tool (Tavily, Exa, Brave) via the
+``web_search`` bridge in the loop, or — when none is configured — through the
+real browser on screen. This module keeps only the page reader (``fetch_page``,
+exposed as ``web_fetch``), which has nothing to do with search.
 """
 
 from __future__ import annotations
 
 import ipaddress
-import json
 import logging
-import os
 import re
 import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
-from typing import Final, cast
+from typing import Final
 
 LOGGER: Final = logging.getLogger(__name__)
 
-#: Where to reach SearXNG. A local instance is the point of the default: the
-#: agent's queries stay on the user's machine.
-SEARXNG_URL_ENV: Final[str] = "COMPUTERUSE_SEARXNG_URL"
-DEFAULT_SEARXNG_URL: Final[str] = "http://127.0.0.1:8888"
-
-#: Bounds. A search feeds a language model, so the useful limit is what fits a
-#: prompt, not what the engine can return.
-MAX_RESULTS: Final[int] = 8
 MAX_PAGE_CHARS: Final[int] = 20_000
 #: Below this many characters, an extract is not a short page — it is a page
 #: whose text never arrived. Measured against real sites: Wikipedia yields
@@ -57,82 +48,10 @@ USER_AGENT: Final[str] = "computeruse/1.0 (+https://github.com/senoldogann/compu
 class WebError(RuntimeError):
     """A web tool could not answer.
 
-    Raised rather than returning an empty result: "the search found nothing"
-    and "the search never ran" lead the agent to opposite next moves, and
-    collapsing them into one empty list hides the difference at exactly the
-    moment it matters.
+    Raised rather than returning an empty result: "the fetch found nothing"
+    and "the fetch never ran" lead the agent to opposite next moves, and
+    collapsing them hides the difference at exactly the moment it matters.
     """
-
-
-@dataclass(frozen=True)
-class SearchResult:
-    """One hit, trimmed to what a model can act on."""
-
-    title: str
-    url: str
-    snippet: str
-
-    def render(self) -> str:
-        """A single compact line, the shape the prompt shows (pure)."""
-        snippet = f" — {self.snippet}" if self.snippet else ""
-        return f"{self.title} <{self.url}>{snippet}"
-
-
-def searxng_url() -> str:
-    """The configured SearXNG base URL, without a trailing slash."""
-    return os.environ.get(SEARXNG_URL_ENV, DEFAULT_SEARXNG_URL).rstrip("/")
-
-
-def search_web(query: str, *, limit: int = MAX_RESULTS) -> tuple[SearchResult, ...]:
-    """Search the web through SearXNG and return ranked hits.
-
-    Raises :class:`WebError` when the instance cannot be reached, with the
-    address it tried — the overwhelmingly common cause is that nothing is
-    running there yet, and a message naming the URL says so far better than a
-    connection-refused traceback.
-    """
-    if not query.strip():
-        raise WebError("empty search query")
-    base = searxng_url()
-    endpoint = f"{base}/search?" + urllib.parse.urlencode(
-        {"q": query, "format": "json", "safesearch": "0"}
-    )
-    try:
-        payload = _get(endpoint)
-    except WebError as exc:
-        raise WebError(
-            f"{exc} (SearXNG at {base}; set {SEARXNG_URL_ENV} to point elsewhere, "
-            "or run one locally — it is open source and needs no API key)"
-        ) from exc
-    try:
-        parsed: object = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise WebError(f"SearXNG at {base} returned a non-JSON body") from exc
-    if not isinstance(parsed, dict):
-        raise WebError(f"SearXNG at {base} returned a non-object body")
-    # json.loads is typed as Any; casting once here keeps every field below
-    # explicitly narrowed rather than letting Any leak through the parser.
-    data = cast("dict[str, object]", parsed)
-    raw_results = data.get("results")
-    if not isinstance(raw_results, list):
-        raise WebError(f"SearXNG at {base} returned no results array")
-    results = cast("list[object]", raw_results)
-    hits: list[SearchResult] = []
-    for entry in results[: max(1, limit)]:
-        if not isinstance(entry, dict):
-            continue
-        item = cast("dict[str, object]", entry)
-        url = str(item.get("url") or "").strip()
-        if not url:
-            continue
-        hits.append(
-            SearchResult(
-                title=str(item.get("title") or url).strip(),
-                url=url,
-                snippet=_collapse(str(item.get("content") or ""))[:300],
-            )
-        )
-    return tuple(hits)
 
 
 def fetch_page(url: str, *, max_chars: int = MAX_PAGE_CHARS) -> str:
@@ -241,9 +160,9 @@ def _is_http_url(url: str) -> bool:
 def _is_fetchable_url(url: str) -> bool:
     """Can fetch_page retrieve this URL (SSRF guard, pure).
 
-    _is_http_url answers scheme only (SearXNG itself lives on loopback);
-    this answers safety: loopback / private / link-local / reserved hosts
-    and cloud metadata are refused for model-supplied page fetches.
+    _is_http_url answers scheme only; this answers safety: loopback /
+    private / link-local / reserved hosts and cloud metadata are refused
+    for model-supplied page fetches.
     """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:

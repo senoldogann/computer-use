@@ -40,9 +40,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
 
-from computeruse.mcp import McpRegistry
+from computeruse.mcp import McpRegistry, McpTool
 from computeruse.orchestrator.budget import BudgetExceededError
 from computeruse.orchestrator.evidence import (
     ActionExpectation,
@@ -96,7 +96,7 @@ from computeruse.security.permissions import (
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
-from computeruse.tools import WebError, fetch_page, search_web
+from computeruse.tools import WebError, fetch_page
 from computeruse.vision.ax import (
     summaries_to_image_space,
     summaries_within,
@@ -735,6 +735,90 @@ def _extend_trail_entry(
     if replaced != trail or any(line.startswith(prefix) for line in trail):
         return replaced
     return (*trail, entry)[-max_entries:]
+
+
+#: Answered when ``web_search`` arrives with no MCP search tool configured.
+#: The local SearXNG service is gone, so there is nothing behind this action
+#: to try — the model must use the real browser instead of retrying.
+NO_MCP_SEARCH_FALLBACK: Final[str] = (
+    "Yerleşik arama servisi (SearXNG) kaldırılmıştır ve kurulu bir MCP arama "
+    "aracı bulunamadı. Lütfen doğrudan ekrandaki Google Chrome veya Safari "
+    "tarayıcısını açarak aramanızı gerçekleştirin."
+)
+
+#: Substrings marking an MCP tool as a web search tool (matched against the
+#: qualified name and the server-written description, case-insensitively).
+_MCP_SEARCH_KEYWORDS: Final[tuple[str, ...]] = ("search", "exa", "tavily", "brave")
+
+#: Candidate argument names carrying the query, in preference order. Search
+#: servers disagree on the spelling (``query`` vs ``q`` vs ``question``), so
+#: the bridge reads the tool's own input schema instead of guessing one name.
+_MCP_SEARCH_QUERY_KEYS: Final[tuple[str, ...]] = (
+    "query",
+    "q",
+    "question",
+    "text",
+    "input",
+    "search_query",
+    "prompt",
+    "keywords",
+    "term",
+)
+
+
+def _is_mcp_search_tool(tool: McpTool) -> bool:
+    """Whether an MCP tool is a web search tool (pure)."""
+    haystack = f"{tool.qualified_name}\n{tool.description}".lower()
+    return any(keyword in haystack for keyword in _MCP_SEARCH_KEYWORDS)
+
+
+def _mcp_search_priority(tool: McpTool) -> int:
+    """Preference among search tools: named engines first, generic last (pure)."""
+    name = tool.qualified_name.lower()
+    if "tavily" in name:
+        return 0
+    if "exa" in name:
+        return 1
+    if "brave" in name:
+        return 2
+    return 3
+
+
+def _mcp_search_candidates(mcp: McpRegistry | None) -> tuple[McpTool, ...]:
+    """Connected MCP search tools, best first (pure given the registry)."""
+    if mcp is None:
+        return ()
+    found = [tool for tool in mcp.tools if _is_mcp_search_tool(tool)]
+    found.sort(key=lambda tool: (_mcp_search_priority(tool), tool.qualified_name))
+    return tuple(found)
+
+
+def _search_arguments_for(tool: McpTool, query: str) -> dict[str, object]:
+    """Build the arguments mapping ``query`` onto the tool's schema (pure).
+
+    Reads the tool's own ``input_schema`` so a server spelling the field
+    ``q`` or ``question`` still receives the query under the name it
+    declared. Falls back to the first required field, then the first listed
+    property, then a bare ``query`` the server will reject explicitly.
+    """
+    schema = tool.input_schema
+    properties = schema.get("properties")
+    fields = (
+        cast("dict[str, object]", properties) if isinstance(properties, dict) else {}
+    )
+    lowered = {str(name).lower(): str(name) for name in fields}
+    for key in _MCP_SEARCH_QUERY_KEYS:
+        if key in lowered:
+            return {lowered[key]: query}
+    raw_required = schema.get("required")
+    if isinstance(raw_required, list):
+        for entry in cast("list[object]", raw_required):
+            name = str(entry)
+            if name in fields:
+                return {name: query}
+    for name in fields:
+        return {str(name): query}
+    return {"query": query}
 
 
 def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
@@ -2722,52 +2806,68 @@ class OodaRunner:
         """Run a non-physical tool and return what the next turn should read.
 
         Failures come back as text rather than exceptions. A search that could
-        not reach its instance is information the model can act on — try a
-        different query, fall back to the browser, say it cannot look this up —
-        and routing it through the recovery ladder instead would spend the
+        not answer is information the model can act on — try a different
+        query, fall back to the browser, say it cannot look this up — and
+        routing it through the recovery ladder instead would spend the
         escalation budget meant for actions that fight the screen.
+
+        ``web_search`` is a smart bridge, not a service: with a connected MCP
+        search tool it forwards the query there; without one it answers with
+        the browser fallback directly, so the model never loops against a
+        missing local service.
         """
         try:
             if isinstance(action, WebSearch):
-                mcp_search_tools: list[str] = []
-                if self.mcp is not None:
-                    for tool in self.mcp.tools:
-                        name_lower = tool.qualified_name.lower()
-                        desc_lower = tool.description.lower()
-                        if any(k in name_lower or k in desc_lower for k in ("search", "exa", "tavily", "brave")):
-                            mcp_search_tools.append(tool.qualified_name)
+                candidates = _mcp_search_candidates(self.mcp)
+                names = ", ".join(tool.qualified_name for tool in candidates)
 
                 if self._consecutive_search_misses >= 2:
-                    if mcp_search_tools:
+                    if names:
                         return (
                             f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
-                            f"Aramayı web_search ile tekrarlayamazsınız! Lütfen kurulu MCP arama araçlarını ({', '.join(mcp_search_tools)}) "
+                            f"Aramayı web_search ile tekrarlayamazsınız! Kurulu MCP arama araçlarını ({names}) "
                             f"call_tool ile kullanın veya doğrudan ekrandaki Google Chrome tarayıcısına geçip arama çubuğunu kullanın."
                         )
                     return (
                         f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
-                        f"Aramayı web_search ile tekrarlayamazsınız! Lütfen doğrudan ekrandaki Google Chrome tarayıcısına geçip arama çubuğunu kullanın."
+                        f"Aramayı web_search ile tekrarlayamazsınız! {NO_MCP_SEARCH_FALLBACK}"
                     )
 
-                hits = search_web(action.query)
-                if not hits:
+                if not action.query.strip():
                     self._consecutive_search_misses += 1
-                    if mcp_search_tools:
-                        hint = (
-                            f"web_search sonuç döndüremedi ({self._consecutive_search_misses}. kez). Aramayı web_search ile tekrarlamayın! "
-                            f"Eğer kurulu başka bir web arama MCP'si varsa ({', '.join(mcp_search_tools)}) call_tool ile onu deneyin; "
-                            f"yoksa doğrudan ekrandaki Google Chrome tarayıcısına geçin ve arama çubuğunu kullanın."
-                        )
-                    else:
-                        hint = (
-                            f"web_search sonuç döndüremedi ({self._consecutive_search_misses}. kez). Aramayı web_search ile tekrarlamayın! "
-                            f"Doğrudan ekrandaki Google Chrome tarayıcısına geçin ve arama çubuğunu kullanarak aramayı fiziksel olarak gerçekleştirin."
-                        )
-                    return f"web_search {action.query!r}: no results. {hint}"
+                    return "web_search needs a non-empty query. Aramayı web_search ile tekrarlamayın; boş sorguyu düzeltin veya tarayıcıyı kullanın."
 
-                self._consecutive_search_misses = 0
-                lines = "\n".join(f"- {hit.render()}" for hit in hits)
-                return f"web_search {action.query!r} returned:\n{lines}"
+                if not candidates:
+                    self._consecutive_search_misses += 1
+                    return (
+                        f"web_search {action.query!r}: {NO_MCP_SEARCH_FALLBACK} "
+                        "Aramayı web_search ile tekrarlamayın; doğrudan ekrandaki Google Chrome veya Safari "
+                        "tarayıcısını açın (Cmd+L, aramayı yazın, sonuçları ekrandan okuyun)."
+                    )
+
+                failures: list[str] = []
+                for tool in candidates:
+                    arguments = _search_arguments_for(tool, action.query)
+                    try:
+                        outcome = self.mcp.call(tool.qualified_name, arguments) if self.mcp is not None else None
+                    except Exception as exc:  # noqa: BLE001 - one broken server must not stop the next tool
+                        failures.append(f"{tool.qualified_name}: {exc}")
+                        continue
+                    if outcome is None:
+                        failures.append(f"{tool.qualified_name}: MCP registry unavailable")
+                        continue
+                    if not outcome.failed:
+                        self._consecutive_search_misses = 0
+                        LOGGER.info("ooda web_search bridged to MCP tool %r", tool.qualified_name)
+                        return f"web_search {action.query!r} via {tool.qualified_name} returned:\n{outcome.text}"
+                    failures.append(f"{tool.qualified_name}: {outcome.text}")
+                self._consecutive_search_misses += 1
+                tried = "; ".join(failures) if failures else "no MCP search tool answered"
+                return (
+                    f"web_search {action.query!r} failed through MCP ({tried}). "
+                    f"Aramayı web_search ile tekrarlamayın! Doğrudan ekrandaki Google Chrome tarayıcısına geçip "
+                    f"arama çubuğunu kullanarak aramayı fiziksel olarak gerçekleştirin."
+                )
             if isinstance(action, WebFetch):
                 text = fetch_page(action.url)
                 return f"web_fetch {action.url}:\n{text}"
@@ -2791,22 +2891,17 @@ class OodaRunner:
         except WebError as exc:
             LOGGER.warning("ooda tool %s failed: %s", action.type, exc)
             self._consecutive_search_misses += 1
-            mcp_search_tools = []
-            if self.mcp is not None:
-                for tool in self.mcp.tools:
-                    name_lower = tool.qualified_name.lower()
-                    desc_lower = tool.description.lower()
-                    if any(k in name_lower or k in desc_lower for k in ("search", "exa", "tavily", "brave")):
-                        mcp_search_tools.append(tool.qualified_name)
-            if mcp_search_tools:
+            candidates = _mcp_search_candidates(self.mcp)
+            names = ", ".join(tool.qualified_name for tool in candidates)
+            if names:
                 fallback_advice = (
-                    f"web_search servisi hata verdi ({exc}). Aramayı web_search ile tekrarlamayın! "
-                    f"Kurulu MCP arama araçlarını ({', '.join(mcp_search_tools)}) call_tool ile deneyin "
+                    f"{action.type} failed ({exc}). Aramayı web_search ile tekrarlamayın! "
+                    f"Kurulu MCP arama araçlarını ({names}) call_tool ile deneyin "
                     f"veya Google Chrome tarayıcısını açıp aramayı doğrudan tarayıcı üzerinden yapın."
                 )
             else:
                 fallback_advice = (
-                    f"web_search servisi hata verdi ({exc}). Aramayı web_search ile tekrarlamayın! "
+                    f"{action.type} failed ({exc}). Aramayı web_search ile tekrarlamayın! "
                     f"Doğrudan Google Chrome tarayıcısına geçip aramayı tarayıcı üzerinden yapın."
                 )
             return f"{action.type} failed: {fallback_advice}"

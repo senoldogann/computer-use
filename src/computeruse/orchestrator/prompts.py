@@ -85,7 +85,7 @@ ACTION_CONTRACT: Final[str] = (
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
     '- type_text: {"type": "type_text", "text": str, "wpm": int (default 40)}\n'
-    '- web_search: {"type": "web_search", "query": str} — search the web. Costs no cursor, no focus, no browser.\n'
+    '- web_search: {"type": "web_search", "query": str} — search the web through the connected MCP search tool when one exists; otherwise it answers with browser instructions.\n'
     '- web_fetch: {"type": "web_fetch", "url": str} — read a page\'s text. Server-rendered pages only.\n'
     '- clipboard_paste: {"type": "clipboard_paste", "text": str} — preferred for URLs, search queries, and any long text (Cmd+V)\n'
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
@@ -139,10 +139,9 @@ ACTION_CONTRACT: Final[str] = (
     "   - Headers, avatars and account menus live at the TOP: scroll up before hunting downward.\n"
     "\n"
     "   WHEN TO LOOK SOMETHING UP INSTEAD OF LOOKING AT IT:\n"
+    "   - Web search: If an MCP search tool (Tavily, Exa, Brave) is available, use it via `call_tool` or `web_search`. Otherwise, use the web browser (open Google Chrome, use Cmd+L, search, and click/read results directly from the screen).\n"
     "   - Use web_search for facts, documentation, version numbers, URLs — anything whose answer\n"
-    "     lives on the internet rather than on this machine. It is one step and costs no screen\n"
-    "     time; opening a browser, clicking a search box, typing, waiting, and reading results off\n"
-    "     a downscaled screenshot is a dozen fragile steps for the same answer.\n"
+    "     lives on the internet rather than on this machine.\n"
     "   - Use web_fetch when you have a URL and want what the page SAYS. If it reports the page is\n"
     "     built by JavaScript, stop fetching it: open it on screen and read it with your eyes.\n"
     "     That is what the browser is for, and it is not a failure to fall back to it.\n"
