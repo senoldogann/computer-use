@@ -17,10 +17,15 @@ from pathlib import Path
 
 import pytest
 
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.loop import (
+    PLAYBOOK_MOUNT_MIN_SCORE,
+    OodaRunner,
+    WorkingState,
+)
 from computeruse.orchestrator.prompts import state_context
 from computeruse.orchestrator.untrusted import OBSERVED_DATA_CLOSE, OBSERVED_DATA_OPEN
 from computeruse.skills.playbook import (
+    PlaybookRegistry,
     PlaybookSummary,
     best_playbook,
     discover_playbooks,
@@ -321,3 +326,45 @@ def test_loop_retrieves_single_highest_playbook() -> None:
     # Calling _retrieve again should not re-scan
     runner._retrieve(retrieved_state)
     assert len(scanned_queries) == 1
+
+
+def test_playbook_mount_threshold_filters_weak_coincidence_and_accepts_domain_match(
+    tmp_path: Path,
+) -> None:
+    """Score 1-2 coincidences are filtered out; domain matches (>= 3) mount."""
+    pb_dir = tmp_path / "free-tool-strategy"
+    pb_dir.mkdir()
+    (pb_dir / "SKILL.md").write_text(
+        """---
+name: free-tool-strategy
+description: Launch free developer tools on the web to attract users.
+tags: [growth]
+---
+# Guide
+""",
+        encoding="utf-8",
+    )
+
+    registry = PlaybookRegistry(roots=(tmp_path,))
+
+    runner = OodaRunner(
+        provider=lambda _: None,  # type: ignore[arg-type]
+        execute_physical=lambda _: None,
+        playbook_scan=lambda q: registry.best(q, min_score=PLAYBOOK_MOUNT_MIN_SCORE),
+    )
+
+    # 1. Weak single-token coincidence: "tool" matches name (+2), total score 2 < 3.
+    # Typical desktop task (e.g. calculator tool) must NOT mount an unrelated web strategy playbook.
+    weak_state = WorkingState(goal="open calculator tool to add numbers")
+    retrieved_weak = runner._retrieve(weak_state)
+    assert retrieved_weak.playbook is None
+
+    # Reset runner scan state for next run
+    runner._playbook_scanned = False
+    runner._playbook = None
+
+    # 2. Genuine domain match: matches multiple tokens ("free", "developer", "tools", "strategy") -> score >= 3.
+    strong_state = WorkingState(goal="free developer tools launch strategy")
+    retrieved_strong = runner._retrieve(strong_state)
+    assert retrieved_strong.playbook is not None
+    assert retrieved_strong.playbook.name == "free-tool-strategy" 

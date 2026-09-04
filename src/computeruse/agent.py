@@ -49,6 +49,7 @@ from computeruse.orchestrator.client import (
 )
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import (
+    PLAYBOOK_MOUNT_MIN_SCORE,
     SETTLE_INTERVAL_S,
     SETTLE_MAX_POLLS,
     AxProbeResult,
@@ -961,7 +962,7 @@ class Agent:
                 # full definition.
                 skill_scan=lambda q: tuple(skills_registry.search(q)),
                 skill_loader=skills_registry.load,
-                playbook_scan=playbook_registry.best,
+                playbook_scan=lambda q: playbook_registry.best(q, min_score=PLAYBOOK_MOUNT_MIN_SCORE),
                 app=app,
                 # The focus guard only makes sense for a run pinned to a named
                 # app: when the app was merely discovered from whatever was

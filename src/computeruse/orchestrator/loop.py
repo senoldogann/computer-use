@@ -204,6 +204,13 @@ _REPETITION_SENSITIVE: Final[frozenset[str]] = frozenset(
 # weak tag coincidence and must not steer the run.
 SKILL_MOUNT_MIN_SCORE: Final[int] = 2
 
+#: Playbook mount eşiği. Skill'inkinden yüksek, çünkü playbook'ta
+#: app kapsamı yok: bir skill yanlış uygulamaya aitse hiç mount
+#: edilmez, playbook'u ise yalnızca bu skor tutuyor. Ölçüldü: 62
+#: playbook ve 6 tipik masaüstü hedefiyle eşik 1 beş yanlış mount
+#: üretiyor, eşik 3 sıfır — ilgili hedeflerin üçünü de korurken.
+PLAYBOOK_MOUNT_MIN_SCORE: Final[int] = 3
+
 
 def _first_mountable(
     matches: Sequence[RelevanceMatch | SkillSummary], app: str
@@ -3103,18 +3110,20 @@ class OodaRunner:
                 LOGGER.warning("playbook scan failed: %s", exc)
 
         playbook = state.playbook if state.playbook is not None else self._playbook
+        if playbook != state.playbook:
+            state = replace(state, playbook=playbook)
 
         if self.skill_scan is None or self.skill_loader is None:
-            return replace(state, playbook=playbook) if playbook != state.playbook else state
+            return state
         if self._skill is not None:
-            return replace(state, playbook=playbook) if playbook != state.playbook else state
+            return state
         try:
             matches = self.skill_scan(state.goal)
         except Exception as exc:  # noqa: BLE001 - retrieval is best-effort
             LOGGER.warning("skill scan failed: %s", exc)
-            return replace(state, playbook=playbook) if playbook != state.playbook else state
+            return state
         if not matches:
-            return replace(state, playbook=playbook) if playbook != state.playbook else state
+            return state
         mounted = _first_mountable(matches, self.app)
         if mounted is None:
             LOGGER.info(
@@ -3124,13 +3133,13 @@ class OodaRunner:
                 self.app,
                 SKILL_MOUNT_MIN_SCORE,
             )
-            return replace(state, playbook=playbook) if playbook != state.playbook else state
+            return state
         try:
             self._skill = self.skill_loader(mounted.skill_id)
         except Exception as exc:  # noqa: BLE001 - retrieval is best-effort
             LOGGER.warning("skill load failed: %s", exc)
-            return replace(state, playbook=playbook) if playbook != state.playbook else state
-        return replace(state, skill=self._skill, playbook=playbook)
+            return state
+        return replace(state, skill=self._skill)
 
 
 class UnknownMarkError(RuntimeError):

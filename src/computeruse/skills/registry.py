@@ -138,8 +138,6 @@ def content_tokens(text: str) -> frozenset[str]:
     )
 
 
-_content_tokens = content_tokens
-
 
 def search(
     summaries: Iterable[SkillSummary],
@@ -174,7 +172,7 @@ def search(
     matches: list[RelevanceMatch] = []
     for summary in summaries:
         score = 0
-        description_tokens = _content_tokens(summary.description)
+        description_tokens = content_tokens(summary.description)
         for token in tokens:
             if token in (summary.app.lower(),):
                 score += 2
