@@ -524,3 +524,38 @@ def test_a_statement_inside_a_payload_is_still_caught(
         action=CallTool(type="call_tool", tool="db", arguments=payload),
     )
     assert classify_risk(turn) is Risk.DESTRUCTIVE
+
+
+def test_calculator_clear_is_not_destructive() -> None:
+    """The AC key is display state, not destruction.
+
+    Field-measured: the "sil" inside Turkish "Tümünü Sil" classified the
+    Calculator's All-Clear key as DESTRUCTIVE and parked an unattended run on
+    its own arithmetic. ROUTINE still asks in guarded mode; full autonomy runs.
+    """
+    for label in ("Tümünü Sil", "All Clear", "Clear", "Temizle"):
+        turn = AgentTurn(
+            thought="t",
+            sub_goal="clear the display",
+            action=MouseClick(type="mouse_click", x=10, y=10),
+        )
+        assert classify_risk(turn, target_label=label) is Risk.ROUTINE, label
+        assert (
+            decide_permission(AutonomyLevel.FULL, classify_risk(turn, target_label=label))
+            is PermissionDecision.ALLOW
+        ), label
+    # A genuinely destructive control keeps its classification.
+    destructive = AgentTurn(
+        thought="t",
+        sub_goal="continue",
+        action=MouseClick(type="mouse_click", x=10, y=10),
+    )
+    assert classify_risk(destructive, target_label="Hesabı Sil") is Risk.DESTRUCTIVE
+    # And the exemption never leaks into tool calls: those are classified by
+    # their payload, never by a button title travelling alongside.
+    tool = AgentTurn(
+        thought="t",
+        sub_goal="delete the file",
+        action=CallTool(type="call_tool", tool="files.delete", arguments={}),
+    )
+    assert classify_risk(tool, target_label="Tümünü Sil") is Risk.DESTRUCTIVE

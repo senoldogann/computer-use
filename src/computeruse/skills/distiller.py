@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from computeruse.orchestrator.schemas import Action
+from computeruse.orchestrator.schemas import Action, ActivateApp
 from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition
 from computeruse.slug import ascii_slug
 
@@ -48,6 +48,26 @@ _MIN_STEPS: int = 2
 APP_SLUG_MAX_CHARS: Final[int] = 60
 
 
+#: Dynamic fragments abstracted out of signatures: digit runs (amounts,
+#: counts, versions) and URLs. A calculator flow typing "47x23" and the same
+#: flow typing "12x8" are one parametric workflow, not two skills — hashing
+#: the literals would fork every operand into its own copy.
+_DYNAMIC_NUMBER: Final = re.compile(r"\d+(?:[.,]\d+)*")
+_DYNAMIC_URL: Final = re.compile(r"https?://\S+", flags=re.IGNORECASE)
+
+
+def _abstract_dynamic(text: str) -> str:
+    """Template the dynamic fragments of a signature input (pure).
+
+    Numbers and URLs are operands, not workflow meaning; case is typing
+    accident, not intent. Words survive untouched — "click Save" and "click
+    Cancel" are different flows, while "compute 47x23" and "compute 12x8"
+    are one flow with different operands.
+    """
+    templated = _DYNAMIC_URL.sub("<url>", text.lower())
+    return _DYNAMIC_NUMBER.sub("<num>", templated)
+
+
 def signature_of(trajectory: Trajectory) -> str:
     """A stable content-hash describing the workflow's action sequence.
 
@@ -58,7 +78,10 @@ def signature_of(trajectory: Trajectory) -> str:
     different click sequences in the same app distinct.
 
     Coordinates are deliberately *excluded*: pixel positions drift between
-    runs of the same workflow, so including them would defeat de-dup.
+    runs of the same workflow, so including them would defeat de-dup. Dynamic
+    values are *abstracted* for the same reason at the next level up: operand
+    text ("47x23", a pasted URL) varies between runs of one parametric
+    workflow, so it is templated before hashing rather than hashed literally.
     """
     flow: list[dict[str, str]] = []
     for i, step in enumerate(trajectory.steps):
@@ -67,7 +90,7 @@ def signature_of(trajectory: Trajectory) -> str:
             {
                 "type": step.type,
                 "params": _semantic_params(step),
-                "intent": desc.strip().lower(),
+                "intent": _abstract_dynamic(desc.strip()),
             }
         )
     payload = json.dumps(
@@ -114,6 +137,38 @@ def distill(trajectory: Trajectory, known_signatures: set[str]) -> DistillResult
 #: few enough that one verbose run cannot dominate the search index.
 TAG_LIMIT: Final[int] = 12
 
+
+def visited_apps(trajectory: Trajectory) -> tuple[str, ...]:
+    """Every application the run touched, primary first (pure).
+
+    A multi-app flow belongs to all of its apps, not just the one it started
+    in: without this a Calculator-then-Notes chain is retrievable only as
+    "Calculator", and a later run searching inside Notes never sees it.
+    """
+    apps: list[str] = []
+    for name in (trajectory.app,) + tuple(
+        step.app for step in trajectory.steps if isinstance(step, ActivateApp)
+    ):
+        if name not in apps:
+            apps.append(name)
+    return tuple(apps)
+
+
+def _app_tag_words(app: str) -> tuple[str, ...]:
+    """An app name as tag tokens (pure).
+
+    Same token rules as content words, so "Google Chrome" becomes the
+    retrievable "google" and "chrome" the registry's substring tag match
+    already understands.
+    """
+    cleaned = re.sub(r"[^\w]+", " ", app.lower(), flags=re.UNICODE)
+    return tuple(
+        token
+        for token in cleaned.split()
+        if len(token) >= 3 and token not in UNINFORMATIVE_WORDS
+    )
+
+
 def derive_tags(trajectory: Trajectory) -> tuple[str, ...]:
     """Search keywords for a skill, taken from what the run actually did (pure).
 
@@ -123,18 +178,29 @@ def derive_tags(trajectory: Trajectory) -> tuple[str, ...]:
     is only the goal as *asked*; the sub-goals record what the agent actually
     had to do to satisfy it, which is what a later run is really searching for.
 
-    Deterministic and cheap: content words from the sub-goals, minus words
-    common to every workflow, in first-seen order so two runs of the same flow
-    produce the same tags and de-duplication still works.
+    The visited applications lead: identity before content, so a flow spanning
+    Calculator and Notes answers to both names. Deterministic and cheap, in
+    first-seen order so two runs of the same flow produce the same tags and
+    de-duplication still works.
     """
+
+    def take(tags: list[str], token: str) -> bool:
+        if token in tags:
+            return False
+        tags.append(token)
+        return len(tags) >= TAG_LIMIT
+
     tags: list[str] = []
+    for app in visited_apps(trajectory):
+        for token in _app_tag_words(app):
+            if take(tags, token):
+                return tuple(tags)
     for description in trajectory.step_descriptions:
         cleaned = re.sub(r"[^\w]+", " ", description.lower(), flags=re.UNICODE)
         for token in cleaned.split():
-            if len(token) < 3 or token in UNINFORMATIVE_WORDS or token in tags:
+            if len(token) < 3 or token in UNINFORMATIVE_WORDS:
                 continue
-            tags.append(token)
-            if len(tags) >= TAG_LIMIT:
+            if take(tags, token):
                 return tuple(tags)
     return tuple(tags)
 
@@ -165,12 +231,19 @@ def _semantic_params(action: Action) -> str:
     Coordinates are dropped; everything else that defines the *meaning* of the
     step is kept, sorted for determinism. This is what makes the signature
     distinguish real workflow differences (F1) while staying insensitive to
-    pixel drift between runs.
+    pixel drift between runs. Free-text values are abstracted through
+    :func:`_abstract_dynamic` first: the operands vary, the workflow does not.
     """
     data = action.model_dump(exclude_none=True)
     data.pop("type", None)
     kept = {k: data[k] for k in _SEMANTIC_KEYS if k in data and k not in _COORDINATE_KEYS}
-    return ",".join(f"{k}={kept[k]}" for k in sorted(kept))
+    rendered: list[str] = []
+    for key in sorted(kept):
+        value = kept[key]
+        if isinstance(value, str):
+            value = _abstract_dynamic(value)
+        rendered.append(f"{key}={value}")
+    return ",".join(rendered)
 
 
 def _compact_params(action: Action) -> str:

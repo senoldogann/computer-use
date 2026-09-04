@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from computeruse.orchestrator.schemas import (
+    ActivateApp,
     LoadSkill,
     MouseClick,
     PressHotkey,
@@ -82,6 +83,56 @@ def test_distill_signature_ignores_pacing_fields() -> None:
     sig_slow = signature_of(Trajectory(app="Chrome", description="x", steps=slow))
     sig_fast = signature_of(Trajectory(app="Chrome", description="x", steps=fast))
     assert sig_slow == sig_fast
+
+
+def test_distill_signature_abstracts_dynamic_operands() -> None:
+    """Law 3.3: "compute 47x23" and "compute 12x8" are one parametric workflow.
+
+    Hashing operand literals forks every number into its own skill copy; the
+    stored skill body keeps the actuals (they are the worked example), but
+    the de-dup key must not.
+    """
+    def calc(text: str) -> Trajectory:
+        steps = (
+            TypeText(type="type_text", text=text),
+            PressHotkey(type="press_hotkey", key="return", modifiers=[]),
+        )
+        return Trajectory(
+            app="Calculator",
+            description="multiply",
+            steps=steps,
+            step_descriptions=(f"compute {text}", "submit with Return"),
+        )
+
+    assert signature_of(calc("47x23")) == signature_of(calc("12x8"))
+    # Words still distinguish: different verbs are different workflows.
+    assert signature_of(calc("47x23")) != signature_of(calc("hello"))
+    # ...and the recorded body keeps the literal operands, not the template.
+    result = distill(calc("47x23"), known_signatures=set())
+    assert result.kind == "skill" and result.definition is not None
+    assert "47x23" in " ".join(result.definition.steps)
+
+
+def test_distilled_tags_name_every_visited_application() -> None:
+    """A Calculator-then-Notes chain must answer to both names.
+
+    The run's primary app is only where it started; retrieval by the second
+    app's name is how a later Notes search finds the chain.
+    """
+    steps = (
+        ActivateApp(type="activate_app", app="Notes"),
+        TypeText(type="type_text", text="memo"),
+    )
+    traj = Trajectory(
+        app="Calculator",
+        description="compute and note",
+        steps=steps,
+        step_descriptions=("open Notes", "write the result down"),
+    )
+    result = distill(traj, known_signatures=set())
+    assert result.kind == "skill" and result.definition is not None
+    assert "calculator" in result.definition.tags
+    assert "notes" in result.definition.tags
 
 
 def test_distill_deduplicates_identical_flow() -> None:

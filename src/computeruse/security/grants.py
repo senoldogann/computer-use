@@ -58,6 +58,7 @@ from computeruse.security.autonomy import (
 )
 from computeruse.security.permissions import PermissionDecision
 from computeruse.slug import ascii_slug
+from computeruse.vision.apps import APP_ALIASES
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -222,6 +223,22 @@ def action_verbs(action: Action, *, sub_goal: str, target_label: str | None) -> 
     return frozenset(found)
 
 
+def _canonical_app(name: str) -> str:
+    """The LaunchServices name behind a locale's spelling (pure).
+
+    A grant written as "Hesap Makinesi" and a frontmost app reported as
+    "Calculator" are one scope: both resolve through :data:`APP_ALIASES` to
+    the canonical name before comparing. Unknown names pass through
+    untouched, preserving the old case-insensitive comparison for apps the
+    alias table never heard of.
+    """
+    lowered = name.strip().casefold()
+    for canonical, aliases in APP_ALIASES.items():
+        if lowered == canonical.casefold() or lowered in aliases:
+            return canonical
+    return name.strip()
+
+
 def scope_matches(grant: CapabilityGrant, *, app: str, target_label: str | None) -> bool:
     """Does this grant's scope cover where the action is happening (pure)?
 
@@ -230,7 +247,7 @@ def scope_matches(grant: CapabilityGrant, *, app: str, target_label: str | None)
     with *no* readable target do not match: a grant that named specific buttons
     must not fire on a click whose button nobody could identify.
     """
-    if grant.app != ANY and grant.app.casefold() != app.casefold():
+    if grant.app != ANY and _canonical_app(grant.app).casefold() != _canonical_app(app).casefold():
         return False
     if grant.target_pattern == ANY:
         return True

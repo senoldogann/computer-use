@@ -38,6 +38,7 @@ through identical scaffolding.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal, cast
@@ -161,6 +162,13 @@ _INTERNAL_ACTIONS: Final[frozenset[str]] = frozenset({"wait", "load_skill", "fin
 # terminates even against a degenerate model.
 REPEAT_WARN_AFTER: Final[int] = 2
 REPEAT_ABORT_AFTER: Final[int] = 3
+
+# Tool-tier stuck budget (Law 2.2): consecutive calls to the same tool asking
+# nearly the same question. Deliberately roomier than the physical tier — a
+# tool costs no cursor and legitimate research re-asks with refinements, so
+# the hint lands on the 3rd repeat and the refusal on the 5th.
+TOOL_REPEAT_WARN_AFTER: Final[int] = 3
+TOOL_REPEAT_ABORT_AFTER: Final[int] = 5
 
 # Post-action settle budget. The host needs time to render before the
 # after-observation is meaningful: capturing immediately reads a half-drawn
@@ -313,6 +321,13 @@ class WorkingState:
     #: answer to the question the model just asked, and carrying it further
     #: would let a stale page argue with what is now on screen.
     tool_result: str | None = None
+    #: Every non-physical tool answer this run, oldest first, each truncated.
+    #: Unlike ``tool_result`` this survives the turn: the completion auditor
+    #: needs the tool output a finished goal was built on, long after the
+    #: screen that consumed it has moved on. Never shown to the actor — the
+    #: actor reasons over the current screen plus the one-turn answer, and a
+    #: growing transcript would crowd both out.
+    tool_history: tuple[str, ...] = ()
     # Hierarchical strategic plan (Phase 3): the decomposed sub-goal roadmap
     # the provider sees every turn. None when planning is disabled or the
     # goal needs no decomposition. Typed, never ``object`` (Law 6.2).
@@ -506,6 +521,46 @@ def mark_still_current(
     return False
 
 
+#: Splitter for tool-argument word sets (pure).
+_TOOL_WORD_SPLIT: Final = re.compile(r"[^\w]+", flags=re.UNICODE)
+
+#: Word-overlap floor for two argument values to read as the same question.
+#: "current BTC" and "BTC current" share every word in a different order —
+#: the same question, and counting them as different lets a stuck model
+#: re-ask forever by shuffling words.
+_TOOL_ARG_SIMILARITY: Final[float] = 0.5
+
+
+def _tool_arg_words(value: str) -> frozenset[str]:
+    """Lowercased word set of one argument value (pure)."""
+    return frozenset(_TOOL_WORD_SPLIT.sub(" ", value.lower()).split())
+
+
+def _args_similar(left: dict[str, object], right: dict[str, object]) -> bool:
+    """Same keys with equal-or-word-similar values (pure).
+
+    Exact equality is the common case; the word-overlap rule is the backstop
+    for the shuffle. Non-string values only ever match exactly — a changed
+    page number or result limit is a different question, not a rephrasing.
+    """
+    if set(left) != set(right):
+        return False
+    for key, left_value in left.items():
+        right_value = right[key]
+        if left_value == right_value:
+            continue
+        if not isinstance(left_value, str) or not isinstance(right_value, str):
+            return False
+        left_words = _tool_arg_words(left_value)
+        right_words = _tool_arg_words(right_value)
+        if not left_words or not right_words:
+            return False
+        shared = len(left_words & right_words) / len(left_words | right_words)
+        if shared < _TOOL_ARG_SIMILARITY:
+            return False
+    return True
+
+
 def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REPEAT_TOLERANCE_PX) -> bool:
     """True when two actions are the *same intent* within a coordinate tolerance.
 
@@ -515,8 +570,9 @@ def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REP
     identical-intent clicks that never tripped the guard). Pointer actions
     are equivalent when their type and non-coordinate parameters match and
     every coordinate is within ``tolerance`` screen points — one UI row, so
-    two clicks that close are the same target. Non-pointer actions keep the
-    exact payload comparison (pure).
+    two clicks that close are the same target. Tool calls are equivalent when
+    they name the same tool with the same (or word-similar) arguments.
+    Remaining non-pointer actions keep the exact payload comparison (pure).
     """
     if left.type != right.type:
         return False
@@ -541,6 +597,8 @@ def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REP
             and abs(left.end_y - right.end_y) <= tolerance
             and left.duration_ms == right.duration_ms
         )
+    if isinstance(left, CallTool) and isinstance(right, CallTool):
+        return left.tool == right.tool and _args_similar(left.arguments, right.arguments)
     return same_physical_action(left, right)
 
 
@@ -568,6 +626,15 @@ def repetition_diagnostic(action: Action, repeats: int) -> str:
             "real target, (b) navigate via the URL bar instead of clicking, "
             "(c) press Escape to dismiss any overlay, or (d) emit finish if "
             "the goal is already complete."
+        )
+    if isinstance(action, CallTool):
+        return (
+            base_hint
+            + "The same tool with nearly the same arguments cannot produce a "
+            "different answer. Try: (a) arguments that ask a genuinely "
+            "different question, (b) a different tool, (c) the browser for "
+            "what tools cannot reach, or (d) emit finish if the goal is "
+            "already complete."
         )
     return (
         base_hint
@@ -633,6 +700,14 @@ TRAIL_MAX_ENTRIES: Final[int] = 6
 #: Characters of visible text kept per window. A count, a title or a status
 #: line fits comfortably; a whole article does not, and should not.
 TRAIL_MAX_CHARS: Final[int] = 600
+#: How many tool answers the run transcript keeps for the auditor. Tool output
+#: is denser than window chrome — a search answer or a page extract carries
+#: its verdict in the first screenful — so fewer, longer entries than the
+#: window trail.
+TOOL_HISTORY_MAX_ENTRIES: Final[int] = 6
+#: Characters kept per tool answer. Enough for the head of a result list or a
+#: page's lede; the archived file, not the transcript, holds the rest.
+TOOL_HISTORY_MAX_CHARS: Final[int] = 800
 
 
 def _informative_text(content: Sequence[str], *, max_chars: int) -> str:
@@ -735,6 +810,24 @@ def _extend_trail_entry(
     if replaced != trail or any(line.startswith(prefix) for line in trail):
         return replaced
     return (*trail, entry)[-max_entries:]
+
+
+def _extend_tool_history(
+    history: tuple[str, ...],
+    answer: str,
+    *,
+    max_entries: int = TOOL_HISTORY_MAX_ENTRIES,
+    max_chars: int = TOOL_HISTORY_MAX_CHARS,
+) -> tuple[str, ...]:
+    """Append one tool answer to the run transcript (pure).
+
+    A log, not a keyed record: asking the same question twice is itself the
+    evidence the auditor (and the stuck-loop guard's future) needs, so repeats
+    are kept rather than replaced. Newest last, oldest evicted past the cap.
+    """
+    if not answer:
+        return history
+    return (*history, answer[:max_chars])[-max_entries:]
 
 
 #: Answered when ``web_search`` arrives with no MCP search tool configured.
@@ -854,6 +947,10 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
         open_tabs=state.open_tabs,
         skill=state.skill,
         screenshot_b64=state.screenshot_b64,
+        # The tool transcript is run-accumulated evidence, not per-observation
+        # perception: dropping it here would blind the completion auditor to
+        # every tool answer older than one turn.
+        tool_history=state.tool_history,
         # The strategic plan is part of the rolling context: a decision must
         # never drop the roadmap the provider is executing against (Law 4.3).
         plan=state.plan,
@@ -1123,6 +1220,11 @@ class OodaRunner:
         # the layout signature does not move.
         self._last_physical: Action | None = None
         self._stuck_streak: int = 0
+        # Tool-tier stuck budget (Law 2.2): the same tool asking nearly the
+        # same question in a row. Tools move no cursor, so the screen
+        # signature cannot judge them — the repeat count itself is the signal.
+        self._last_tool: Action | None = None
+        self._tool_streak: int = 0
         self._last_verdict: Evidence | None = None
         # The action awaiting a progress verdict, and the observation
         # signature captured just before it ran.
@@ -1165,6 +1267,8 @@ class OodaRunner:
         self._consecutive_search_misses = 0
         self._last_physical = None
         self._stuck_streak = 0
+        self._last_tool = None
+        self._tool_streak = 0
         self._pending_action = None
         self._pre_action_signature = ""
         self._last_capture_hash = None
@@ -1471,6 +1575,11 @@ class OodaRunner:
         state = outcome.state
 
         verdict: Evidence | None = None
+        # A tool-tier repetition hint, set by the internal_tool branch and
+        # carried past the shared success epilogue below (which clears
+        # recovery diagnostics). Without the carry, the hint computed here
+        # would be wiped in the same turn it was earned.
+        preserved_hint: str | None = None
         try:
             if outcome.route == "physical":
                 # The repetition guard runs inside the recovery path, not
@@ -1483,16 +1592,29 @@ class OodaRunner:
                 self._guard_stuck_loop(outcome.action, goal)
                 verdict = self._act_and_verify(outcome.action)
             elif outcome.route == "internal_wait":
+                self._reset_tool_streak()
                 self._sleep_for(outcome.action)
             elif outcome.route == "internal_tool":
                 # A tool answers with text, and that text IS the result the
                 # next turn reasons over — so it goes into the working state
                 # the same way a failure diagnostic does. Nothing physical
                 # happened, so there is nothing to verify against the screen.
+                tool_hint: str | None = None
+                if isinstance(outcome.action, CallTool):
+                    tool_hint = self._note_tool_call(outcome.action, goal)
+                else:
+                    # Any other action breaks a tool-repeat chain: the model
+                    # tried something else, so the next same-tool call starts
+                    # a new count rather than continuing an old one.
+                    self._last_tool = None
+                    self._tool_streak = 0
                 answer = self._run_tool(outcome.action)
+                if tool_hint is not None:
+                    self._last_error = tool_hint
+                    preserved_hint = tool_hint
                 state = replace(
                     state,
-                    last_error=None,
+                    last_error=tool_hint,
                     tool_result=answer,
                     # Also kept as evidence, not only as this turn's answer.
                     # ``tool_result`` lasts one turn, on the sound grounds that
@@ -1511,10 +1633,16 @@ class OodaRunner:
                         text=answer,
                         max_entries=TRAIL_MAX_ENTRIES,
                     ),
+                    # And kept as a transcript for the completion auditor: a
+                    # goal built on tool output cannot be verified from the
+                    # screen alone, and the one-turn ``tool_result`` is long
+                    # gone by the time the finish is claimed.
+                    tool_history=_extend_tool_history(state.tool_history, answer),
                 )
             elif outcome.route == "internal_skill":
                 # Explicit Stage 2: the provider asked for this skill by id;
                 # mount it (replacing any auto-retrieved one).
+                self._reset_tool_streak()
                 self._skill = self._load_skill_for(outcome.action)
         except KillSwitchTripped as exc:
             # Physical drivers may also raise a trip (e.g. during a long
@@ -1571,19 +1699,20 @@ class OodaRunner:
             )
         if outcome.route == "physical":
             self._consecutive_search_misses = 0
+            self._reset_tool_streak()
             self._record_for_progress(outcome.action)
         self._trace_step(decision, outcome, verdict=verdict, error=None)
         # A successful action clears obsolete recovery diagnostics: the
         # provider must not keep steering around a failure that already
         # recovered (M1). A stuck-loop hint is re-injected by the next
         # cycle's progress check, which is when the model can act on it.
-        self._last_error = None
+        self._last_error = preserved_hint
         self._failure_streaks.clear()
         self._consecutive_failures = 0
         state = replace(
             state,
             completed_steps=state.completed_steps + (outcome.step_label,),
-            last_error=None,
+            last_error=preserved_hint,
             # Authoritative runner skill state: reflects an explicit
             # load_skill mounted earlier in this same iteration.
             skill=self._skill,
@@ -2032,6 +2161,32 @@ class OodaRunner:
         would_stuck = self._stuck_streak + 1 if self._same_physical(action) else 0
         if would_stuck >= REPEAT_ABORT_AFTER:
             raise StuckLoopError(action=action, repeats=would_stuck, goal=goal)
+
+    def _note_tool_call(self, action: CallTool, goal: str) -> str | None:
+        """Count one tool call toward the tool-tier stuck budget (shell).
+
+        Returns the corrective hint once the streak reaches
+        ``TOOL_REPEAT_WARN_AFTER`` (the caller folds it into ``last_error``),
+        else ``None``. Raises :class:`StuckLoopError` at
+        ``TOOL_REPEAT_ABORT_AFTER`` — *before* the call runs, like the
+        physical guard, so the refusal enters the recovery ladder instead of
+        executing a fifth identical question.
+        """
+        if self._last_tool is not None and equivalent_action(self._last_tool, action):
+            self._tool_streak += 1
+        else:
+            self._tool_streak = 1
+        self._last_tool = action
+        if self._tool_streak >= TOOL_REPEAT_ABORT_AFTER:
+            raise StuckLoopError(action=action, repeats=self._tool_streak, goal=goal)
+        if self._tool_streak >= TOOL_REPEAT_WARN_AFTER:
+            return repetition_diagnostic(action, self._tool_streak)
+        return None
+
+    def _reset_tool_streak(self) -> None:
+        """A successful non-tool action breaks any tool-repeat chain (shell)."""
+        self._last_tool = None
+        self._tool_streak = 0
 
     def _validate(self, decision: AgentTurn) -> None:
         """Law 5.1 VALIDATE: enforce the autonomy guard before actuating.
@@ -3063,10 +3218,10 @@ class KillSwitchTripped(RuntimeError):
 
 
 class StuckLoopError(RuntimeError):
-    """The provider repeated one physical action with no observable progress.
+    """The provider repeated one action with no observable progress.
 
-    Raised *before* the repeat that would exceed ``REPEAT_ABORT_AFTER``, so the
-    host never sees more than ``REPEAT_ABORT_AFTER - 1`` executions of the same
+    Raised *before* the repeat that would exceed the tier's budget, so the
+    host never sees more than the budget minus one executions of the same
     intent. This is a recoverable failure, not a verdict on the run: it enters
     the recovery ladder, where the model is told — with escalating firmness —
     to change its approach. Only a model that keeps insisting reaches
@@ -3080,7 +3235,7 @@ class StuckLoopError(RuntimeError):
         self.goal = goal
         super().__init__(
             f"stuck loop: the agent repeated the identical {action.type} action "
-            f"{repeats} times for goal={goal!r} with nothing changing on screen; "
+            f"{repeats} times for goal={goal!r} with no observable progress; "
             "this repeat was refused before it reached the host"
         )
 
