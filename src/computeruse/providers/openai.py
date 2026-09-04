@@ -71,6 +71,41 @@ def _is_retryable_oserror(exc: OSError) -> bool:
     return isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError))
 
 
+# HTTP statuses that mean "not now" rather than "not ever". 429 is the rate
+# limiter and 500/502/503/504 are the service having a moment; every one of
+# them clears on its own in seconds. Treating them as terminal was defensible
+# while a human sat watching the run — they could just start it again. It is
+# not defensible for an unattended session, where a single 429 at 3am ends the
+# night's work. Every *other* 4xx stays terminal: a bad key, an unknown model
+# or an exhausted quota does not improve by being asked again.
+_RETRYABLE_STATUSES: Final[frozenset[int]] = frozenset({429, 500, 502, 503, 504})
+
+#: Ceiling on a server-supplied ``Retry-After``. Honouring the header is right;
+#: honouring an arbitrarily large one is how a run hangs for an hour holding
+#: the host's cursor.
+_RETRY_AFTER_MAX_SECONDS: Final[float] = 60.0
+
+
+def _retry_after_seconds(header: str | None, fallback: float) -> float:
+    """Pure: how long to wait before retrying a throttled call.
+
+    ``Retry-After`` is the service telling us exactly when it will answer, and
+    it beats any backoff curve we could invent. Only the delta-seconds form is
+    read — the HTTP-date form needs a clock to interpret, and this stays pure —
+    and anything absent, malformed or unreasonable falls back to the caller's
+    own backoff.
+    """
+    if header is None:
+        return fallback
+    try:
+        seconds = float(header.strip())
+    except ValueError:
+        return fallback
+    if seconds <= 0:
+        return fallback
+    return min(seconds, _RETRY_AFTER_MAX_SECONDS)
+
+
 @dataclass(frozen=True)
 class ModelCallStats:
     """Usage + latency of one successful model call (pure data).
@@ -222,12 +257,20 @@ def openai_model(
             },
             method="POST",
         )
-        # Transient transport failures (timeouts, connection resets, TLS/SSL
-        # alerts like SSLV3_ALERT_BAD_RECORD_MAC from a flaky middlebox) must
-        # never kill a run outright: exponential backoff with warning logs
-        # (AGENTS.md §7.2) before raising the terminal OpenAIError. HTTP-level
-        # errors stay terminal — the API answered, and 4xx/5xx tell the user
-        # what to fix (key, quota, model).
+        # Transient failures must never kill a run outright: exponential
+        # backoff with warning logs (AGENTS.md §7.2) before raising the
+        # terminal OpenAIError. Two kinds qualify, and they are counted on the
+        # same ladder because from the run's point of view they are the same
+        # event — the model did not answer, and it might if asked again.
+        #
+        # * The wire: timeouts, connection resets, TLS/SSL alerts like
+        #   SSLV3_ALERT_BAD_RECORD_MAC from a flaky middlebox.
+        # * The service: 429 and the 5xx family, which say "not now" rather
+        #   than "not ever" and clear on their own within seconds.
+        #
+        # Every other HTTP status stays terminal, and should: a bad key, an
+        # unknown model or an exhausted quota is a thing the user must fix, and
+        # retrying it only delays their finding out.
         attempt = 0
         while True:
             try:
@@ -238,7 +281,22 @@ def openai_model(
                 # HTTPError is an OSError; catch it first and surface the API's
                 # own body (e.g. "model not found", "insufficient quota").
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
-                raise OpenAIError(f"OpenAI API error {exc.code}: {detail}") from exc
+                attempt += 1
+                if attempt >= _MAX_TRANSPORT_RETRIES or exc.code not in _RETRYABLE_STATUSES:
+                    raise OpenAIError(f"OpenAI API error {exc.code}: {detail}") from exc
+                wait_s = _retry_after_seconds(
+                    exc.headers.get("Retry-After"),
+                    _TRANSPORT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                )
+                LOGGER.warning(
+                    "OpenAI returned %d; retrying in %.1fs (attempt %d/%d): %s",
+                    exc.code,
+                    wait_s,
+                    attempt,
+                    _MAX_TRANSPORT_RETRIES,
+                    detail,
+                )
+                time.sleep(wait_s)
             except OSError as exc:
                 attempt += 1
                 if attempt >= _MAX_TRANSPORT_RETRIES or not _is_retryable_oserror(exc):

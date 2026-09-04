@@ -16,11 +16,13 @@ and "my assistant told a third party what I am working on".
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import re
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -143,6 +145,8 @@ def fetch_page(url: str, *, max_chars: int = MAX_PAGE_CHARS) -> str:
     """
     if not _is_http_url(url):
         raise WebError(f"refusing to fetch a non-HTTP(S) URL: {url!r}")
+    if not _is_fetchable_url(url):
+        raise WebError(f"refusing to fetch an internal-only URL: {url!r}")
     html = _get(url)
     text = html_to_text(html)
     if len(text) < MIN_PAGE_CHARS:
@@ -176,27 +180,78 @@ def html_to_text(html: str) -> str:
 
 
 def _get(url: str) -> str:
-    """One GET, decoded as text, with typed failures."""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    context = ssl.create_default_context()
+    """One GET, decoded as text, with typed failures and transient retry."""
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            context = ssl.create_default_context()
+            with urllib.request.urlopen(
+                request, timeout=REQUEST_TIMEOUT_SECONDS, context=context
+            ) as response:
+                raw = response.read()
+                charset = response.headers.get_content_charset() or "utf-8"
+            return raw.decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            # Retry transient server errors, not client errors.
+            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(0.5 * (2**attempt))
+                last_error = exc
+                continue
+            raise WebError(f"HTTP {exc.code} from {url}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(0.5 * (2**attempt))
+                continue
+            raise WebError(f"could not reach {url}: {exc}") from exc
+    assert last_error is not None
+    raise WebError(f"could not reach {url}: {last_error}") from last_error
+
+
+def _is_blocked_host(host: str) -> bool:
+    """True when a hostname must never be fetched (SSRF guard, pure)."""
+
+    lowered = host.lower().strip().rstrip(".")
+    if lowered in ("localhost", "metadata.google.internal"):
+        return True
     try:
-        with urllib.request.urlopen(
-            request, timeout=REQUEST_TIMEOUT_SECONDS, context=context
-        ) as response:
-            raw = response.read()
-            charset = response.headers.get_content_charset() or "utf-8"
-    except urllib.error.HTTPError as exc:
-        raise WebError(f"HTTP {exc.code} from {url}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise WebError(f"could not reach {url}: {exc}") from exc
-    return raw.decode(charset, errors="replace")
+        addr = ipaddress.ip_address(lowered)
+    except ValueError:
+        return False
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+    )
 
 
 def _is_http_url(url: str) -> bool:
-    """Only http(s). ``file:`` and friends would turn a web tool into a
-    filesystem read the user never authorised (pure)."""
+    """Only http(s) to public hosts. ``file:`` would turn a web tool into a
+    filesystem read the user never authorised; loopback/link-local/private
+    ranges and cloud metadata would turn it into internal network access (pure)."""
     parsed = urllib.parse.urlparse(url)
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
+
+
+def _is_fetchable_url(url: str) -> bool:
+    """Can fetch_page retrieve this URL (SSRF guard, pure).
+
+    _is_http_url answers scheme only (SearXNG itself lives on loopback);
+    this answers safety: loopback / private / link-local / reserved hosts
+    and cloud metadata are refused for model-supplied page fetches.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return False
+    host = parsed.hostname or ''
+    if not host:
+        return False
+    return not _is_blocked_host(host)
 
 
 def _collapse(text: str) -> str:

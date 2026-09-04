@@ -10,9 +10,11 @@ These models are pure data transformers and never perform OS I/O (Law 6).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+from computeruse.skills.schemas import SKILL_ID_PATTERN
 
 Modifier = Literal["command", "shift", "alt", "control"]
 
@@ -94,8 +96,18 @@ class ActivateApp(BaseModel):
 
 
 class LoadSkill(BaseModel):
+    """Stage-2 mount request — the one action whose payload names a file.
+
+    ``skill_id`` carries the store's id pattern for the same reason the stored
+    models do, and it is the copy that matters most: this is the id a *model*
+    produces, downstream of every screen-derived string the run has read. The
+    constraint was missing here while both stored models enforced it, so
+    ``{"type": "load_skill", "skill_id": "../../etc/passwd"}`` validated
+    cleanly and reached a path join.
+    """
+
     type: Literal["load_skill"]
-    skill_id: str
+    skill_id: str = Field(pattern=SKILL_ID_PATTERN)
 
 
 class Wait(BaseModel):
@@ -164,6 +176,17 @@ Action = (
     | Finish
 )
 
+#: The discriminated form, shared by the single action and the batch list so
+#: both validate through one tag lookup instead of Pydantic's smart-union
+#: trial-and-error (which can settle on the wrong member for two models with
+#: compatible fields).
+#:
+#: Derived from :data:`Action` rather than re-listing the members: the union is
+#: this project's wire contract, and two copies of it would eventually disagree
+#: about which actions exist — the drift test compares Python against Rust, not
+#: against another copy of Python.
+ActionUnion = Annotated[Action, Field(discriminator="type")]
+
 
 class AgentTurn(BaseModel):
     """Single OODA loop decision frame emitted by the LLM.
@@ -180,11 +203,11 @@ class AgentTurn(BaseModel):
 
     thought: str
     sub_goal: str
-    action: Action = Field(discriminator="type")
+    action: ActionUnion
     # Optional ordered batch executed within this single turn. Validated to be
     # non-empty and to place ``finish`` (if present) strictly last — a batch
     # must never continue acting after the run has ended.
-    actions: list[Action] | None = None
+    actions: list[ActionUnion] | None = None
 
     @model_validator(mode="after")
     def _validate_batch(self) -> AgentTurn:
@@ -196,3 +219,25 @@ class AgentTurn(BaseModel):
             if item.type == "finish" and index != len(self.actions) - 1:
                 raise ValueError("'finish' must be the last action of a batch")
         return self
+
+
+class _ActionEnvelope(BaseModel):
+    """Internal: the discriminated union, addressable on its own."""
+
+    action: ActionUnion
+
+
+def action_from_payload(payload: dict[str, object]) -> Action | None:
+    """Rebuild an action from a dict it was serialised into (pure).
+
+    The approval queue stores an action as ``model_dump`` output so a person
+    can read it, and something later has to read it back — deciding what a
+    parked action delegates means knowing what it *is*, not what it looked
+    like. Returns ``None`` for a payload that no longer parses (a record from
+    an older schema, a hand-edited file), because a queue entry that cannot be
+    understood is exactly the one nothing should be inferred from.
+    """
+    try:
+        return _ActionEnvelope.model_validate({"action": payload}).action
+    except ValueError:
+        return None

@@ -105,6 +105,13 @@ static WEBVIEW_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
 
 /// Active autonomy level (3 = Full Autonomy, 2 = Guarded Mode).
 static AUTONOMY_LEVEL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(3);
+/// Trust mode (--yes): auto-approve CONFIRM without prompting.
+///
+/// Off by default, matching the CLI. On, the panel's own Approve/Deny card can
+/// never appear and the capability grants the store holds are never consulted,
+/// because nothing ever reaches a confirmation — so a panel that started this
+/// way silently made the whole permission surface decorative.
+static TRUST_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Whether MCP servers are active for agent runs.
 static MCP_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
@@ -112,9 +119,107 @@ static MCP_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 /// Whether the panel floats at the bottom-center (Claude style) or near the status item.
 static FLOATING_BOTTOM: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
-fn mcp_config_path() -> PathBuf {
+/// True while an agent child process is running; cleared by the reaper the
+/// moment `wait()` returns.
+///
+/// The stop watchdog reads this rather than probing the pid with `kill(pid, 0)`,
+/// because a pid is only meaningful until the OS reclaims it: a child that
+/// exits and is reaped inside the grace window frees its number, and escalating
+/// to SIGKILL on a recycled pid would kill a stranger's process. Only one agent
+/// runs at a time (the launcher refuses a second), so one flag is the whole
+/// state.
+static CHILD_ALIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// How long a stopped agent gets to shut itself down before it is killed.
+///
+/// Not politeness. SIGINT is what the orchestrator's kill-switch listens for,
+/// and catching it is what writes the failed episode and its retrospective —
+/// Law 4.1 requires a run ended by takeover to be *recorded*, and SIGKILL
+/// cannot be caught, so the previous straight-to-SIGKILL stop threw away
+/// everything the run had learned. Five seconds is long enough for the loop to
+/// unwind its current step and flush that to disk, short enough that a user
+/// who pressed Stop never wonders whether it worked.
+const STOP_GRACE_SECONDS: u64 = 5;
+
+/// How often the watchdog re-checks, so a run that unwinds in 200ms is not
+/// reported as stopped five seconds later.
+const STOP_POLL_MS: u64 = 100;
+
+fn store_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/me".to_string());
-    PathBuf::from(home).join(".computeruse").join("mcp.json")
+    PathBuf::from(home).join(".computeruse")
+}
+
+fn mcp_config_path() -> PathBuf {
+    store_dir().join("mcp.json")
+}
+
+/// Every record in one store subdirectory, as a JSON array string.
+///
+/// Deliberately untyped. The panel needs to *show* approvals, missions, grants
+/// and episodes, and Python already owns what those look like — re-declaring
+/// the models here would give the project a second definition to drift from,
+/// which is the very thing its Python-vs-Rust drift test exists to catch. So
+/// this reads the files, checks each one parses as JSON, and forwards them
+/// verbatim; the panel reads fields defensively and skips what it cannot find.
+///
+/// Re-parsing is also the hardening: a record is written by the agent but its
+/// *contents* quote the screen, so nothing here may reach `evaluateJavaScript`
+/// unvalidated (same rule as `read_mcp_servers_json`).
+fn read_store_records(sub: &str) -> String {
+    collect_store_records(&store_dir().join(sub))
+}
+
+/// The directory-reading half, addressable on its own so the panel's entire
+/// data path is testable without a real store in the user's home.
+fn collect_store_records(dir: &Path) -> String {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return "[]".to_string();
+    };
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        // An unreadable record must not hide every other one — the same
+        // fail-soft rule the Python stores apply when they list.
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            records.push(value);
+        }
+    }
+    serde_json::to_string(&records).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Run one non-streaming `computeruse` store command and return its output.
+///
+/// Separate from `run_agent` because these are a different shape: no goal, no
+/// driver, no streaming, and the panel wants the answer rather than a feed.
+/// They go through the CLI rather than touching the store directly because a
+/// *write* has to have one owner — approving a request also unblocks its
+/// mission, and duplicating that rule in Rust is how the two stop agreeing.
+fn run_store_command(args: &[String]) -> Result<String, String> {
+    let root = project_root().ok_or_else(|| {
+        "could not locate the project root (pyproject.toml)".to_string()
+    })?;
+    let uv = find_uv().ok_or_else(|| "could not find the `uv` executable".to_string())?;
+    let mut argv = vec!["run".to_string(), "python".to_string(), "-m".to_string(),
+                        "computeruse".to_string()];
+    argv.extend(args.iter().cloned());
+    let output = Command::new(&uv)
+        .current_dir(&root)
+        .args(&argv)
+        .output()
+        .map_err(|e| format!("could not run computeruse: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if output.status.success() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Err(if stderr.trim().is_empty() { stdout } else { stderr })
 }
 
 fn read_mcp_servers_json() -> String {
@@ -702,7 +807,15 @@ fn handle_script_message(message: &WKScriptMessage) {
                 .map(|v| v as u8)
                 .unwrap_or_else(|| AUTONOMY_LEVEL.load(core::sync::atomic::Ordering::SeqCst));
             AUTONOMY_LEVEL.store(level, core::sync::atomic::Ordering::SeqCst);
-            run_agent(&goal, app.as_deref(), level);
+            let trust = value
+                .get("trust")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| TRUST_MODE.load(core::sync::atomic::Ordering::SeqCst));
+            // Per-run MCP override from the panel toggle; persists like level.
+            if let Some(mcp) = value.get("mcp").and_then(serde_json::Value::as_bool) {
+                MCP_ENABLED.store(mcp, core::sync::atomic::Ordering::SeqCst);
+            }
+            run_agent(&goal, app.as_deref(), level, trust);
         }
         Some("set_level") => {
             if let Some(level) = value.get("level").and_then(serde_json::Value::as_u64) {
@@ -710,7 +823,14 @@ fn handle_script_message(message: &WKScriptMessage) {
             }
         }
         Some("get_mcp") => {
-            let json_str = read_mcp_servers_json();
+            let raw = read_mcp_servers_json();
+            // K-01: the config file is attacker-influenced text; never embed
+            // it raw. Re-parse and re-serialize so only valid JSON reaches
+            // the panel, falling back to empty on corruption.
+            let json_str = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| serde_json::to_string(&v).ok())
+                .unwrap_or_else(|| "{\"mcpServers\":{}}".to_string());
             let enabled = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
             let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
             if !ptr.is_null() {
@@ -748,7 +868,8 @@ fn handle_script_message(message: &WKScriptMessage) {
                 let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
                 if !ptr.is_null() {
                     let wv = unsafe { &*(ptr as *const WKWebView) };
-                    let js = format!("if(window.onMcpSaved)window.onMcpSaved('{id}');");
+                    let js_id = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
+                    let js = format!("if(window.onMcpSaved)window.onMcpSaved({js_id});");
                     call_js(wv, &js);
                 }
             }
@@ -769,7 +890,8 @@ fn handle_script_message(message: &WKScriptMessage) {
                 let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
                 if !ptr.is_null() {
                     let wv = unsafe { &*(ptr as *const WKWebView) };
-                    let js = format!("if(window.onMcpDeleted)window.onMcpDeleted('{id}');");
+                    let js_id = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
+                    let js = format!("if(window.onMcpDeleted)window.onMcpDeleted({js_id});");
                     call_js(wv, &js);
                 }
             }
@@ -807,8 +929,132 @@ fn handle_script_message(message: &WKScriptMessage) {
                 let _ = stdin.flush();
             }
         }
+        Some("get_control") => {
+            // One read for the whole Kontrol tab: three stores, three JSON
+            // arrays, one call_js. Separate messages would let the panel
+            // render a half-consistent view mid-refresh.
+            let approvals = read_store_records("approvals");
+            let missions = read_store_records("missions");
+            let grants = read_store_records("grants");
+            let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let wv = unsafe { &*(ptr as *const WKWebView) };
+                let js = format!(
+                    "if(window.onControlLoaded)window.onControlLoaded({approvals},{missions},{grants});"
+                );
+                call_js(wv, &js);
+            }
+        }
+        Some("get_memory") => {
+            // The agent's real memory, for History and Analytics. Those tabs
+            // used to read a localStorage mirror the panel wrote itself, so
+            // they showed what this browser had seen rather than what the
+            // agent had actually done — a fresh panel showed an empty history
+            // beside a store full of episodes.
+            let episodes = read_store_records("episodes");
+            let skills = read_store_records("skills");
+            let usage = read_store_records("usage");
+            let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let wv = unsafe { &*(ptr as *const WKWebView) };
+                let js = format!(
+                    "if(window.onMemoryLoaded)window.onMemoryLoaded({episodes},{skills},{usage});"
+                );
+                call_js(wv, &js);
+            }
+        }
+        Some("get_report") => {
+            let hours = value
+                .get("hours")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(24.0);
+            let result = run_store_command(&[
+                "--report".to_string(),
+                "--since-hours".to_string(),
+                format!("{hours}"),
+            ]);
+            let text = match result {
+                Ok(out) => out,
+                Err(err) => format!("report unavailable: {err}"),
+            };
+            let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let wv = unsafe { &*(ptr as *const WKWebView) };
+                let js_text = serde_json::to_string(&text)
+                    .unwrap_or_else(|_| "\"\"".to_string());
+                call_js(wv, &format!("if(window.onReportLoaded)window.onReportLoaded({js_text});"));
+            }
+        }
+        Some("decide") => {
+            // Answering a parked approval. `always` additionally mints a
+            // capability grant from the action just approved — the moment a
+            // person is looking at exactly what they are delegating.
+            let Some(id) = value.get("id").and_then(serde_json::Value::as_str) else {
+                return;
+            };
+            let approve = value
+                .get("approve")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let always = value
+                .get("always")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let mut args = vec![
+                if approve { "--approve".to_string() } else { "--deny".to_string() },
+                id.to_string(),
+            ];
+            if approve && always {
+                args.push("--always".to_string());
+            }
+            let (ok, message) = match run_store_command(&args) {
+                Ok(out) => (true, out),
+                Err(err) => (false, err),
+            };
+            notify_store_result("onDecided", id, ok, &message);
+        }
+        Some("revoke_grant") => {
+            let Some(id) = value.get("id").and_then(serde_json::Value::as_str) else {
+                return;
+            };
+            let (ok, message) = match run_store_command(&["--revoke".to_string(), id.to_string()]) {
+                Ok(out) => (true, out),
+                Err(err) => (false, err),
+            };
+            notify_store_result("onGrantRevoked", id, ok, &message);
+        }
+        Some("ready") => {
+            // The panel finished loading and is asking for its first paint of
+            // store-backed data. Previously this message had no handler at
+            // all and fell through to the catch-all.
+            let level = AUTONOMY_LEVEL.load(core::sync::atomic::Ordering::SeqCst);
+            let trust = TRUST_MODE.load(core::sync::atomic::Ordering::SeqCst);
+            let mcp = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
+            let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+            if !ptr.is_null() {
+                let wv = unsafe { &*(ptr as *const WKWebView) };
+                call_js(
+                    wv,
+                    &format!(
+                        "if(window.onHostReady)window.onHostReady({level},{trust},{mcp});"
+                    ),
+                );
+            }
+        }
         _ => {}
     }
+}
+
+/// Reply to a one-shot store command: id, success, and whatever it said.
+fn notify_store_result(callback: &str, id: &str, ok: bool, message: &str) {
+    let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    let wv = unsafe { &*(ptr as *const WKWebView) };
+    let js_id = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
+    let js_msg = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string());
+    call_js(wv, &format!("if(window.{callback})window.{callback}({js_id},{ok},{js_msg});"));
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +1068,7 @@ fn handle_script_message(message: &WKScriptMessage) {
 /// run drives the real model. ``--model openai`` is *mandatory* here:
 /// omitting it falls back to the CLI's default scripted demo provider (two
 /// fixed clicks, then finish), which on a real host reads as a broken agent.
+#[allow(clippy::too_many_arguments)]
 fn agent_args(
     goal: &str,
     app: Option<&str>,
@@ -830,6 +1077,7 @@ fn agent_args(
     store: &str,
     level: u8,
     mcp: bool,
+    trust: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -854,13 +1102,19 @@ fn agent_args(
     if mcp {
         args.push("--mcp".to_string());
     }
+    // Trust mode (--yes): operator asked for uninterrupted autonomy.
+    // BLOCK still blocks; kill-switch, budgets and verification keep running.
+    if trust {
+        args.push("--yes".to_string());
+    }
     if let Some(app_name) = app {
         args.extend(["--app".to_string(), app_name.to_string()]);
     }
     args
 }
 
-fn run_agent(goal: &str, app: Option<&str>, level: u8) {
+fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool) {
+    TRUST_MODE.store(trust, core::sync::atomic::Ordering::SeqCst);
     // Guard: never double-run while one is in flight.
     let already = SHARED.lock().unwrap().child_pid.is_some();
     if already {
@@ -914,7 +1168,9 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8) {
     }
     let driver_bin_str = driver_bin.to_string_lossy().into_owned();
     let mcp = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
-    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp));
+    // `trust` arrives as a run_agent parameter; see signature.
+    let trust = TRUST_MODE.load(core::sync::atomic::Ordering::SeqCst);
+    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp, trust));
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
     cmd.env("OPENAI_API_KEY", key.expect("checked above"));
@@ -946,6 +1202,7 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8) {
         s.exit = None;
         s.signalled = false;
     }
+    CHILD_ALIVE.store(true, core::sync::atomic::Ordering::SeqCst);
     if let Some(reader) = stdout {
         std::thread::spawn(move || pump_lines(BufReader::new(reader), true));
     }
@@ -954,6 +1211,9 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8) {
     }
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
+        // Cleared before the exit code is published: the stop watchdog must
+        // never see a reaped pid as still running.
+        CHILD_ALIVE.store(false, core::sync::atomic::Ordering::SeqCst);
         let mut g = SHARED.lock().unwrap();
         g.exit = Some(code);
     });
@@ -1001,12 +1261,42 @@ fn stop_agent() {
             let mut s = SHARED.lock().unwrap();
             s.child_stdin = None;
             drop(s);
-            // SAFETY: immediately terminate the child process and its entire process group
+            // SIGINT first, never SIGKILL: the orchestrator installs a SIGINT
+            // catcher that trips its kill switch, and *that* path is what
+            // records the interrupted run as a failed episode carrying a
+            // retrospective (Law 4.1). SIGKILL cannot be caught, so it ends the
+            // process with everything the run learned still in memory.
+            // SAFETY: signalling the child's process group and the child.
             unsafe {
-                libc::killpg(pid as i32, libc::SIGKILL);
-                libc::kill(pid as i32, libc::SIGKILL);
+                libc::killpg(pid as i32, libc::SIGINT);
+                libc::kill(pid as i32, libc::SIGINT);
             }
-            push_dim("— agent stopped by user —".to_string());
+            push_dim("— stopping agent, saving what it learned —".to_string());
+            // The escalation runs off the UI thread: this is called from a
+            // message handler, and waiting out the grace period here would
+            // freeze the panel for as long as the agent takes to unwind.
+            std::thread::spawn(move || {
+                let polls = STOP_GRACE_SECONDS * 1000 / STOP_POLL_MS;
+                for _ in 0..polls {
+                    std::thread::sleep(std::time::Duration::from_millis(STOP_POLL_MS));
+                    if !CHILD_ALIVE.load(core::sync::atomic::Ordering::SeqCst) {
+                        push_dim("— agent stopped by user —".to_string());
+                        return;
+                    }
+                }
+                // Out of grace. A run that ignored SIGINT is wedged somewhere
+                // it cannot return from, and the user asked for the machine
+                // back — which outranks the retrospective.
+                // SAFETY: CHILD_ALIVE is still set, so this pid is the child's
+                // and has not been recycled.
+                unsafe {
+                    libc::killpg(pid as i32, libc::SIGKILL);
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                push_err(format!(
+                    "agent did not stop within {STOP_GRACE_SECONDS}s; killed"
+                ));
+            });
         }
         None => push_dim("nothing running to stop".to_string()),
     }
@@ -1289,11 +1579,12 @@ fn in_polygon(x: f64, y: f64, p: &[(f64, f64)]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_args as args, icon_pixel};
+    use super::{agent_args as args, collect_store_records, icon_pixel};
+    use std::path::Path;
 
     #[test]
     fn agent_always_uses_the_real_model() {
-        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true);
+        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true, false);
         assert!(
             argv.windows(2).any(|w| w == ["--model", "openai"]),
             "launcher must pass --model openai, never the demo provider"
@@ -1304,7 +1595,7 @@ mod tests {
     #[test]
     fn agent_passes_required_flags_and_target_app() {
         let argv =
-            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false);
+            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false, false);
         for required in ["--goal", "--real", "--model", "--driver", "--socket", "--store"] {
             assert!(
                 argv.iter().any(|a| a == required),
@@ -1327,5 +1618,70 @@ mod tests {
         assert_eq!(a, 1.0);
         // Outside the squircle (top-left corner): fully transparent.
         assert_eq!(icon_pixel(1.0, 1.0), (0, 0, 0, 0.0));
+    }
+
+    // --- the panel's data path ------------------------------------------
+
+    fn write_records(dir: &Path, files: &[(&str, &str)]) {
+        std::fs::create_dir_all(dir).expect("create store dir");
+        for (name, body) in files {
+            std::fs::write(dir.join(name), body).expect("write record");
+        }
+    }
+
+    #[test]
+    fn store_records_are_collected_as_a_json_array() {
+        let base = std::env::temp_dir().join(format!("cu-store-{}", std::process::id()));
+        let dir = base.join("approvals");
+        write_records(
+            &dir,
+            &[
+                ("a.json", r#"{"request_id":"a","decision":"pending"}"#),
+                ("b.json", r#"{"request_id":"b","decision":"approved"}"#),
+            ],
+        );
+        let json = collect_store_records(&dir);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid array");
+        assert_eq!(parsed.as_array().map(|a| a.len()), Some(2));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn one_corrupt_record_does_not_hide_the_others() {
+        // The panel consults this store precisely when something has gone
+        // wrong; refusing to list because one file is broken would hide every
+        // approval behind the one that cannot be read.
+        let base = std::env::temp_dir().join(format!("cu-corrupt-{}", std::process::id()));
+        let dir = base.join("grants");
+        write_records(
+            &dir,
+            &[
+                ("good.json", r#"{"grant_id":"g1"}"#),
+                ("broken.json", "{not json at all"),
+                ("notes.txt", "ignored — wrong extension"),
+            ],
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&collect_store_records(&dir)).expect("valid array");
+        assert_eq!(parsed.as_array().map(|a| a.len()), Some(1));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[ignore = "reads the developer's real ~/.computeruse; run explicitly"]
+    fn live_store_reads_back_through_the_panel_path() {
+        for sub in ["grants", "approvals", "missions", "episodes", "skills", "usage"] {
+            let json = super::read_store_records(sub);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("panel path must emit valid JSON");
+            eprintln!("{sub}: {} record(s)", parsed.as_array().map(|a| a.len()).unwrap_or(0));
+        }
+    }
+
+    #[test]
+    fn a_missing_store_reads_as_empty_not_as_an_error() {
+        let missing = std::env::temp_dir().join("cu-definitely-absent-store");
+        let _ = std::fs::remove_dir_all(&missing);
+        assert_eq!(collect_store_records(&missing), "[]");
     }
 }

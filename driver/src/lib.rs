@@ -18,6 +18,8 @@ pub mod indicator;
 pub mod menu;
 #[cfg(target_os = "macos")]
 pub mod quartz;
+#[cfg(target_os = "macos")]
+pub mod vision;
 
 /// Re-export the backend so callers pick a live backend uniformly.
 pub use backend::SimulatedBackend;

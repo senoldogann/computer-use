@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Final
 
 from computeruse.skills.schemas import (
+    SKILL_ID_PATTERN,
     UNINFORMATIVE_WORDS,
     SkillDefinition,
     SkillSummary,
@@ -220,7 +221,19 @@ class SkillRegistry:
         return search(self.index(), query)
 
     def load(self, skill_id: str) -> SkillDefinition:
-        """Stage 2: fetch the full body for a single skill id."""
+        """Stage 2: fetch the full body for a single skill id.
+
+        The id is re-checked here even though every model that carries one
+        already constrains it. This method is where a string becomes a path, so
+        it is the last place the check can still matter — and "the caller
+        validated it" is an assumption a store that reads the filesystem should
+        not make about a caller it cannot see.
+        """
+        if not re.fullmatch(SKILL_ID_PATTERN, skill_id):
+            raise ValueError(
+                f"skill id {skill_id!r} is not a valid store id (expected "
+                f"{SKILL_ID_PATTERN}); refusing to resolve it to a path"
+            )
         path = self._store_dir / f"{skill_id}.json"
         if not path.is_file():
             raise KeyError(f"no skill with id {skill_id!r} in {self._store_dir}")

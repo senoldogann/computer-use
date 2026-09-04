@@ -1,5 +1,22 @@
 # Kapsamlı Proje Code-Review Raporu
 
+> **Durum (3 Eylül 2026, güncel):** Aşağıdaki bulgular yeniden doğrulandı.
+>
+> **Kapatıldı, regresyon testiyle sabitlendi:** CLI-01, SEC-01, SEC-02,
+> SEC-03, NET-01, ve rapora sonradan eklenen AUT-02 (ölen driver'ı geri getiren
+> yoktu → `orchestrator/supervisor.py`; canlı olarak SIGKILL'lenen bir driver
+> geri getirilerek doğrulandı).
+>
+> **Kapatıldı, test yok:** SYS-01 (event tap yeniden silahlandırma) ve SYS-02
+> (SIGINT'ten sonra süreli SIGKILL). İkisi de Rust tarafında ve canlı bir tap
+> ya da canlı bir alt süreç gerektirdiği için mevcut `cargo test` süitiyle
+> kapsanamıyor — davranış elle doğrulandı, otomatik testi yok.
+>
+> **Hâlâ açık:** AUT-01 (checkpoint yazılıyor ama hiç okunmuyor) ve orta
+> öncelikli dört bulgu — LOG-01 (uygulama doğrulamasında çift yönlü alt dize),
+> RUL-01 (`_normalize_action_dict` girdi mutasyonu), MEM-01 (ekran yakalamada
+> çift tahsis), GUI-01 (çoklu monitörde hale kayması).
+
 Bu rapor, `computeruse` projesinin mimari, güvenlik, bellek yönetimi, IPC ve kural uyumluluğu boyutlarında fazlara ayrılarak gerçekleştirilen derinlemesine statik ve dinamik kod incelemesini içermektedir. Tüm bulgular dosya yolları, satır numaraları, kök neden analizleri ve somut kanıtlarla belgelenmiştir.
 
 ---

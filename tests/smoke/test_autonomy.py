@@ -304,7 +304,7 @@ def test_click_risk_comes_from_the_button_not_the_narration() -> None:
     assert label == "Hesabı Sil"
     assert classify_risk(turn, target_label=label) is Risk.DESTRUCTIVE
     assert (
-        guarded(AutonomyLevel.FULL)(turn, observation) is PermissionDecision.CONFIRM
+        guarded(AutonomyLevel.FULL, authorize=None)(turn, observation) is PermissionDecision.CONFIRM
     ), "even unattended autonomy asks before a destructive control"
 
 
@@ -340,7 +340,7 @@ def test_element_value_never_drives_the_verdict() -> None:
         raw=('SearchField "Search" at (50,50) 200x24 value="delete my account"',)
     )
     assert target_element_label(turn.action, observation) == "Search"
-    assert guarded(AutonomyLevel.FULL)(turn, observation) is PermissionDecision.ALLOW
+    assert guarded(AutonomyLevel.FULL, authorize=None)(turn, observation) is PermissionDecision.ALLOW
 
 
 def test_non_positional_actions_have_no_target_element() -> None:
@@ -367,10 +367,160 @@ def test_runner_refuses_a_destructive_button_the_model_described_as_routine() ->
     runner = OodaRunner(
         provider=provider,
         execute_physical=executed.append,
-        guard=guarded(AutonomyLevel.GUARDED),
+        guard=guarded(AutonomyLevel.GUARDED, authorize=None),
         ax_probe=ax_probe,
         max_steps=3,
     )
     with pytest.raises(PermissionConfirmationRequired):
         runner.run(goal="finish the signup flow")
     assert executed == [], "a destructive control must never reach the driver"
+
+
+# --- SEC-01: an MCP call is read, not taken on trust ------------------------
+
+
+def _tool_turn(sub_goal: str, tool: str, arguments: dict[str, object]) -> AgentTurn:
+    return AgentTurn(
+        thought="use it",
+        sub_goal=sub_goal,
+        action=CallTool(type="call_tool", tool=tool, arguments=arguments),
+    )
+
+
+def test_a_shell_command_in_tool_arguments_is_destructive() -> None:
+    """The reported hole: the payload was never read at all.
+
+    ``classify_risk`` looked only at the model's own ``sub_goal``, so a call
+    that ran ``rm -rf /`` under an innocent description scored ``Risk.NONE``
+    and executed unattended at full autonomy.
+    """
+    turn = _tool_turn("organize the folder", "bash", {"command": "rm -rf /"})
+    assert classify_risk(turn) is Risk.DESTRUCTIVE
+    assert decide_permission(AutonomyLevel.FULL, classify_risk(turn)) is (
+        PermissionDecision.CONFIRM
+    )
+
+
+def test_a_command_nested_inside_tool_arguments_is_still_found() -> None:
+    """Reading only the top level would miss the same call spelled as a list."""
+    turn = _tool_turn("tidy up", "exec", {"exec": {"argv": ["rm", "-rf", "/"]}})
+    assert classify_risk(turn) is Risk.DESTRUCTIVE
+
+
+def test_a_destructive_tool_name_is_enough_on_its_own() -> None:
+    """A tool name is a short identifier the server chose, not model prose."""
+    turn = _tool_turn("clean the workspace", "delete_file", {"path": "/tmp/x"})
+    assert classify_risk(turn) is Risk.DESTRUCTIVE
+
+
+def test_a_tool_call_that_matches_nothing_floors_at_routine() -> None:
+    """Someone else's program with side effects we cannot see is not benign.
+
+    Guarded mode asks about it; full autonomy still runs it, so the MCP
+    storefront keeps working unattended.
+    """
+    turn = _tool_turn("check the file", "files.read", {"path": "/tmp/notes.txt"})
+    assert classify_risk(turn) is Risk.ROUTINE
+    assert decide_permission(AutonomyLevel.FULL, Risk.ROUTINE) is PermissionDecision.ALLOW
+    assert decide_permission(AutonomyLevel.GUARDED, Risk.ROUTINE) is (
+        PermissionDecision.CONFIRM
+    )
+
+
+def test_a_document_body_that_mentions_deleting_is_not_a_deletion() -> None:
+    """The false positive that once stopped a full-autonomy run dead.
+
+    An MCP tool that takes a document body will be handed prose about deleting
+    and shutting things down. Flagging that is the same category error as
+    reading a note's text as a shell command.
+    """
+    body = (
+        "Today the vendor announced an automated shutdown capability that can "
+        "delete stale records without operator involvement. "
+    ) * 4
+    turn = _tool_turn("save the summary", "notes.create", {"body": body})
+    assert classify_risk(turn) is not Risk.DESTRUCTIVE
+
+
+# --- the guard has to stay quiet to stay useful -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("sub_goal", "target_label"),
+    [
+        # `intent_words` splits on hyphens, so a "drop" marker made every
+        # dropdown in every application destructive.
+        ("open the country list", "Drop-down"),
+        # The module's own history: a full-autonomy run of exactly this goal
+        # died to a false positive on its own payload.
+        ("write a summary in Notes", None),
+        ("Notlara özeti yaz", None),
+        # Describing something that already happened is not asking for it.
+        ("verify the file was deleted", None),
+        # Too ordinary to read off prose; still caught inside a SQL payload.
+        ("update the spreadsheet", None),
+        ("find and replace the text", "Replace All"),
+    ],
+)
+def test_ordinary_work_does_not_ask_permission(
+    sub_goal: str, target_label: str | None
+) -> None:
+    """A guard that fires on everything is a guard nobody reads.
+
+    Fail-closed is the right instinct for one decision and the wrong one in
+    aggregate: an approval queue full of dropdowns trains its reader to approve
+    without looking, which costs more safety than it buys.
+    """
+    turn = AgentTurn(
+        thought="t",
+        sub_goal=sub_goal,
+        action=MouseClick(type="mouse_click", x=1, y=1),
+    )
+    assert classify_risk(turn, target_label=target_label) is not Risk.DESTRUCTIVE
+
+
+@pytest.mark.parametrize(
+    ("sub_goal", "target_label"),
+    [
+        # The macOS delete verb is the Trash, not the word "delete".
+        ("clean up the desktop", "Move to Trash"),
+        ("tidy up", "Empty Trash"),
+        ("continue with the flow", "Buy now"),
+        # A gerund is how a model narrates an intention it is about to act on.
+        ("deleting the old export", None),
+    ],
+)
+def test_the_quieting_did_not_open_a_hole(
+    sub_goal: str, target_label: str | None
+) -> None:
+    turn = AgentTurn(
+        thought="t",
+        sub_goal=sub_goal,
+        action=MouseClick(type="mouse_click", x=1, y=1),
+    )
+    assert classify_risk(turn, target_label=target_label) is Risk.DESTRUCTIVE
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sql": "TRUNCATE users"},
+        {"sql": "UPDATE users SET admin = 1"},
+        {"command": "rm -rf /"},
+    ],
+)
+def test_a_statement_inside_a_payload_is_still_caught(
+    payload: dict[str, object],
+) -> None:
+    """Verbs too ordinary for prose stay dangerous inside an argument.
+
+    Nobody passes a paragraph about updating things as a tool's ``sql``
+    parameter, so the argument set can be broader than the subject set without
+    costing a single false positive.
+    """
+    turn = AgentTurn(
+        thought="t",
+        sub_goal="run it",
+        action=CallTool(type="call_tool", tool="db", arguments=payload),
+    )
+    assert classify_risk(turn) is Risk.DESTRUCTIVE

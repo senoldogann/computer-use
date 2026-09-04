@@ -66,6 +66,8 @@ class FailureKind(str, Enum):
     DRIVER_UNAVAILABLE = "driver_unavailable"
     #: The model never produced a decision matching the action contract.
     MODEL_CONTRACT = "model_contract"
+    #: A password field was on screen when the agent tried to type.
+    CREDENTIALS = "credentials"
     #: Anything not recognised — treated conservatively.
     UNKNOWN = "unknown"
 
@@ -166,11 +168,19 @@ def classify_failure(exc: BaseException, action: Action | None) -> Failure:
         "SemanticVerificationFailedError": FailureKind.TEXT_PLACEMENT,
         "FocusLostError": FailureKind.FOCUS,
         "StaleObservationError": FailureKind.STALE,
+        # A mark that no longer describes what the model picked is the same
+        # problem as a stale observation, and wants the same answer: the frame
+        # this decision came from is gone, so decide again from the live one.
+        "StaleMarkError": FailureKind.STALE,
+        # A mark index that was never in the list is the model naming something
+        # that does not exist — a contract miss, not a screen that moved.
+        "UnknownMarkError": FailureKind.MODEL_CONTRACT,
         "StuckLoopError": FailureKind.REPETITION,
         "DriverRpcError": FailureKind.DRIVER_REJECTED,
         "DriverConnectionError": FailureKind.DRIVER_UNAVAILABLE,
         "DriverTimeoutError": FailureKind.DRIVER_UNAVAILABLE,
         "InvalidDecisionError": FailureKind.MODEL_CONTRACT,
+        "CredentialEntryRefused": FailureKind.CREDENTIALS,
     }
     kind = kinds.get(name, FailureKind.UNKNOWN)
     return Failure(
@@ -257,6 +267,14 @@ _KIND_GUIDANCE: Final[dict[FailureKind, str]] = {
     FailureKind.MODEL_CONTRACT: (
         "Your reply did not match the action contract. Emit exactly one JSON "
         "object with the required fields and one supported action type."
+    ),
+    FailureKind.CREDENTIALS: (
+        "This screen is asking for a password, and you never type one — not "
+        "with a different action, not into a different field, not after "
+        "clicking something first. Do not try to work around it. If the goal "
+        "can be reached without signing in, say how and do that; otherwise "
+        "emit finish with status \"failed\" and state plainly that the person "
+        "has to sign in before this can continue."
     ),
     FailureKind.UNKNOWN: (
         "The step failed for a reason the orchestrator could not classify. "

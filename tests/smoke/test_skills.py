@@ -10,8 +10,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from computeruse.orchestrator.schemas import MouseClick, PressHotkey, TypeText, Wait
+from computeruse.orchestrator.schemas import (
+    LoadSkill,
+    MouseClick,
+    PressHotkey,
+    TypeText,
+    Wait,
+)
 from computeruse.skills.distiller import (
     TAG_LIMIT,
     Trajectory,
@@ -137,8 +144,32 @@ def test_registry_round_trip_on_disk(tmp_path: Path) -> None:
 
 def test_registry_load_missing_raises(tmp_path: Path) -> None:
     registry = SkillRegistry(tmp_path)
+    # A well-formed id that simply is not in the store. It used to read
+    # "nope:nope", which now fails the id check first — a different error for a
+    # different reason, and not what this test is about.
     with pytest.raises(KeyError):
-        registry.load("nope:nope")
+        registry.load("nope.nope")
+
+
+def test_registry_refuses_an_id_that_could_climb_out_of_the_store(
+    tmp_path: Path,
+) -> None:
+    """The store re-checks the id because it is where a string becomes a path."""
+    registry = SkillRegistry(tmp_path)
+    for climbing in ("../../etc/passwd", "/etc/passwd", "..", "a/b"):
+        with pytest.raises(ValueError, match="not a valid store id"):
+            registry.load(climbing)
+
+
+def test_load_skill_action_carries_the_store_id_constraint() -> None:
+    """The id a *model* emits is constrained like the ones on disk.
+
+    ``LoadSkill`` was the one place the pattern was missing, so a skill id
+    assembled from screen-derived text reached a path join unvalidated.
+    """
+    with pytest.raises(ValidationError):
+        LoadSkill(type="load_skill", skill_id="../../etc/passwd")
+    assert LoadSkill(type="load_skill", skill_id="safari.export-pdf").skill_id
 
 
 def test_search_ranks_app_and_tags() -> None:

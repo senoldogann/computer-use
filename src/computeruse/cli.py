@@ -31,8 +31,9 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 from computeruse.agent import Agent, AgentConfig
 from computeruse.autonomous import (
@@ -64,8 +65,38 @@ from computeruse.orchestrator.loop import (
     UnrecoverableFailureError,
     WorkingState,
 )
+from computeruse.orchestrator.mission import (
+    DEFAULT_MAX_ATTEMPTS,
+    MissionStore,
+    mission_blocked,
+    mission_finished,
+    mission_started,
+    mission_unblocked,
+    new_mission,
+    remaining_goal,
+    resumable,
+)
+from computeruse.orchestrator.planner import (
+    GoalPlan,
+    SessionCheckpoint,
+    goal_from_sub_goals,
+    outstanding_sub_goals,
+)
 from computeruse.orchestrator.prompts import completion_auditor, scaffolded_provider
-from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
+from computeruse.orchestrator.report import (
+    UsageRecord,
+    UsageStore,
+    period_ending,
+    render,
+    summarize,
+)
+from computeruse.orchestrator.schemas import (
+    AgentTurn,
+    Finish,
+    MouseClick,
+    action_from_payload,
+)
+from computeruse.orchestrator.supervisor import supervisor_for
 from computeruse.providers.openai import (
     DEFAULT_MODEL,
     ModelCallStats,
@@ -75,14 +106,37 @@ from computeruse.providers.openai import (
     openai_model,
     price_for,
 )
+from computeruse.security.approvals import (
+    ApprovalQueue,
+    ApprovalRequest,
+    ApprovalRequiredError,
+    approval_request_for,
+    goals_awaiting_decision,
+    now_utc,
+    pending_requests,
+)
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionConfirmationRequired,
     PermissionDeniedError,
+    classify_risk,
+)
+from computeruse.security.grants import (
+    ANY as GRANT_ANY,
+)
+from computeruse.security.grants import (
+    GRANTABLE_VERBS,
+    CapabilityGrant,
+    GrantStore,
+    action_verbs,
+    active_grants,
+    new_grant,
 )
 from computeruse.security.killswitch import KillSwitch, install_sigint_catcher
 from computeruse.skills.registry import SkillRegistry
 from computeruse.vision.apps import extract_goal_app, infer_target_app
+
+LOGGER: Final = logging.getLogger(__name__)
 
 DEFAULT_SOCKET = "/tmp/actuation-driver.sock"
 DEFAULT_STORE = Path.home() / ".computeruse"
@@ -126,6 +180,107 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         f"(default: {AUTONOMOUS_REST_SECONDS:.0f}).",
     )
     parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print what the agent did while nobody was watching: what it "
+        "finished, what it lost, what is waiting for your decision, what "
+        "authority it used and what it spent. Reads the store; runs nothing.",
+    )
+    parser.add_argument(
+        "--since-hours",
+        type=float,
+        default=24.0,
+        help="How far back --report looks, in hours (default: 24). Open items "
+        "— paused missions, unanswered questions — are always shown whatever "
+        "the window.",
+    )
+    parser.add_argument(
+        "--grants",
+        action="store_true",
+        help="List your standing capability grants — the destructive actions "
+        "the agent may take without asking, and what bounds each one. Reads "
+        "the store; runs nothing.",
+    )
+    parser.add_argument(
+        "--grant",
+        default=None,
+        metavar="VERB",
+        help="Delegate authority over one family of destructive action "
+        f"({', '.join(sorted(GRANTABLE_VERBS))}) in advance, so an unattended "
+        "run need not stop and ask. Bounded by --grant-app, --grant-target, "
+        "--grant-uses and --grant-hours.",
+    )
+    parser.add_argument(
+        "--grant-app",
+        default=None,
+        metavar="APP",
+        help="Application the grant applies within. Required: a grant with no "
+        "application covers the whole machine, which has to be typed as "
+        f"--grant-app '{GRANT_ANY}' deliberately.",
+    )
+    parser.add_argument(
+        "--grant-target",
+        default=GRANT_ANY,
+        metavar="GLOB",
+        help="Glob matched against the accessibility title of the control, e.g. "
+        f"'Move to Trash' or '*.tmp' (default: {GRANT_ANY!r}, any control in "
+        "the app).",
+    )
+    parser.add_argument(
+        "--grant-uses",
+        type=int,
+        default=1,
+        help="How many times the grant may be used before it is spent "
+        "(default: 1).",
+    )
+    parser.add_argument(
+        "--grant-hours",
+        type=float,
+        default=24.0,
+        help="How long the grant lives, in hours (default: 24).",
+    )
+    parser.add_argument(
+        "--grant-note",
+        default=None,
+        metavar="TEXT",
+        help="Why you granted it, in your words. Required: a list of standing "
+        "permissions nobody can explain is one nobody will audit.",
+    )
+    parser.add_argument(
+        "--revoke",
+        default=None,
+        metavar="GRANT_ID",
+        help="Delete a standing capability grant.",
+    )
+    parser.add_argument(
+        "--always",
+        action="store_true",
+        help="With --approve: also mint a capability grant from the parked "
+        "action, so the same question is not asked again. Scoped to that "
+        "action's app and control unless you widen it with the --grant-* flags.",
+    )
+    parser.add_argument(
+        "--approvals",
+        action="store_true",
+        help="List the actions an unattended run parked for your decision, and "
+        "the missions waiting on them. Reads the store; runs nothing.",
+    )
+    parser.add_argument(
+        "--approve",
+        default=None,
+        metavar="REQUEST_ID",
+        help="Approve a parked action and return its mission to the queue. The "
+        "action is NOT performed now — the next run reaches it with your answer "
+        "on record.",
+    )
+    parser.add_argument(
+        "--deny",
+        default=None,
+        metavar="REQUEST_ID",
+        help="Refuse a parked action. Its mission returns to the queue so the "
+        "rest of the work can proceed without it.",
+    )
+    parser.add_argument(
         "--app",
         default=None,
         help="Target application name, e.g. 'Google Chrome' (default: auto-discover "
@@ -150,8 +305,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--level",
         type=int,
         choices=[0, 1, 2, 3],
-        default=AutonomyLevel.GUARDED.value,
-        help="Autonomy level 0-3 (default: 2 = guarded).",
+        default=AutonomyLevel.FULL.value,
+        help="Autonomy level 0-3 (default: 3 = full). Level 3 still asks "
+        "about destructive actions unless --yes is given.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Trust mode: auto-approve every CONFIRM without prompting, so "
+        "the agent runs uninterrupted like a human operator. BLOCK still "
+        "blocks, and the kill-switch (Cmd+Shift+Escape / Ctrl-C / shake), "
+        "budgets, verification and stuck-guard keep running. Every "
+        "auto-approval is logged. This is delegation in advance — use it "
+        "only on a machine you own.",
     )
     parser.add_argument(
         "--background",
@@ -200,8 +366,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--plan",
         action="store_true",
         help="Decompose the goal into ordered sub-goals and advance through "
-        "them (a finish marks the current sub-goal done); checkpoints are "
-        "written to --store/checkpoints for resumability.",
+        "them (a finish marks the current sub-goal done); progress is saved "
+        "to the mission store as it happens and checkpoints are written to "
+        "--store/checkpoints. Resume with --resume <plan-id>; missions "
+        "resume via remaining_goal.",
+    )
+    parser.add_argument(
+        "--resume",
+        default=None,
+        metavar="PLAN_ID",
+        help="Resume a previous --plan run from its checkpoint file "
+        "(--store/checkpoints/<PLAN_ID>.json) instead of starting over.",
     )
     parser.add_argument(
         "--display",
@@ -464,7 +639,7 @@ def _load_callable(spec: str, kind: str) -> Callable[..., object]:
     return callable_
 
 
-def cli_confirm_handler(turn: AgentTurn) -> bool:
+def cli_confirm_handler(turn: AgentTurn, target_label: str | None) -> bool:
     """Prompt the user on stderr/stdin for actions that require confirmation.
 
     Reads exactly one line from stdin so the channel works both for an
@@ -475,15 +650,38 @@ def cli_confirm_handler(turn: AgentTurn) -> bool:
     denial — fail-closed (Law 5).
     """
     print(
-        f"\n⚠️  CONFIRMATION REQUIRED: Agent wants to perform [{turn.action.type}] for goal: {turn.sub_goal!r}",
+        f"\nCONFIRMATION REQUIRED: Agent wants to perform [{turn.action.type}] for goal: {turn.sub_goal!r}",
         file=sys.stderr,
     )
     print(f"   Payload: {turn.action.model_dump(exclude_none=True)}", file=sys.stderr)
+    if target_label:
+        # What the *screen* says the click will hit, which is the fact a person
+        # is actually being asked about.
+        print(f"   Target: {target_label}", file=sys.stderr)
     try:
         line = sys.stdin.readline()
     except (EOFError, KeyboardInterrupt):
         return False
     return line.strip().lower() in ("y", "yes")
+
+
+def auto_confirm_handler(turn: AgentTurn, target_label: str | None) -> bool:
+    """Trust-mode confirmation: approve without prompting, but log it.
+
+    Used only when the operator passed --yes. The approval is recorded on
+    stderr (and therefore in the panel log + trace) so an unattended run
+    stays auditable: what was auto-approved, what it targeted, and why the
+    guard had asked. Never used at Level 0 — the guard BLOCKs there before
+    any handler is consulted.
+    """
+    print(
+        f"trust mode (--yes): auto-approved [{turn.action.type}] for "
+        f"{turn.sub_goal!r}"
+        + (f" on {target_label!r}" if target_label else "")
+        + f" payload={turn.action.model_dump(exclude_none=True)}",
+        file=sys.stderr,
+    )
+    return True
 
 
 def resolve_verify(args: argparse.Namespace) -> bool:
@@ -534,6 +732,9 @@ def build_config(
     app_inferred: bool = False,
     stats_sink: Callable[[object], None] | None = None,
     budget_guard: Callable[[], None] | None = None,
+    driver_recover: Callable[[], None] | None = None,
+    parked_confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None,
+    on_plan_progress: Callable[[GoalPlan], None] | None = None,
 ) -> AgentConfig:
     """Compose the CLI's args into the single immutable config the agent runs.
 
@@ -560,11 +761,28 @@ def build_config(
         completion_check = binding.completion_check
     else:
         provider = load_provider(args.provider, goal)
-    confirm_handler = (
-        cli_confirm_handler
-        if sys.stdin.isatty() or os.environ.get("COMPUTERUSE_MENU") == "1"
-        else None
-    )
+    # An unattended session never asks: there is nobody to ask. Reaching the
+    # interactive handler there was the worst of the three possible endings —
+    # ``cli_confirm_handler`` blocks on ``stdin.readline()``, and launched from
+    # a terminal (``isatty()`` is true even when the human has gone home) that
+    # is a session frozen mid-task, holding the machine, until someone returns.
+    # ``parking_confirm_handler`` writes the question down and ends the run
+    # instead, so the work is paused rather than hung or silently lost.
+    # Trust mode (--yes) overrides both: the operator explicitly asked for
+    # uninterrupted autonomy, so CONFIRM is auto-approved with a log line.
+    trust_mode = bool(getattr(args, "yes", False))
+    if trust_mode:
+        confirm_handler = auto_confirm_handler
+    else:
+        confirm_handler = (
+            parked_confirm_handler
+            if parked_confirm_handler is not None
+            else (
+                cli_confirm_handler
+                if sys.stdin.isatty() or os.environ.get("COMPUTERUSE_MENU") == "1"
+                else None
+            )
+        )
     return AgentConfig(
         goal=goal,
         app=args.app,
@@ -573,6 +791,7 @@ def build_config(
         store_dir=Path(args.store),
         autonomy_level=AutonomyLevel(args.level),
         confirm_handler=confirm_handler,
+        auto_approve=trust_mode,
         enable_visual_verification=resolve_verify(args),
         enable_vision=getattr(args, "vision", True),
         enable_set_of_marks=getattr(args, "marks", True),
@@ -595,6 +814,8 @@ def build_config(
         trace_dir=Path(args.trace_dir) if args.trace_dir is not None else None,
         trace_screenshots=getattr(args, "trace_screenshots", False),
         budget_guard=budget_guard,
+        driver_recover=driver_recover,
+        on_plan_progress=on_plan_progress,
     )
 
 
@@ -650,7 +871,9 @@ def spawn_driver(binary: str, socket_path: str, *, real: bool) -> subprocess.Pop
     raise RuntimeError(f"driver did not create socket {socket_path} in time: {detail}")
 
 
-def _run_autonomous_session(args: argparse.Namespace) -> int:
+def _run_autonomous_session(
+    args: argparse.Namespace, *, driver_recover: Callable[[], None] | None
+) -> int:
     """Work unattended until the session's bounds are reached.
 
     The agent's own memory is what it works from, so the stores are opened once
@@ -661,6 +884,8 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
     skills = SkillRegistry(store / "skills")
     episodes = EpisodicStore(store / "episodes")
+    missions = MissionStore(store / "missions")
+    approvals = ApprovalQueue(store / "approvals")
     rng = random.Random()
     attempted_goals: list[str] = []
     budget = RunBudget(
@@ -692,6 +917,22 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
         tokens["total"] += int(getattr(call, "total_tokens", 0) or 0)
         cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
 
+    def usage_since(
+        mark: tuple[int, float, float]
+    ) -> tuple[int, float, float]:
+        """What has been spent since ``mark`` (tokens, dollars, seconds).
+
+        The session's counters are cumulative because the *budget* is the
+        session's, so a per-run record has to be a delta — charging each run
+        the session total would make a ten-run night look like ten expensive
+        runs instead of ten cheap ones.
+        """
+        return (
+            tokens["total"] - mark[0],
+            cost["usd"] - mark[1],
+            time.monotonic() - mark[2],
+        )
+
     def budget_guard() -> None:
         reason = budget_verdict(
             budget,
@@ -706,6 +947,39 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
 
     def execute(proposal: GoalProposal) -> None:
         attempted_goals.append(proposal.goal)
+        mark = (tokens["total"], cost["usd"], time.monotonic())
+        # The mission is opened *before* the run, so a session killed
+        # mid-action still leaves a record that this work was started and how
+        # far it got. Its attempt is spent here for the same reason.
+        mission = mission_started(
+            new_mission(
+                goal=proposal.goal, app=proposal.app, plan=None, now=now_utc()
+            ),
+            now_utc(),
+        )
+        missions.save(mission)
+
+        # The plan as of the last sub-goal transition. Held here because the
+        # blocked path needs it *after* an exception, when the result object
+        # that would otherwise carry it does not exist.
+        progress: dict[str, GoalPlan | None] = {"plan": None}
+
+        def record_progress(plan: GoalPlan) -> None:
+            progress["plan"] = plan
+            missions.save(mission.model_copy(update={"plan": plan}))
+
+        def park(turn: AgentTurn, target_label: str | None) -> bool:
+            """Write the question down and stop, instead of asking nobody."""
+            request = approval_request_for(
+                turn,
+                goal=proposal.goal,
+                mission_id=mission.mission_id,
+                target_label=target_label,
+                risk=classify_risk(turn, target_label=target_label).value,
+                now=now_utc(),
+            )
+            approvals.submit(request)
+            raise ApprovalRequiredError(request=request)
 
         config = build_config(
             args,
@@ -714,11 +988,100 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
             app_inferred=proposal.app is not None,
             stats_sink=stats_sink,
             budget_guard=None if budget.is_unset else budget_guard,
+            driver_recover=driver_recover,
+            parked_confirm_handler=park,
+            on_plan_progress=record_progress,
         )
         if proposal.app is not None:
             config = replace(config, app=proposal.app)
-        result = Agent(config).run()
+        def record(run_id: str, outcome: str, steps: int) -> None:
+            spent_tokens, spent_cost, spent_seconds = usage_since(mark)
+            _record_usage(
+                store,
+                run_id=run_id,
+                goal=proposal.goal,
+                app=proposal.app or "unknown",
+                outcome=outcome,
+                steps=steps,
+                tokens=spent_tokens,
+                cost_usd=spent_cost,
+                elapsed_seconds=spent_seconds,
+            )
+
+        try:
+            result = Agent(config).run()
+        except ApprovalRequiredError as exc:
+            # Parked, not failed: the attempt is refunded and the mission waits
+            # for a person rather than being retried into the same question.
+            missions.save(
+                mission_blocked(
+                    mission,
+                    plan=progress["plan"],
+                    reason=str(exc),
+                    approval_id=exc.request.request_id,
+                    now=now_utc(),
+                )
+            )
+            record(f"parked-{exc.request.request_id}", "blocked", 0)
+            print(
+                f"autonomous  : {proposal.goal!r} -> parked for approval "
+                f"({exc.request.request_id})"
+            )
+            return
+        except Exception:
+            missions.save(
+                mission_finished(
+                    mission, plan=progress["plan"], succeeded=False, now=now_utc()
+                )
+            )
+            record(f"unfinished-{mission.mission_id}", "failure", 0)
+            raise
+        missions.save(
+            mission_finished(
+                mission, plan=result.state.plan, succeeded=True, now=now_utc()
+            )
+        )
+        record(result.run_id, "success", len(result.state.completed_steps))
         print(f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps")
+
+    def propose() -> GoalProposal | None:
+        """Unfinished work first, then something new.
+
+        A mission left half-done by a killed run is the most concrete thing
+        memory holds — more concrete than a failed skill, because it is a task
+        that was actually started — and resuming it is what makes work survive
+        the session that began it. ``remaining_goal`` hands over what is left,
+        never the original goal: re-running a completed sub-goal on a physical
+        host is not merely wasteful, it repeats whatever that step did.
+        """
+        # A parked run is still recorded as a failed episode (its work is worth
+        # keeping), and that record is what ``propose_goal`` reads — so without
+        # this the next run re-proposes the goal it just parked and asks the
+        # same question again. Its mission is already held back; this closes
+        # the same hole in the episode channel.
+        waiting = goals_awaiting_decision(approvals.requests())
+        open_work = resumable(
+            missions.missions(), max_attempts=DEFAULT_MAX_ATTEMPTS
+        )
+        for mission in open_work:
+            if mission.goal in waiting:
+                continue
+            return GoalProposal(
+                goal=remaining_goal(mission),
+                app=mission.app,
+                reason=(
+                    f"mission {mission.mission_id} was started and never "
+                    f"finished ({mission.attempts} attempt(s) so far)"
+                ),
+            )
+        proposal = propose_goal(skills, episodes, rng=rng)
+        if proposal is not None and proposal.goal in waiting:
+            LOGGER.info(
+                "autonomous: %r is already waiting on a decision; nothing else to do",
+                proposal.goal,
+            )
+            return None
+        return proposal
 
     done = run_autonomously(
         SessionLimits(
@@ -727,50 +1090,365 @@ def _run_autonomous_session(args: argparse.Namespace) -> int:
             rest_seconds=args.rest_seconds,
         ),
         observe=observe,
-        propose=lambda: propose_goal(skills, episodes, rng=rng),
+        propose=propose,
         execute=execute,
         stop=lambda: False,
     )
     print(f"autonomous  : {done} run(s) attempted")
     for goal in attempted_goals:
         print(f"  - {goal}")
+    parked = pending_requests(approvals.requests())
+    if parked:
+        print(f"awaiting you: {len(parked)} action(s) need a decision")
+        for request in parked:
+            target = f" on {request.target_label!r}" if request.target_label else ""
+            print(f"  - [{request.request_id}] {request.action_type}{target} — {request.sub_goal}")
+        print("  review with: computeruse --approvals")
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = parse_args(argv)
-    # Live step visibility: the runner logs every executed physical action at
-    # INFO, and a real run takes seconds per LLM decision — without this the
-    # terminal stays silent mid-run and the user sees "Chrome opened, nothing
-    # happens". Stream the runner's lines to stderr so the run is observable
-    # while the final summary block still lands on stdout at the end.
-    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
-    if args.autonomous is None and not args.goal:
-        print("error: --goal is required unless --autonomous is given", file=sys.stderr)
-        return 2
-    if args.autonomous is not None:
-        if args.autonomous < 1:
-            print("error: --autonomous needs a positive run count", file=sys.stderr)
+def _grant_from_request(
+    args: argparse.Namespace, request: ApprovalRequest, store: Path
+) -> CapabilityGrant | None:
+    """Mint a grant covering the action a human just approved.
+
+    Returns ``None`` when the parked action carries no destructive verb to
+    delegate, which can happen: an action reaches the queue because the *guard*
+    said CONFIRM, and a routine-marker confirmation ("Save", "Close") is not a
+    family anyone can be granted. Saying so beats writing a grant that matches
+    nothing.
+    """
+    action = action_from_payload(request.action)
+    if action is None:
+        return None
+    verbs = action_verbs(
+        action, sub_goal=request.sub_goal, target_label=request.target_label
+    )
+    if not verbs:
+        return None
+    now = now_utc()
+    grant = new_grant(
+        # The narrowest family the action fell into, so "delete and send"
+        # delegates one of them rather than silently both.
+        verb=min(verbs),
+        app=args.grant_app or args.app or GRANT_ANY,
+        target_pattern=args.grant_target
+        if args.grant_target != GRANT_ANY
+        else (request.target_label or GRANT_ANY),
+        max_invocations=args.grant_uses,
+        expires_at=now + timedelta(hours=args.grant_hours),
+        note=args.grant_note or f"approved once for: {request.sub_goal}",
+        now=now,
+    )
+    GrantStore(store / "grants").save(grant)
+    return grant
+
+
+def _record_usage(
+    store: Path,
+    *,
+    run_id: str,
+    goal: str,
+    app: str,
+    outcome: str,
+    steps: int,
+    tokens: int,
+    cost_usd: float,
+    elapsed_seconds: float,
+) -> None:
+    """Write what a run consumed, whatever ending it had.
+
+    Best effort by contract: a run that did its work and then failed to write
+    its own receipt should not report failure for that reason, so a store that
+    cannot be written is logged and skipped. The counters are otherwise lost
+    with the terminal — they only ever existed in this process.
+    """
+    try:
+        UsageStore(store / "usage").record(
+            UsageRecord(
+                run_id=run_id,
+                goal=goal,
+                app=app,
+                outcome=outcome,
+                steps=steps,
+                total_tokens=tokens,
+                cost_usd=cost_usd,
+                elapsed_seconds=elapsed_seconds,
+                recorded_at=now_utc(),
+            )
+        )
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("could not record usage for run %s: %s", run_id, exc)
+
+
+def _print_report(args: argparse.Namespace) -> int:
+    """Read the five stores together and print what happened (I/O + pure render)."""
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    report = summarize(
+        episodes=tuple(EpisodicStore(store / "episodes").episodes()),
+        usage=UsageStore(store / "usage").records(),
+        missions=MissionStore(store / "missions").missions(),
+        approvals=ApprovalQueue(store / "approvals").requests(),
+        grants=GrantStore(store / "grants").grants(),
+        period=period_ending(now_utc(), hours=args.since_hours),
+    )
+    print(render(report), end="")
+    return 0
+
+
+def _review_grants(args: argparse.Namespace) -> int:
+    """List, mint, or revoke standing capability grants (reads/writes the store).
+
+    Minting is deliberately verbose. Every bound — the app, the controls, the
+    count, the expiry — has to be typed or defaulted on purpose, because the
+    whole safety argument for delegating authority in advance is that the
+    delegation is *narrow*. A grant nobody had to think about is one nobody
+    remembers giving.
+    """
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    grants = GrantStore(store / "grants")
+    now = now_utc()
+
+    if args.revoke is not None:
+        try:
+            grants.revoke(args.revoke)
+        except KeyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
             return 2
-        # An unattended process without a bound is not autonomy, it is a leak,
-        # and a bound reached by forgetting a flag is not a bound. The run
-        # count alone is not enough: one run can spend indefinitely.
-        if (
-            args.deadline_seconds is None
-            and args.max_tokens is None
-            and args.max_cost is None
-        ):
+        print(f"{args.revoke}: revoked")
+        return 0
+
+    if args.grant is not None:
+        if args.grant_app is None:
             print(
-                "error: --autonomous requires at least one of --deadline-seconds, "
-                "--max-tokens or --max-cost. Nobody is watching an unattended run, "
-                "so its ceiling has to be set before it starts.",
+                "error: --grant needs --grant-app. A grant with no application "
+                f"covers the whole machine; type --grant-app {GRANT_ANY!r} if "
+                "that is really what you mean.",
                 file=sys.stderr,
             )
             return 2
+        if not args.grant_note:
+            print(
+                "error: --grant needs --grant-note saying why. A standing "
+                "permission you cannot explain later is one you cannot audit.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            grant = new_grant(
+                verb=args.grant,
+                app=args.grant_app,
+                target_pattern=args.grant_target,
+                max_invocations=args.grant_uses,
+                expires_at=now + timedelta(hours=args.grant_hours),
+                note=args.grant_note,
+                now=now,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        grants.save(grant)
+        print(f"granted {grant.grant_id}")
+        print(f"  {grant.verb} in {grant.app}, controls matching {grant.target_pattern!r}")
+        print(f"  {grant.max_invocations} use(s), expires {grant.expires_at.isoformat(timespec='seconds')}")
+        return 0
+
+    live = active_grants(grants.grants(), now)
+    if not live:
+        print("no standing grants; every destructive action will ask")
+        return 0
+    print(f"{len(live)} standing grant(s):\n")
+    for grant in live:
+        print(f"  [{grant.grant_id}]")
+        print(f"    may      : {grant.verb} in {grant.app}")
+        print(f"    controls : {grant.target_pattern}")
+        print(f"    left     : {grant.remaining} of {grant.max_invocations}")
+        print(f"    expires  : {grant.expires_at.isoformat(timespec='seconds')}")
+        print(f"    because  : {grant.note}")
+        print()
+    print("revoke with: computeruse --revoke <id>")
+    return 0
+
+
+def _review_approvals(args: argparse.Namespace) -> int:
+    """List parked actions, or record a decision on one (reads/writes the store).
+
+    Deliberately does not perform the approved action. An approval is a
+    recorded answer, not a remote control: the next run reaches that step
+    itself, with the guard consulting what the human said. Performing it here
+    would act on a screen nobody has looked at since the question was asked.
+    """
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    approvals = ApprovalQueue(store / "approvals")
+    missions = MissionStore(store / "missions")
+
+    decision_id = args.approve or args.deny
+    if decision_id is not None:
+        try:
+            answered = approvals.resolve(
+                decision_id, approved=args.approve is not None, now=now_utc()
+            )
+        except KeyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"{answered.request_id}: {answered.decision}")
+        if args.always and args.approve is not None:
+            # "Yes, and stop asking" — the natural moment to delegate, because
+            # the person is looking at exactly what they are delegating. The
+            # grant is scoped to the action they just read: its verb family,
+            # its app, and the control it names. Widening that is possible but
+            # has to be typed.
+            grant = _grant_from_request(args, answered, store)
+            if grant is None:
+                print(
+                    "  (no destructive verb to delegate; nothing granted)",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  granted {grant.grant_id}: {grant.verb} in {grant.app}, "
+                      f"{grant.max_invocations} use(s), controls matching "
+                      f"{grant.target_pattern!r}")
+        if answered.mission_id is not None:
+            try:
+                mission = missions.load(answered.mission_id)
+            except KeyError:
+                # The queue outlives the mission store's contents; a decision
+                # is still worth recording even when its mission is gone.
+                print(f"  (mission {answered.mission_id} no longer in the store)")
+                return 0
+            missions.save(mission_unblocked(mission, now_utc()))
+            print(f"  mission {mission.mission_id} is back in the queue")
+        return 0
+
+    parked = pending_requests(approvals.requests())
+    if not parked:
+        print("no actions are waiting for a decision")
+        return 0
+    print(f"{len(parked)} action(s) waiting for a decision:\n")
+    for request in parked:
+        print(f"  [{request.request_id}]")
+        print(f"    goal     : {request.goal}")
+        print(f"    step     : {request.sub_goal}")
+        print(f"    action   : {request.action_type} {request.action}")
+        if request.target_label:
+            print(f"    target   : {request.target_label}")
+        print(f"    risk     : {request.risk}")
+        print(f"    parked   : {request.created_at.isoformat(timespec='seconds')}")
+        print()
+    print("approve with: computeruse --approve <id>   (or --deny <id>)")
+    return 0
+
+
+def _apply_resume(args: argparse.Namespace) -> int | None:
+    """Rewrite the goal to whatever a checkpointed plan has left (AUT-01).
+
+    Returns an exit code when the run should not start — the checkpoint could
+    not be read, or its plan is already finished — and ``None`` to carry on
+    with ``args.goal`` replaced by the outstanding sub-goals.
+
+    ``--resume`` names a plan id in the store. A path to a checkpoint file is
+    also accepted, deliberately and only here: this value comes from the person
+    at the keyboard, never from the model, and pointing at a file someone moved
+    is a reasonable thing for them to want. Nothing else in the system resolves
+    a caller-supplied string to an arbitrary path.
+    """
+    if args.resume is None:
+        return None
+    store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
+    checkpoint_path = store / "checkpoints" / f"{args.resume}.json"
+    if not checkpoint_path.is_file():
+        supplied = Path(args.resume).expanduser()
+        if supplied.is_file():
+            checkpoint_path = supplied
+    try:
+        checkpoint = SessionCheckpoint.load(checkpoint_path)
+    except (OSError, ValueError) as exc:
+        print(
+            f"error: cannot load checkpoint {args.resume!r}: {exc}", file=sys.stderr
+        )
+        return 2
+    # One definition of "what is left", shared with the mission store: two
+    # would eventually disagree about whether a half-done plan resumes at step
+    # two or step one.
+    outstanding = outstanding_sub_goals(checkpoint.plan)
+    if not outstanding:
+        print(
+            f"checkpoint {checkpoint.session_id}: plan already complete",
+            file=sys.stderr,
+        )
+        return 0
+    args.goal = goal_from_sub_goals(outstanding)
+    print(
+        f"resuming checkpoint {checkpoint.session_id}: "
+        f"{checkpoint.plan.progress_summary}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _dispatch_store_command(args: argparse.Namespace) -> int | None:
+    """Run the read-only store commands, or ``None`` to continue to a run.
+
+    These need no driver, no model and no goal, so they are dispatched before
+    every check that assumes a run is about to start.
+    """
+    if args.report:
+        return _print_report(args)
+    if args.grants or args.grant is not None or args.revoke is not None:
+        return _review_grants(args)
+    if args.approvals or args.approve is not None or args.deny is not None:
+        return _review_approvals(args)
+    return None
+
+
+def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
+    """Exit code for a combination that cannot start, else ``None``."""
+    if args.autonomous is None and not args.goal:
+        print("error: --goal is required unless --autonomous is given", file=sys.stderr)
+        return 2
+    if args.autonomous is None:
+        return None
+    if args.autonomous < 1:
+        print("error: --autonomous needs a positive run count", file=sys.stderr)
+        return 2
+    # An unattended process without a bound is not autonomy, it is a leak, and
+    # a bound reached by forgetting a flag is not a bound. The run count alone
+    # is not enough: one run can spend indefinitely.
+    if (
+        args.deadline_seconds is None
+        and args.max_tokens is None
+        and args.max_cost is None
+    ):
+        print(
+            "error: --autonomous requires at least one of --deadline-seconds, "
+            "--max-tokens or --max-cost. Nobody is watching an unattended run, "
+            "so its ceiling has to be set before it starts.",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
+def _warn_about_degraded_modes(args: argparse.Namespace) -> None:
+    """Say plainly when a run will be less than it looks (Law 6.3)."""
+    if getattr(args, "yes", False) and args.autonomous is not None:
+        # The one combination the rest of the safety floor does not cover.
+        # Budgets bound what a run spends and the kill switch ends one you are
+        # watching; neither helps against a deletion nobody saw at 3am. Said,
+        # not refused: it is the operator's machine and an explicit opt-in.
+        print(
+            "WARNING: --yes with --autonomous means every destructive action — "
+            "deletions, sends, purchases — is auto-approved while nobody is "
+            "watching, and nothing is queued for you to review afterwards. "
+            "Consider --grant instead: it delegates one verb, in one app, for "
+            "a set number of uses, and expires. Anything it does not cover "
+            "waits for you rather than proceeding.",
+            file=sys.stderr,
+        )
     if args.model is None and args.provider == DEMO_PROVIDER:
         # The demo provider does two fixed clicks then finishes — deliberately
         # so the stack runs end-to-end without an LLM. On a *real* host that
-        # reads as a broken agent, so never run it silently (Law 6.3).
+        # reads as a broken agent, so never run it silently.
         print(
             "WARNING: no --model set, so the scripted DEMO provider (two fixed "
             "clicks, then finish) will run, not an LLM. Pass --model openai to "
@@ -778,9 +1456,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
     if args.verify is None and resolve_verify(args):
-        # Verification now defaults ON for real LLM runs: a miss must be
-        # caught and folded into the model's next decision, or the agent
-        # keeps clicking the same wrong spot (the observed failure mode).
+        # Verification defaults ON for real LLM runs: a miss must be caught and
+        # folded into the model's next decision, or the agent keeps clicking
+        # the same wrong spot (the observed failure mode).
         print(
             "note: --verify auto-enabled for this real run (a click that "
             "misses is caught and reported to the agent); pass --no-verify "
@@ -806,12 +1484,96 @@ def main(argv: Sequence[str] | None = None) -> int:
             "closed loop.",
             file=sys.stderr,
         )
+
+
+def _resolve_target_app(args: argparse.Namespace) -> tuple[bool, bool]:
+    """Settle which application the run targets, rewriting ``args`` in place.
+
+    The goal may carry an explicit ``[App Name]`` prefix or name the target
+    implicitly ("Excel'de aç", "YouTube'da arat"). Resolving it here means the
+    provider sees the cleaned goal and the run can bring the right app forward
+    without the user passing ``--app`` — autonomy by design, not by
+    configuration.
+
+    Returns ``(named_by_user, inferred_from_goal)``, which the caller needs
+    apart: an inferred app that turns out not to be installed must degrade to
+    the frontmost window, while one the user named is a setup error.
+    """
+    explicit_app, cleaned_goal = extract_goal_app(args.goal)
+    args.goal = cleaned_goal
+    named_app = args.app is not None
+    if args.app is not None:
+        return named_app, explicit_app is not None
+    # The running-app list disambiguates service goals ("YouTube'da" -> the
+    # running browser) but never restricts the result: `open -a` can launch a
+    # not-running app. Best-effort by contract — a probe failure degrades to
+    # inference without the list.
+    running_apps: tuple[str, ...] = ()
+    try:
+        with ActuationClient(args.socket, connect_retries=1) as client:
+            running_apps = client.list_apps()
+    except Exception as exc:  # noqa: BLE001 - inference is best-effort
+        print(
+            f"warning: could not list running apps ({exc}); inferring without them",
+            file=sys.stderr,
+        )
+    inferred_app = explicit_app or infer_target_app(args.goal, running_apps)
+    if inferred_app is not None:
+        args.app = inferred_app
+        return named_app, True
+    # OBSERVE before DECIDE: no explicit or inferable app — discover the
+    # frontmost one so the provider (and its scaffold prompt) names the real
+    # app from the first turn.
+    args.app = discover_app(args.socket)
+    return named_app, explicit_app is not None
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Parse, dispatch, and run one goal.
+
+    Kept short on purpose. It grew to three hundred lines of interleaved
+    dispatch, validation and warnings, and crossed the type checker's
+    complexity limit — at which point pyright stopped analysing the function
+    at all and reported every name it used as unreachable. Type checking was
+    silently off for the whole entry point; splitting the preamble out is what
+    turns it back on.
+    """
+    args = parse_args(argv)
+    # Live step visibility: the runner logs every executed physical action at
+    # INFO, and a real run takes seconds per LLM decision — without this the
+    # terminal stays silent mid-run and the user sees "Chrome opened, nothing
+    # happens". Stream the runner's lines to stderr so the run is observable
+    # while the final summary block still lands on stdout at the end.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+    dispatched = _dispatch_store_command(args)
+    if dispatched is not None:
+        return dispatched
+    rejected = _reject_unusable_arguments(args)
+    if rejected is not None:
+        return rejected
+    _warn_about_degraded_modes(args)
     driver_process: subprocess.Popen[bytes] | None = None
+    # ADR-1 promises the driver can die without taking the run with it, and
+    # that promise is only kept by something that brings it back. Supervision
+    # exists exactly when we started the process: a driver we merely attached
+    # to belongs to whoever launched it, and respawning it behind their back
+    # would leave two drivers fighting over one socket.
+    driver_recover: Callable[[], None] | None = None
     try:
         # When a driver binary is given we always spawn it (stale sockets are
         # cleared first); only without --driver do we attach to a running one.
         if args.driver is not None:
-            driver_process = spawn_driver(args.driver, args.socket, real=args.real)
+            driver_binary = args.driver
+            driver_socket = args.socket
+            driver_real = args.real
+
+            def _spawn_driver_again() -> subprocess.Popen[bytes]:
+                return spawn_driver(driver_binary, driver_socket, real=driver_real)
+
+            driver_process = _spawn_driver_again()
+            driver_recover = supervisor_for(
+                _spawn_driver_again, driver_process
+            ).ensure_alive
         # Autonomous app resolution: the goal may carry an explicit `[App
         # Name]` prefix, or name the target implicitly ("Excel'de aç",
         # "YouTube'da arat"). Resolve it here so the provider sees the
@@ -823,35 +1585,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # later is the point: running any of it on an absent goal is what
         # crashed the first attempt.
         if args.autonomous is not None:
-            return _run_autonomous_session(args)
+            return _run_autonomous_session(args, driver_recover=driver_recover)
 
-        explicit_app, cleaned_goal = extract_goal_app(args.goal)
-        args.goal = cleaned_goal
-        named_app = args.app is not None
-        app_inferred_from_goal = explicit_app is not None
-        if args.app is None:
-            # The running-app list disambiguates service goals ("YouTube'da"
-            # -> the running browser) but never restricts the result: `open
-            # -a` can launch a not-running app. Best-effort by contract — a
-            # probe failure degrades to inference without the list.
-            running_apps: tuple[str, ...] = ()
-            try:
-                with ActuationClient(args.socket, connect_retries=1) as client:
-                    running_apps = client.list_apps()
-            except Exception as exc:  # noqa: BLE001 - inference is best-effort
-                print(
-                    f"warning: could not list running apps ({exc}); inferring without them",
-                    file=sys.stderr,
-                )
-            inferred_app = explicit_app or infer_target_app(args.goal, running_apps)
-            if inferred_app is not None:
-                args.app = inferred_app
-                app_inferred_from_goal = True
-            else:
-                # OBSERVE before DECIDE: no explicit or inferable app —
-                # discover the frontmost one so the provider (and its scaffold
-                # prompt) names the real app from the first turn.
-                args.app = discover_app(args.socket)
+        resume_exit = _apply_resume(args)
+        if resume_exit is not None:
+            return resume_exit
+
+        named_app, app_inferred_from_goal = _resolve_target_app(args)
         # Live usage telemetry: every successful model call reports its token
         # usage and per-call latency; each report is streamed to stderr as a
         # compact "st :" line the menu panel parses into its header counters
@@ -905,8 +1645,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             app_inferred=app_inferred_from_goal and not named_app,
             stats_sink=stats_sink,
             budget_guard=None if budget.is_unset else budget_guard,
+            driver_recover=driver_recover,
         )
-        result = Agent(config).run()
+        # Spend is recorded on *both* endings. A run that failed still cost
+        # what it cost, and that is exactly the run someone wants the number
+        # for; recording only successes would make the report's total a
+        # comfortable fiction.
+        try:
+            result = Agent(config).run()
+        except BaseException:
+            _record_usage(
+                Path(args.store),
+                run_id=f"unfinished-{int(time.time())}",
+                goal=config.goal,
+                app=config.app or "unknown",
+                outcome="failure",
+                steps=0,
+                tokens=run_tokens["total"],
+                cost_usd=run_cost["usd"],
+                elapsed_seconds=time.monotonic() - run_started_at,
+            )
+            raise
+        _record_usage(
+            Path(args.store),
+            run_id=result.run_id,
+            goal=config.goal,
+            app=result.app,
+            outcome="success",
+            steps=len(result.state.completed_steps),
+            tokens=run_tokens["total"],
+            cost_usd=run_cost["usd"],
+            elapsed_seconds=time.monotonic() - run_started_at,
+        )
 
         print(f"goal        : {config.goal}")
         print(f"run_id      : {result.run_id}")

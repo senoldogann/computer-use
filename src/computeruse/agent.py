@@ -40,7 +40,13 @@ from computeruse.mcp import DEFAULT_CONFIG_PATH, McpRegistry, load_server_config
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.memory.semantic import SemanticStore
-from computeruse.orchestrator.client import AX_MAX_DEPTH, AX_MAX_NODES, ActuationClient
+from computeruse.orchestrator.client import (
+    AX_MAX_DEPTH,
+    AX_MAX_NODES,
+    OCR_MAX_LINES,
+    OCR_MIN_CONFIDENCE,
+    ActuationClient,
+)
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import (
     SETTLE_INTERVAL_S,
@@ -54,11 +60,18 @@ from computeruse.orchestrator.loop import (
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
 from computeruse.orchestrator.trace import RunTracer, StepTrace, event_line, new_run_id
+from computeruse.security.approvals import now_utc as grant_now
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionDecision,
+    Risk,
     classify_risk,
-    decide_permission,
+)
+from computeruse.security.grants import (
+    GrantStore,
+    GrantVerdict,
+    authorize,
+    decide_with_grant,
 )
 from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
@@ -66,14 +79,42 @@ from computeruse.skills.registry import SkillRegistry, refined_route, skill_for_
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.vision import AXElement
 from computeruse.vision.ax import (
+    asks_for_a_credential,
     content_digest,
     interactive_summaries,
     open_tabs_from_tree,
+    recognized_summaries,
 )
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
 from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.coordinates import Point, Rect, Size
 from computeruse.vision.focus import FocusedWindow
+
+#: How few accessibility elements count as "this window told us nothing".
+#: Above it the AX tree is the primary source and OCR would only add noise and
+#: a Vision pass to every turn; at or below it the model has essentially no
+#: indexed target and is reduced to guessing coordinates off a screenshot.
+#: A handful rather than zero, because a window that exposes only its own title
+#: bar is as unusable as one that exposes nothing.
+AX_BLINDNESS_THRESHOLD: Final[int] = 3
+
+
+def ax_left_us_blind(summaries: tuple[str, ...], *, threshold: int) -> bool:
+    """Should the OCR fallback run against this frame (pure)?
+
+    ADR-2 makes the accessibility tree primary, so this answers "did that
+    source fail", not "would more data be nice". A frame with real elements
+    gets none of it: a text pass costs a few hundred milliseconds and would
+    bury the tree's own controls under duplicate readings of their labels.
+
+    The truncation note the probe appends when it exhausts its element budget
+    is not an element, and counting it would let a *rich* frame look like an
+    empty one — the exact inversion, since a truncated list means the tree had
+    more to say rather than less.
+    """
+    grounded = [line for line in summaries if not line.startswith("(")]
+    return len(grounded) <= threshold
+
 
 
 @dataclass(frozen=True)
@@ -87,8 +128,13 @@ class AgentConfig:
     # Target application; None means "discover the frontmost app from the
     # driver's focused-window probe at run start" (ADR-2 OBSERVE).
     app: str | None = None
-    autonomy_level: AutonomyLevel = AutonomyLevel.GUARDED
-    confirm_handler: Callable[[AgentTurn], bool] | None = None
+    autonomy_level: AutonomyLevel = AutonomyLevel.FULL
+    confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None
+    # Trust mode (--yes): the operator has explicitly asked for uninterrupted
+    # autonomy. CONFIRM decisions are auto-approved and logged, BLOCK still
+    # blocks, kill-switch/budget/verification/stuck-guard still run. This is
+    # delegation in advance, not removal of the guard.
+    auto_approve: bool = False
     enable_visual_verification: bool = True
     enable_vision: bool = True
     # Law 5.2: when True (default), the driver's global kill-hotkey poll is
@@ -119,11 +165,21 @@ class AgentConfig:
     settle_interval_s: float = SETTLE_INTERVAL_S
     max_steps: int = 100
     connect_retries: int = 3
+    # ADR-1 resilience: called when the driver socket stops answering, to give
+    # whoever owns the driver process a chance to bring it back before the run
+    # is declared handless. ``None`` for callers attached to a driver they did
+    # not start — restarting someone else's process is not theirs to do.
+    driver_recover: Callable[[], None] | None = None
     # Phase 3: when True, the goal is decomposed into sub-goals and the loop
     # advances through them (a ``finish`` marks the current sub-goal done).
     # Session checkpoints are written under ``store_dir/checkpoints`` so an
     # interrupted run can be resumed with the same plan.
     enable_planning: bool = False
+    # Called with the plan after every sub-goal transition, so an owner outside
+    # the agent (a mission store, a UI) can persist progress as it happens.
+    # The agent deliberately does not know what a mission is: it reports where
+    # it got to, and whoever asked for the work decides what that means.
+    on_plan_progress: Callable[[GoalPlan], None] | None = None
     # Observability: when set, every step of the run is appended as one JSON
     # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
     # entirely — a run pays nothing for a diagnostic nobody asked for.
@@ -181,6 +237,9 @@ class AgentResult:
 
 def guarded(
     level: AutonomyLevel,
+    *,
+    authorize: Callable[[AgentTurn, str | None], GrantVerdict] | None,
+    auto_approve: bool = False,
 ) -> Callable[[AgentTurn, Observation], PermissionDecision]:
     """Build the VALIDATE-step guard for an autonomy level (pure).
 
@@ -190,15 +249,37 @@ def guarded(
     with the flow"); the accessibility title under the pointer is the machine's
     ("Delete account"). Classifying the control the click will actually hit is
     what makes Law 5.1 a guard rather than a request for the model's opinion.
+
+    ``authorize`` consults the user's standing capability grants, and is asked
+    only about actions the classifier already called destructive — a grant can
+    turn one of those confirmations into permission, and can do nothing else
+    (see :func:`~computeruse.security.grants.decide_with_grant`). ``None`` runs
+    the constitution's plain level/risk table, which is what a caller with no
+    grant store should get: no grants means everything destructive asks.
+
+    ``auto_approve`` is trust mode (--yes): CONFIRM becomes ALLOW, BLOCK still
+    blocks. The safety floor (kill-switch, budget, verification, stuck-guard)
+    keeps running; only the human prompt is skipped, and the caller logs it.
     """
 
     def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
-        return decide_permission(
-            level,
-            classify_risk(
-                turn, target_label=target_element_label(turn.action, observation)
-            ),
+        label = target_element_label(turn.action, observation)
+        risk = classify_risk(turn, target_label=label)
+        verdict = (
+            authorize(turn, label)
+            if authorize is not None and risk is Risk.DESTRUCTIVE
+            else None
         )
+        base = decide_with_grant(level, risk, verdict)
+        if auto_approve and base is PermissionDecision.CONFIRM:
+            LOGGER.info(
+                "trust mode: auto-approved %s for %r (risk=%s)",
+                turn.action.type,
+                turn.sub_goal,
+                risk.value,
+            )
+            return PermissionDecision.ALLOW
+        return base
 
     return guard
 
@@ -285,6 +366,12 @@ class Agent:
         episodes_store = EpisodicStore(self._config.store_dir / "episodes")
         skills_registry = SkillRegistry(self._config.store_dir / "skills")
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
+        # Law 5.1 delegation: the user's standing capability grants. They apply
+        # whenever any exist — a permission someone deliberately wrote, with an
+        # expiry and a use count, should not also need a flag to be honoured,
+        # and `--grants` is what makes them visible. With an empty store the
+        # authorizer below never fires and every destructive action asks.
+        grant_store = GrantStore(self._config.store_dir / "grants")
         distilled: DistillResult | None = None
         # Every run is identifiable, whether or not anything is written down:
         # the id is what ties a log line, a trace directory and a user's
@@ -368,6 +455,7 @@ class Agent:
         with ActuationClient(
             self._config.socket_path,
             connect_retries=self._config.connect_retries,
+            recover=self._config.driver_recover,
         ) as client:
             # OBSERVE precondition: when the caller named a specific app,
             # bring it forward before any probe — otherwise the focused
@@ -622,6 +710,47 @@ class Agent:
                     return False
                 return client.ax_press(current_pid, point.x, point.y)
 
+            def ocr_fallback(summaries: tuple[str, ...]) -> tuple[str, ...]:
+                """Read the screen with OCR when the AX tree gave us nothing.
+
+                ADR-2's fallback, and it fires only where ADR-2 says it should:
+                the accessibility tree is the primary source, so this stays out
+                of the way whenever that source answered. A Vision pass on every
+                turn would cost a few hundred milliseconds and bury the real
+                elements under duplicate readings of their own labels.
+
+                Best-effort by contract. An older driver returns nothing, a
+                refused Screen Recording consent raises, and either way the run
+                continues exactly as it did before — a fallback that could end
+                a run would be worse than the blindness it is treating.
+                """
+                if not ax_left_us_blind(
+                    summaries, threshold=AX_BLINDNESS_THRESHOLD
+                ):
+                    return ()
+                try:
+                    lines = client.recognize_text(
+                        display_id=self._config.display_id,
+                        window_pid=(
+                            _current_pid()
+                            if self._config.background_actuation
+                            else None
+                        ),
+                        min_confidence=OCR_MIN_CONFIDENCE,
+                        max_lines=OCR_MAX_LINES,
+                    )
+                except Exception as exc:  # noqa: BLE001 - a fallback may not raise
+                    LOGGER.debug("OCR fallback unavailable: %s", exc)
+                    return ()
+                if not lines:
+                    return ()
+                LOGGER.info(
+                    "AX exposed %d element(s); grounding on %d OCR line(s) instead",
+                    len(summaries),
+                    len(lines),
+                )
+                return recognized_summaries(lines)
+
             def ax_probe() -> AxProbeResult:
                 current_pid = target_pid()
                 if current_pid is None:
@@ -648,10 +777,16 @@ class Agent:
                         "be missing; rely on the screenshot map for coordinates)"
                     )
                     summaries = summaries + (truncation_note,)
+                summaries = summaries + ocr_fallback(summaries)
                 return AxProbeResult(
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),
                     content=content_digest(tree, viewport),
+                    # Read from the whole tree, not from the summaries: the
+                    # summary list is budgeted and viewport-culled, and a
+                    # password box that fell off the end of it is still a
+                    # password box on the screen.
+                    asks_for_credential=asks_for_a_credential(tree),
                 )
 
             def focused_text_value_probe() -> str | None:
@@ -715,6 +850,8 @@ class Agent:
                         plan=current_plan,
                         completed_steps_count=steps_count,
                     ).save(checkpoint_dir)
+                    if self._config.on_plan_progress is not None:
+                        self._config.on_plan_progress(current_plan)
 
                 on_sub_goal_complete_cb = _on_sub_goal_complete
 
@@ -736,11 +873,56 @@ class Agent:
                         "MCP requested but no servers configured in %s", DEFAULT_CONFIG_PATH
                     )
 
+            def grant_authorizer(
+                turn: AgentTurn, target_label: str | None
+            ) -> GrantVerdict:
+                """Does a standing grant cover this action — and spend it if so.
+
+                The matching is pure; consuming is not, and it happens *here*,
+                before the action runs. A count decremented after the fact is a
+                count that a crash mid-action silently refunds, which is the
+                wrong direction to be wrong in: under-reporting costs the user a
+                use they already had, over-reporting hands out authority they
+                never gave.
+                """
+                verdict = authorize(
+                    turn.action,
+                    sub_goal=turn.sub_goal,
+                    target_label=target_label,
+                    app=app,
+                    grants=grant_store.grants(),
+                    now=grant_now(),
+                )
+                if verdict.is_granted and verdict.grant_id is not None:
+                    try:
+                        grant_store.consume(verdict.grant_id)
+                    except (KeyError, OSError) as exc:
+                        # A grant we cannot record as spent is a grant we must
+                        # not honour: an unbounded permission is not the
+                        # permission the user wrote (Law 6.3, fail closed).
+                        LOGGER.warning(
+                            "capability grant %s could not be consumed (%s); "
+                            "treating the action as unauthorised",
+                            verdict.grant_id,
+                            exc,
+                        )
+                        return GrantVerdict(
+                            outcome="not_covered",
+                            grant_id=verdict.grant_id,
+                            reason=f"the grant could not be recorded as used: {exc}",
+                        )
+                    LOGGER.info("action authorised by %s", verdict.reason)
+                return verdict
+
             runner = OodaRunner(
                 provider=self._config.provider,
                 execute_physical=client.send,
                 kill_switch=kill_switch,
-                guard=guarded(self._config.autonomy_level),
+                guard=guarded(
+                    self._config.autonomy_level,
+                    authorize=grant_authorizer,
+                    auto_approve=self._config.auto_approve,
+                ),
                 confirm_handler=self._config.confirm_handler,
                 # One capture source, two consumers: ORIENT verification and
                 # the multimodal OBSERVE screenshot are the same frame stream.

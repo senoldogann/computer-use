@@ -84,6 +84,7 @@ from computeruse.orchestrator.schemas import (
     WebSearch,
 )
 from computeruse.orchestrator.trace import StepTrace
+from computeruse.security.approvals import ApprovalRequiredError
 from computeruse.security.killswitch import KillSwitch
 from computeruse.security.permissions import (
     PermissionConfirmationRequired,
@@ -123,6 +124,7 @@ from computeruse.vision.focus import FocusedWindow, window_summary
 from computeruse.vision.som import (
     MarkElement,
     annotate_set_of_marks,
+    mark_identity,
     parse_ax_elements_to_marks,
 )
 
@@ -242,6 +244,12 @@ class AxProbeResult:
     #: model. Kept separate from ``summaries`` so noticing that a label changed
     #: does not cost the model any of its element budget.
     content: tuple[str, ...] = ()
+    #: Whether a password box is anywhere on the observed screen. Computed from
+    #: the tree rather than from the summaries because the tree is the
+    #: authoritative source and this probe already holds it — and because the
+    #: answer gates a keystroke, so it must not depend on an element having
+    #: survived the summary budget.
+    asks_for_credential: bool = False
 
 
 @dataclass(frozen=True)
@@ -455,6 +463,38 @@ def resolve_mark(action: Action, marks: tuple[MarkElement, ...]) -> Action:
                 click_count=action.click_count,
             )
     raise UnknownMarkError(requested=action.mark, available=len(marks))
+
+
+#: How far a control may have moved between the frame the model decided from
+#: and the frame an action actuates against while still counting as the same
+#: control. A button that shifted a few points because a row above it grew is
+#: the same button; one that moved half an inch belongs to a different layout.
+MARK_DRIFT_TOLERANCE_PX: Final[int] = 24
+
+
+def mark_still_current(
+    mark: MarkElement, current: tuple[MarkElement, ...], *, tolerance: int
+) -> bool:
+    """Does the live frame still show this element where the model saw it (pure)?
+
+    A batch is chosen from one screenshot and actuated across several, so by
+    the time the third action runs, the mark list has been renumbered — an
+    index means nothing across frames. What survives a re-observation is the
+    *element*: its label, and roughly where it sits. This asks whether the
+    control the model picked is still there, which is the only question that
+    makes a stale index safe to act on.
+    """
+    wanted = mark_identity(mark)
+    centre_x = mark.rect.origin.x + mark.rect.size.width / 2
+    centre_y = mark.rect.origin.y + mark.rect.size.height / 2
+    for candidate in current:
+        if mark_identity(candidate) != wanted:
+            continue
+        other_x = candidate.rect.origin.x + candidate.rect.size.width / 2
+        other_y = candidate.rect.origin.y + candidate.rect.size.height / 2
+        if abs(other_x - centre_x) <= tolerance and abs(other_y - centre_y) <= tolerance:
+            return True
+    return False
 
 
 def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REPEAT_TOLERANCE_PX) -> bool:
@@ -761,6 +801,8 @@ class Observation:
     #: resolves against, so a selected target lands on the element's own centre
     #: rather than on a coordinate estimated from a 3x-downscaled image.
     marks: tuple[MarkElement, ...] = ()
+    #: A password box is on screen; typing is refused while it is (Law 5).
+    asks_for_credential: bool = False
 
     @property
     def app_name(self) -> str | None:
@@ -848,7 +890,13 @@ class OodaRunner:
     # a safety verdict about a click has to be able to look at what is
     # under the pointer, not only at how the model described the click.
     guard: Callable[[AgentTurn, Observation], PermissionDecision] | None = None
-    confirm_handler: Callable[[AgentTurn], bool] | None = None
+    # Handed the accessibility title of the control the action targets, not
+    # only the decision: a human answering "may it press this?" needs to know
+    # *what* it is pressing, and the model's own prose is the one account of
+    # that which cannot be trusted (the guard already refuses to classify from
+    # it). ``None`` when nothing sits under the point, or the action is not
+    # positional.
+    confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None
     sensor: Callable[[], ScreenCapture] | None = None
     # Whether ``sensor`` is used for VERIFY (pre/post action pixel comparison).
     # Off = actions still get their AX/window witnesses, just not pixel ones.
@@ -1030,6 +1078,11 @@ class OodaRunner:
             UnrecoverableFailureError,
             KillSwitchTripped,
             BudgetExceededError,
+            # Parked, not failed. The episode is still recorded — the run did
+            # real work before it reached the question, and Law 4.1 wants that
+            # work kept — but the caller reads the typed error to tell "this
+            # needs you" from "this could not be done".
+            ApprovalRequiredError,
         ) as exc:
             self._finalize(
                 self._last_state,
@@ -1101,21 +1154,72 @@ class OodaRunner:
             # re-observes and asks the model for the next decision.
             batch = decision.actions or [decision.action]
             finished = False
+            # The marks the model actually chose from. Mark numbers are an
+            # index into ONE frame's element list, and ``_observe`` below
+            # renumbers that list from scratch — so resolving a later action
+            # against the refreshed marks silently retargets it. Measured on
+            # the reported case: a batch of [ClickMark(1), ClickMark(2)] where
+            # mark 2 was "Cancel" at decision time actuated whatever the
+            # notification that arrived in between had pushed into slot 2.
+            # Pinning the list here is what makes "[2]" keep meaning the
+            # control the model was looking at.
+            decision_marks = self._observation.marks
             for batch_index, batch_action in enumerate(batch):
                 if batch_index > 0:
-                    # Mid-batch: the previous action changed the screen, so
-                    # the model's pre-batch screenshot is stale. Refresh
-                    # perception (cheap — no LLM turn) so the next action
-                    # decides against the current frame, never the old one.
+                    # Mid-batch: the previous action may have changed the
+                    # screen — refresh perception (cheap, no LLM turn) so the
+                    # next action decides against the current frame.
+                    # Raw-coordinate actions were aimed at the pre-batch frame;
+                    # marks are pinned to the decision frame, raw coordinates
+                    # are not. Stop only when the screen actually moved (modal,
+                    # navigation, scroll) — halting every multi-click batch
+                    # would trade one LLM turn for three.
+                    # Frame identity only (screenshot signature + window):
+                    # the AX list legitimately renumbers between reads, and
+                    # counting that as "the screen moved" would halt batches
+                    # whose target never budged.
+                    _win = self._observation.window
+                    pre_frame = (
+                        self._observation.signature,
+                        f"{_win.app_name}|{_win.window_title}" if _win is not None else "",
+                    )
                     state = self._observe(state)
                     # The batch's later actions were chosen from the pre-batch
                     # frame; accept them against the refreshed one rather than
                     # tripping the staleness gate on our own re-observation.
                     self._decision_window = self._decision_window_of(self._observation)
+                    _win2 = self._observation.window
+                    post_frame = (
+                        self._observation.signature,
+                        f"{_win2.app_name}|{_win2.window_title}" if _win2 is not None else "",
+                    )
+                    if (
+                        batch_action.type in ("mouse_click", "mouse_drag")
+                        and post_frame != pre_frame
+                    ):
+                        # Onto the *state*, not ``self._last_error``: only the
+                        # state reaches the provider. ``_observe`` rebuilds the
+                        # state without consulting that attribute, so a message
+                        # left there is one the model never sees — it would be
+                        # told nothing about why its batch was truncated, and
+                        # could reasonably emit the same batch again.
+                        state = replace(
+                            state,
+                            last_error=(
+                                "batch stopped: the screen changed after the "
+                                "previous action, so a later action using raw "
+                                "pre-batch coordinates would misclick. Re-derive "
+                                "the target from the current screen (prefer "
+                                "click_mark)."
+                            ),
+                        )
+                        break
                 single = decision.model_copy(
                     update={"action": batch_action, "actions": None}
                 )
-                state, finished, stop_batch = self._execute_one(state, single, goal)
+                state, finished, stop_batch = self._execute_one(
+                    state, single, goal, marks=decision_marks
+                )
                 self._last_state = state
                 if finished or stop_batch:
                     break
@@ -1157,9 +1261,19 @@ class OodaRunner:
         )
 
     def _execute_one(
-        self, state: WorkingState, decision: AgentTurn, goal: str
+        self,
+        state: WorkingState,
+        decision: AgentTurn,
+        goal: str,
+        *,
+        marks: tuple[MarkElement, ...],
     ) -> tuple[WorkingState, bool, bool]:
         """Run one action through VALIDATE -> ACT -> VERIFY -> RECOVER (shell).
+
+        ``marks`` is the element list of the frame the *model* decided from,
+        which is not necessarily the frame this action actuates against: a
+        batch spans several. Mark indices are only meaningful within their own
+        frame, so this is the list a ``click_mark`` resolves through.
 
         Returns ``(state, finished, stop_batch)``:
 
@@ -1184,9 +1298,29 @@ class OodaRunner:
         # it a second time would send the click a third of the way up the
         # display. ``map_action_to_screen`` leaves a ``click_mark``
         # untouched precisely so this ordering is safe.
-        decision = decision.model_copy(
-            update={"action": resolve_mark(decision.action, self._observation.marks)}
-        )
+        #
+        # Resolution can fail two ways, and neither may end the run: the model
+        # can name a mark that never existed, and a pinned mark can describe a
+        # control the screen no longer shows. Both are ordinary recoverable
+        # failures — the ladder's STALE guidance ("decide again from the new
+        # screenshot") is exactly the right answer — so they go through
+        # ``_register_failure`` rather than propagating out of the loop, which
+        # is what an unhandled ``UnknownMarkError`` used to do.
+        try:
+            decision = decision.model_copy(
+                update={"action": self._resolve_mark_for(decision.action, marks)}
+            )
+        except (UnknownMarkError, StaleMarkError) as exc:
+            # Traced with the mark the model actually emitted rather than a
+            # resolved click: what a reader needs here is which index it named
+            # and why that index no longer names anything.
+            outcome = decide_step(state, decision)
+            self._trace_step(
+                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}"
+            )
+            hint = self._register_failure(exc, decision.action, goal)
+            LOGGER.warning("ooda mark resolution failed: %s", hint)
+            return replace(outcome.state, last_error=hint), False, True
         # Law 5.1 VALIDATE: the permission guard sees every proposed action
         # *before* it becomes physical, and can hard-stop a dangerous move.
         # Deliberately outside the recovery handler: a policy denial is the
@@ -1317,6 +1451,34 @@ class OodaRunner:
         )
         return state, False, False
 
+    def _resolve_mark_for(
+        self, action: Action, marks: tuple[MarkElement, ...]
+    ) -> Action:
+        """Turn a mark selection into a click, refusing a mark that has moved.
+
+        ``marks`` is the decision frame's list; ``self._observation.marks`` is
+        the live one, and mid-batch they are different lists with different
+        numbering. Resolving through the decision frame keeps "[2]" meaning the
+        control the model was looking at, and checking the result against the
+        live frame keeps it from clicking a coordinate the layout has since
+        given to something else. A mark that fails either test raises, and the
+        caller routes that into the recovery ladder.
+        """
+        if not isinstance(action, ClickMark):
+            return action
+        resolved = resolve_mark(action, marks)
+        live = self._observation.marks
+        if live is marks or not live:
+            # Same frame (the common single-action case), or nothing live to
+            # check against — the pinned list is all the evidence there is.
+            return resolved
+        chosen = next(mark for mark in marks if mark.index == action.mark)
+        if not mark_still_current(
+            chosen, live, tolerance=MARK_DRIFT_TOLERANCE_PX
+        ):
+            raise StaleMarkError(mark=action.mark, label=chosen.label)
+        return resolved
+
     def _trace_step(
         self,
         decision: AgentTurn,
@@ -1388,6 +1550,11 @@ class OodaRunner:
             # is silence, not a miss, and the recovery ladder must not treat it
             # as one.
             return Evidence.INCONCLUSIVE
+        # Before anything else, including the quiet-actuation paths: those
+        # reach the same field through the accessibility API rather than the
+        # keyboard, which changes how the text arrives and nothing about
+        # whether it should.
+        self._refuse_credential_entry(action)
         quiet = self._pressed_quietly(action) or self._typed_quietly(action)
         if not quiet:
             self._warn_if_leaving_the_background(action)
@@ -1750,7 +1917,8 @@ class OodaRunner:
             )
         if verdict is PermissionDecision.CONFIRM:
             if self.confirm_handler is not None:
-                if self.confirm_handler(decision):
+                target = target_element_label(decision.action, self._observation)
+                if self.confirm_handler(decision, target):
                     return
                 raise PermissionDeniedError(
                     f"action {decision.action.type!r} ({decision.action.model_dump(exclude_none=True)}) "
@@ -1760,6 +1928,32 @@ class OodaRunner:
                 f"action {decision.action.type!r} ({decision.action.model_dump(exclude_none=True)}) "
                 "requires human confirmation before it can run"
             )
+
+    def _refuse_credential_entry(self, action: Action) -> None:
+        """Fail-closed: never put keystrokes into a screen asking for a password.
+
+        Not a permission question, so deliberately not in :meth:`_validate`
+        with the autonomy guard: no level, no grant and no human approval makes
+        this acceptable. The agent has no business knowing the user's password,
+        and a model improvising one into a redacted box is a category of
+        mistake with no recovery — the string is gone into a field nobody can
+        read back, possibly a *different* field than intended, possibly
+        submitted.
+
+        Both text actions are covered, because ``clipboard_paste`` reaches the
+        same field by another route. Nothing else is: clicking, scrolling and
+        reading a sign-in screen are all fine, and stopping those would make
+        the agent unable to even report what it is looking at.
+        """
+        if not isinstance(action, (TypeText, ClipboardPaste)):
+            return
+        if not self._observation.asks_for_credential:
+            return
+        raise CredentialEntryRefused(
+            f"{action.type} was refused: a password field is on screen, and the "
+            "agent never types into one. Signing in is the person's to do — "
+            "nothing about this screen can be completed without them"
+        )
 
     def _validate_bounds(self, action: Action, capture: ScreenCapture) -> None:
         """Fail-closed: reject coordinates outside the display being observed.
@@ -1904,12 +2098,16 @@ class OodaRunner:
         raw_ui_elements = previous.raw_ui_elements
         content = previous.content
         open_tabs = previous.open_tabs
+        # Carried forward with the rest of the perception when a probe fails:
+        # losing sight of a password box must not read as "there isn't one".
+        asks_for_credential = previous.asks_for_credential
         if self.ax_probe is not None:
             try:
                 ax_result = self.ax_probe()
                 raw_ui_elements = ax_result.summaries
                 content = ax_result.content
                 open_tabs = ax_result.open_tabs
+                asks_for_credential = ax_result.asks_for_credential
             except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
                 if self._ax_probe_warned:
                     LOGGER.debug("ui-element probe still failing: %s", exc)
@@ -1955,6 +2153,7 @@ class OodaRunner:
             # click in screen points, and the model's [N] indices line up
             # because the image-space rewrite preserves order and count.
             marks=parse_ax_elements_to_marks(raw_ui_elements),
+            asks_for_credential=asks_for_credential,
         )
         active_window = window_summary(window) if window is not None else state.active_window
         return replace(
@@ -2567,6 +2766,39 @@ class UnknownMarkError(RuntimeError):
         )
 
 
+class CredentialEntryRefused(RuntimeError):
+    """The agent tried to type while a password field was on screen.
+
+    A boundary, not a failure of skill: no retry, no alternate route and no
+    approval makes typing a credential acceptable, so the guidance attached to
+    this one tells the model to stop and say why rather than to try again
+    differently.
+    """
+
+
+class StaleMarkError(RuntimeError):
+    """A batched ``click_mark`` names a control the screen no longer shows there.
+
+    Only reachable mid-batch, and it is the failure the batch mechanism exists
+    to make safe. The model picks its marks from one frame; each action after
+    the first actuates against a later one. When the element behind a pinned
+    index has moved or gone — a sheet opened, a notification pushed the row
+    down, the list reloaded — the honest answer is that the rest of the batch
+    was chosen against a screen that no longer exists, so it must be re-decided
+    rather than actuated at a coordinate that now belongs to something else.
+    """
+
+    def __init__(self, *, mark: int, label: str) -> None:
+        self.mark = mark
+        self.label = label
+        super().__init__(
+            f"click_mark {mark} was chosen for {label!r}, but that element is "
+            "no longer at that position on the current screen — the screen "
+            "changed after the frame this batch was decided from. Re-read the "
+            "element list and choose again from what is on screen now"
+        )
+
+
 def failure_retrospective(exc: BaseException) -> str:
     """A short, honest account of why a run ended without finishing (pure).
 
@@ -2583,6 +2815,15 @@ def failure_retrospective(exc: BaseException) -> str:
         return f"run stopped by its budget: {exc}"
     if isinstance(exc, UnrecoverableFailureError):
         return f"recovery exhausted ({exc.failure.kind.value}): {exc}"
+    if isinstance(exc, ApprovalRequiredError):
+        # Named as a pause rather than a failure, because the next attempt
+        # reads this line: telling it the goal "failed" would have it plan
+        # around an obstacle that is only a question waiting to be answered.
+        return (
+            f"paused for human approval of {exc.request.action_type!r} "
+            f"({exc.request.sub_goal!r}); resumes once approval request "
+            f"{exc.request.request_id!r} is answered"
+        )
     return f"run ended abnormally: {exc}"
 
 

@@ -18,14 +18,22 @@ recorded there as ADR-1 and ADR-2:
   runtime cost is irrelevant here.
 - **Rust** owns actuation as a **separate process** speaking typed JSON-RPC
   over a Unix socket. Python never imports the driver — if a CGEvent tap hangs
-  the OS layer, only the driver process dies, and the orchestrator restarts it.
+  the OS layer, only the driver process dies, and the orchestrator restarts
+  it — bounded (`orchestrator/supervisor.py`), and only for a driver the run
+  itself spawned.
 
 ## ADR-2 — Accessibility-first grounding, pixels as verifier
 
 - Primary localization = macOS Accessibility API (exact per-element
   coordinates/role/state, stable across DPI/theme).
-- Screenshots/OCR/vision-diff **verify** candidate coordinates before acting.
-  Pixel-first OCR is only the fallback for apps with no AX tree.
+- Screenshots and the regional vision-diff **verify** candidate coordinates
+  before acting.
+- **OCR is the fallback, not the source.** When the accessibility tree exposes
+  almost nothing (games, VMs, remote desktop, a canvas, some Electron apps),
+  the driver reads the screen with Vision.framework and those lines become
+  marks in the same format AX elements do. It fires only when AX came back
+  empty — a text pass on every turn would bury the real elements under
+  duplicate readings of their own labels.
 
 ## Repository map
 
@@ -41,6 +49,9 @@ src/computeruse/
 │   ├── failures.py  # Failure taxonomy + bounded recovery ladder (pure)
 │   ├── prompts.py   # Law 2.1: weak-model scaffolding (prompt + parse + retry)
 │   ├── planner.py   # Phase 3: hierarchical goal decomposition + session checkpoints
+│   ├── supervisor.py# ADR-1: bounded respawn of a driver that died mid-run
+│   ├── mission.py   # Law 4: durable work items — blocked vs failed, resume
+│   ├── report.py    # Law 5: what happened overnight + per-run spend record
 │   └── client.py    # typed JSON-RPC client to the Rust driver
 ├── providers/
 │   └── openai.py    # `--model openai` transport (stdlib urllib; no SDK dep)
@@ -53,6 +64,8 @@ src/computeruse/
 │   ├── episodic.py   # EpisodicStore; known_signatures feeds the distiller
 │   └── semantic.py   # Law 4.2: SemanticStore (app knowledge) + pure search
 ├── security/
+│   ├── approvals.py  # Law 5.1: park an action for a human instead of hanging
+│   ├── grants.py     # Law 5.1: bounded authority delegated in advance
 │   ├── killswitch.py # Law 5.2: kill-switch (shake detector + OODA gate)
 │   └── autonomy.py   # Law 5.1: Level 0-3 guard, destructive-action detection
 └── vision/
@@ -60,7 +73,8 @@ src/computeruse/
     ├── coordinates.py # ADR-2: pure retina/DPI scale + multi-display mapping
     ├── diff.py        # ADR-2: regional visual-diff core (anti-aliasing-safe)
     ├── capture.py     # ADR-2: driver response -> ScreenCapture + BGRA->luma
-    ├── som.py         # Set-of-Marks annotator (unit-tested; not yet wired in)
+    ├── som.py         # Set-of-Marks annotator (live: marks every OBSERVE frame)
+    ├── ax.py          # …also renders OCR lines into the same summary shape
     └── focus.py       # focused-app discovery + activation
 driver/              # Rust actuation micro-driver (Unix-socket JSON-RPC)
                      #   main.rs    : socket accept loop (driver binary)
@@ -68,6 +82,7 @@ driver/              # Rust actuation micro-driver (Unix-socket JSON-RPC)
                      #   backend.rs : Backend trait + SimulatedBackend (+capture, +ax)
                      #   ax.rs      : real macOS AXUIElement tree traversal (ADR-2)
                      #   quartz.rs  : real macOS CGEvent backend + CGDisplay capture
+                     #   vision.rs  : ADR-2 OCR fallback (Vision.framework text)
                      #   bezier.rs  : pure cubic-Bezier trajectory planning
                      #   hotkey.rs  : kill-switch event tap (Command+Shift+Escape)
                      #   indicator.rs: menu-bar status item + cursor halo

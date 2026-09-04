@@ -34,6 +34,7 @@ Pure throughout: the runner gathers the witnesses, this module judges them.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final, Literal
@@ -340,6 +341,34 @@ def text_evidence(expected: str, observed: str | None) -> Evidence:
     return Evidence.CONFIRMED if expected in observed else Evidence.CONTRADICTED
 
 
+#: Shortest single token specific enough to name an application on its own.
+#: "chrome" (6) identifies one; "mail" (4) is a word that appears inside a
+#: dozen application names, and treating it as a match is how "Mail" confirmed
+#: "Gmail".
+APP_TOKEN_MIN_CHARS: Final[int] = 6
+
+
+def _app_tokens(text: str) -> frozenset[str]:
+    """Word tokens of an application name, punctuation folded (pure)."""
+    return frozenset(
+        token for token in re.sub(r"[^\w]+", " ", text.casefold()).split() if token
+    )
+
+
+def _names_one_app(subset: frozenset[str]) -> bool:
+    """Is this token subset specific enough to identify an application (pure)?
+
+    Two tokens are, because two words in common is not a coincidence between
+    unrelated app names. One token is only when it is long: LaunchServices and
+    the accessibility API routinely disagree about the same app ("Chrome" vs
+    "Google Chrome"), so a subset match has to be allowed — but "Notes" inside
+    "Google Chrome — Meeting Notes" is a different application entirely.
+    """
+    if len(subset) >= 2:
+        return True
+    return len(subset) == 1 and len(next(iter(subset))) >= APP_TOKEN_MIN_CHARS
+
+
 def app_evidence(
     expected: str, observed: str | None, bundle_id: str | None = None
 ) -> Evidence:
@@ -369,10 +398,27 @@ def app_evidence(
             return Evidence.CONFIRMED
     if observed is None or not observed:
         return Evidence.INCONCLUSIVE
-    left = expected.casefold()
-    right = observed.casefold()
-    if left in right or right in left:
+    # Token-based matching, not bidirectional substring: "notes" must not
+    # confirm "Meeting Notes" in another app, and "Mail" must not confirm
+    # "Gmail" — but "Chrome" must still confirm "Google Chrome" (LaunchServices
+    # and AX routinely disagree about the same app). Rule: a subset in either
+    # direction confirms only when it is specific — two or more tokens, one
+    # long token (>=6 chars, e.g. "chrome"), or exact string equality.
+    # Anything weaker is INCONCLUSIVE, which the quorum logic carries safely.
+    expected_tokens = _app_tokens(expected)
+    observed_tokens = _app_tokens(observed)
+    if not expected_tokens or not observed_tokens:
+        return Evidence.INCONCLUSIVE
+    if expected_tokens == observed_tokens:
         return Evidence.CONFIRMED
+    if expected_tokens <= observed_tokens:
+        if _names_one_app(expected_tokens):
+            return Evidence.CONFIRMED
+        return Evidence.INCONCLUSIVE
+    if observed_tokens <= expected_tokens:
+        if _names_one_app(observed_tokens):
+            return Evidence.CONFIRMED
+        return Evidence.INCONCLUSIVE
     return Evidence.CONTRADICTED
 
 

@@ -20,7 +20,7 @@ import logging
 import os
 import socket
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Final, Self, cast
 
 from computeruse.orchestrator.schemas import (
@@ -31,7 +31,7 @@ from computeruse.orchestrator.schemas import (
     MouseMove,
     TypeText,
 )
-from computeruse.vision.ax import AXElement
+from computeruse.vision.ax import AXElement, RecognizedLine
 from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.focus import FocusedWindow
 
@@ -103,6 +103,16 @@ ACTIVATE_TIMEOUT_SECONDS: Final[float] = 45.0
 # A heavy page (YouTube, a large document) exposes tens of thousands of AX
 # nodes; the driver's budgeted walk is bounded but not instant.
 AX_TIMEOUT_SECONDS: Final[float] = 20.0
+# Text recognition is a capture *plus* a synchronous Vision pass, and the pass
+# is accurate-level on a full Retina frame — hundreds of milliseconds, and more
+# on a dense screen. It gets its own ceiling rather than borrowing the capture's.
+OCR_TIMEOUT_SECONDS: Final[float] = 25.0
+#: Discard readings Vision is less sure of than this. The driver applies the
+#: same floor; passing it explicitly keeps the policy in the orchestrator.
+OCR_MIN_CONFIDENCE: Final[float] = 0.3
+#: How many lines to accept. Above the element budget the model is shown, so
+#: the trimming decision stays with the orchestrator rather than the driver.
+OCR_MAX_LINES: Final[int] = 128
 # Headroom over an action's own computed duration, for scheduling jitter.
 TIMEOUT_MARGIN_SECONDS: Final[float] = 10.0
 # The driver clamps its inter-keystroke delay to this band (quartz.rs);
@@ -182,11 +192,19 @@ class ActuationClient:
         connect_retries: int = 3,
         retry_delay_seconds: float = 0.2,
         recv_timeout_seconds: float = 10.0,
+        recover: Callable[[], None] | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._connect_retries = connect_retries
         self._retry_delay_seconds = retry_delay_seconds
         self._recv_timeout_seconds = recv_timeout_seconds
+        # Called once per :meth:`connect` when the socket cannot be reached,
+        # before the last attempt. The driver runs in its own process by
+        # design (ADR-1), and a socket that has stopped answering usually means
+        # that process is gone — no number of reconnects fixes that, so
+        # something has to be allowed to bring it back. ``None`` keeps the old
+        # behaviour for callers that attach to a driver they do not own.
+        self._recover = recover
         self._sock: socket.socket | None = None
         # Persistent read buffer: a single `recv()` may carry *two* response
         # lines (or a partial line). Keeping leftover bytes here (instead of a
@@ -204,7 +222,15 @@ class ActuationClient:
         return self._sock is not None
 
     def connect(self) -> None:
-        """Open the Unix socket with exponential backoff (Law 6.2)."""
+        """Open the Unix socket with exponential backoff (Law 6.2).
+
+        The last attempt is preceded by the recovery hook when one is
+        configured, because by then the evidence says the problem is not
+        timing: a socket that refused two spaced-out attempts is usually a
+        socket whose server has exited, and retrying a third time changes
+        nothing unless something restarts it first.
+        """
+        recovered = False
         for attempt in range(1, self._connect_retries + 1):
             try:
                 self._sock = self._connect_once()
@@ -220,6 +246,17 @@ class ActuationClient:
                     wait,
                 )
                 time.sleep(wait)
+                if (
+                    self._recover is not None
+                    and not recovered
+                    and attempt >= self._connect_retries - 1
+                ):
+                    # Once per connect, never in a loop: the hook either brought
+                    # a driver back or raised its own terminal error, and a
+                    # second call would only spawn processes faster than they
+                    # can fail.
+                    recovered = True
+                    self._recover()
         raise DriverConnectionError(self._socket_path, self._connect_retries)
 
     def _connect_once(self) -> socket.socket:
@@ -479,6 +516,56 @@ class ActuationClient:
             return None
         seconds = response.get("seconds")
         return float(seconds) if isinstance(seconds, (int, float)) else None
+
+    def recognize_text(
+        self,
+        display_id: int,
+        window_pid: int | None,
+        min_confidence: float,
+        max_lines: int,
+    ) -> tuple[RecognizedLine, ...]:
+        """Text on screen with its boxes, for windows with no AX tree (ADR-2).
+
+        Returns an empty tuple — never raises — when the driver does not offer
+        the call. This is a *fallback*: it exists for the case where the
+        primary grounding source gave nothing, and a run must not die because
+        the driver binary predates it. That is the same contract
+        :meth:`idle_seconds` has, for the same reason.
+
+        Boxes come back in global logical points, the space ``ax_snapshot``
+        already speaks, so both grounding sources describe a rectangle
+        identically.
+        """
+        try:
+            response = self.request(
+                "recognize_text",
+                {
+                    "display_id": display_id,
+                    "pid": window_pid,
+                    "min_confidence": min_confidence,
+                    "max_lines": max_lines,
+                },
+                timeout_seconds=OCR_TIMEOUT_SECONDS,
+            )
+        except DriverRpcError:
+            return ()
+        if response.get("ok") != "recognize_text":
+            return ()
+        raw = response.get("lines")
+        if not isinstance(raw, list):
+            return ()
+        lines: list[RecognizedLine] = []
+        for item in cast(list[object], raw):
+            if not isinstance(item, dict):
+                continue
+            record = cast(dict[str, object], item)
+            try:
+                lines.append(RecognizedLine.model_validate(record))
+            except ValueError as exc:
+                # One malformed line must not discard the rest: this is the
+                # only grounding the caller has when it reaches for it.
+                LOGGER.debug("skipping malformed recognized line: %s", exc)
+        return tuple(lines)
 
     def ax_press(self, pid: int, x: float, y: float) -> bool:
         """Ask the element at a point inside an app to activate itself.

@@ -22,12 +22,14 @@ non-:data:`~PermissionDecision.ALLOW` result raises a typed error there.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final
+from typing import Final, cast
 
 from computeruse.orchestrator.schemas import (
     AgentTurn,
+    CallTool,
     ClipboardPaste,
     Finish,
     LoadSkill,
@@ -68,98 +70,146 @@ class Risk(Enum):
 # motivated the word-boundary matching below).
 _TYPED_COMMANDS: frozenset[str] = frozenset({"rm", "dd", "mkfs", "shutdown", "reboot"})
 
-# Whole-word *intent* markers. Matching is token-based, NOT substring based:
-# the agent means "delete", "pay", "send" etc. — a verb, not random letters.
+#: The family name a grant uses to cover the typed commands above. Kept
+#: separate from :data:`DESTRUCTIVE_FAMILIES` because these are not verbs a UI
+#: shows — they are things typed at a prompt, and the classifier finds them by
+#: a different rule (see :func:`_looks_like_a_command`).
+SHELL_FAMILY: Final[str] = "shell"
+
+# Whole-word *intent* markers, grouped by the thing being asked for.
+#
+# The grouping is not cosmetic. A flat set answers "is this destructive?" and
+# nothing else, which is all the guard ever needed — but a human delegating
+# authority in advance does not delegate "destructiveness", they delegate
+# *deleting files in Downloads* or *sending mail to the team*. A grant has to
+# name a verb, so the verbs have to exist as names.
+#
+# Matching stays token-based, NOT substring based: the agent means "delete",
+# "pay", "send" — a verb, not random letters. Each family carries its
+# translations because the user's locale must not decide whether the guard
+# fires, or whether a grant they wrote in English covers a Turkish button.
+DESTRUCTIVE_FAMILIES: Final[dict[str, frozenset[str]]] = {
+    # Destroying something that exists.
+    "delete": frozenset(
+        {
+            "delete", "remove", "erase", "wipe", "terminate", "destroy",
+            # Gerunds only. A model narrating intent may write "deleting the
+            # old export", so those earn their place — but "deleted" and
+            # "removes" describe something that already happened, and a
+            # verification step ("check the file was deleted") is not a
+            # request to delete anything. "drop" is gone for a blunter
+            # reason: `intent_words` splits "Drop-down", so every dropdown
+            # in every app classified as destructive.
+            "deleting", "removing",
+            "sil", "kaldır", "kaldir", "yoket",
+            "supprimer", "supprime", "effacer", "efface", "détruire", "detruire",
+            "löschen", "lösche", "loeschen", "entfernen", "zerstören", "zerstoren",
+            "borrar", "eliminar",
+            "cancellare", "eliminare",
+            "apagar", "excluir", "destruir",
+            "verwijderen", "vernietigen",
+            # The macOS delete verb is not "delete", it is the Trash — and
+            # "Move to Trash" / "Empty Trash" are the two most common
+            # destructive buttons on the platform this agent runs on. Both
+            # classified as Risk.NONE until they were listed here, so an
+            # unattended run could empty the Trash without asking anyone.
+            "trash", "çöp", "cop", "boşalt", "bosalt",
+            "corbeille", "papierkorb", "papelera", "cestino", "lixeira",
+            "prullenbak",
+        }
+    ),
+    # Spending the user's money.
+    "pay": frozenset(
+        {
+            "pay", "checkout", "purchase",
+            "öde", "ode", "satınal", "satinal",
+            "payer", "paye", "acheter", "achete",
+            "bezahlen", "zahlung", "kaufen",
+            "pagar", "comprar",
+            "pagare", "comprare",
+            "betalen", "kopen",
+            # A subscription is a recurring purchase; the button rarely says
+            # "pay".
+            "buy", "subscribe", "abone", "abonnement", "suscribir",
+        }
+    ),
+    # Putting something in front of another person, irreversibly.
+    "send": frozenset(
+        {
+            "send", "dispatch",
+            "gönder", "gonder",
+            "envoyer", "envoie",
+            "senden",
+            "enviar",
+            "inviare",
+            "versturen",
+        }
+    ),
+    # Changing what software the machine runs.
+    "install": frozenset(
+        {
+            "install", "uninstall",
+            "installieren", "deinstallieren",
+            "desinstaller",
+            "instalar", "desinstalar",
+            "installare", "disinstallare",
+            "installeren", "deïnstalleren",
+        }
+    ),
+    # Replacing existing content or state wholesale.
+    "overwrite": frozenset(
+        {
+            "overwrite", "format",
+            "sıfırla", "sifirla", "formatla", "üzerineyaz",
+            "formatieren", "überschreiben",
+            "formatear", "sobrescribir",
+            # "write" and its translations are deliberately NOT here. Writing
+            # text is most of what this agent does, and the module's own
+            # history records where that ends: a live full-autonomy run of
+            # "research the AI news and write me a summary in Notes" already
+            # died once to a false positive on its own payload. "saveas" never
+            # matched anything either — `intent_words` splits "Save As..." into
+            # two tokens — and "replace" makes find-and-replace destructive.
+            # Throwing away work in progress is destroying it, whatever the
+            # button calls itself: "Discard Changes", "Revert", "Reset".
+            "discard", "revert", "reset",
+            "verwerfen", "descartar", "restablecer",
+            "réinitialiser", "reinitialiser",
+        }
+    ),
+    # Statements that change stored data. Matched ONLY inside tool arguments
+    # (see :data:`ARGUMENT_ONLY_FAMILIES`) — the intent was already written
+    # down here, but nothing enforced it, so a tool named ``notes.update`` and
+    # a sub-goal "update the spreadsheet" both classified as destructive.
+    "execute": frozenset(
+        {
+            "insert", "update", "upsert", "alter", "truncate",
+        }
+    ),
+    # Acting as the machine's administrator.
+    "admin": frozenset({"sudo"}),
+}
+
+#: Families whose verbs are ordinary English outside a payload, and are
+#: therefore matched only inside tool *arguments* — never against a tool's name
+#: or the model's own prose. "UPDATE users SET ..." in a SQL body is a database
+#: write; "update the spreadsheet" is a Tuesday.
+ARGUMENT_ONLY_FAMILIES: Final[frozenset[str]] = frozenset({"execute"})
+
+#: Markers matched against the *subject* — the model's sub-goal, the control's
+#: accessibility title, a tool's name. Excludes the argument-only families.
 _DESTRUCTIVE_MARKERS: frozenset[str] = frozenset(
-    {
-        # English
-        "delete",
-        "remove",
-        "uninstall",
-        "pay",
-        "checkout",
-        "purchase",
-        "send",
-        "dispatch",
-        "install",
-        "sudo",
-        "wipe",
-        "erase",
-        "format",
-        "terminate",
-        "overwrite",
-        # Turkish
-        "sil",
-        "kaldır",
-        "kaldir",
-        "öde",
-        "ode",
-        "satınal",
-        "satinal",
-        "gönder",
-        "gonder",
-        "sıfırla",
-        "sifirla",
-        "formatla",
-        "yoket",
-        # French
-        "supprimer",
-        "supprime",
-        "effacer",
-        "efface",
-        "payer",
-        "paye",
-        "acheter",
-        "achete",
-        "envoyer",
-        "envoie",
-        "desinstaller",
-        "détruire",
-        "detruire",
-        # German (umlauts stripped duplicates included: users type both)
-        "löschen",
-        "lösche",
-        "loeschen",
-        "entfernen",
-        "bezahlen",
-        "zahlung",
-        "kaufen",
-        "senden",
-        "installieren",
-        "deinstallieren",
-        "formatieren",
-        "zerstören",
-        "zerstoren",
-        # Spanish
-        "borrar",
-        "eliminar",
-        "pagar",
-        "comprar",
-        "enviar",
-        "instalar",
-        "desinstalar",
-        "formatear",
-        # Italian
-        "cancellare",
-        "eliminare",
-        "pagare",
-        "comprare",
-        "inviare",
-        "installare",
-        "disinstallare",
-        # Portuguese
-        "apagar",
-        "excluir",
-        "destruir",
-        # Dutch
-        "verwijderen",
-        "betalen",
-        "kopen",
-        "versturen",
-        "installeren",
-        "deïnstalleren",
-        "vernietigen",
-    }
+    marker
+    for family, markers in DESTRUCTIVE_FAMILIES.items()
+    if family not in ARGUMENT_ONLY_FAMILIES
+    for marker in markers
+)
+
+#: Markers matched inside tool arguments: every family, including the ones too
+#: ambiguous to read off prose. A payload is not prose — nobody passes a
+#: paragraph about updating things as a tool's ``sql`` parameter.
+_ARGUMENT_MARKERS: frozenset[str] = frozenset(
+    marker for family in DESTRUCTIVE_FAMILIES.values() for marker in family
 )
 
 # Phrases that are routine-but-stateful: worth a confirmation in guarded mode.
@@ -215,6 +265,10 @@ class AutonomyPolicy:
     """The safety policy governing classification (tunable, pure data)."""
 
     destructive_markers: frozenset[str] = _DESTRUCTIVE_MARKERS
+    #: Matched inside tool arguments only. A superset of
+    #: ``destructive_markers``: a payload can carry verbs ("update", "insert")
+    #: that are too ordinary to read off a tool's name or the model's prose.
+    argument_markers: frozenset[str] = _ARGUMENT_MARKERS
     routine_markers: frozenset[str] = _ROUTINE_MARKERS
     typed_commands: frozenset[str] = _TYPED_COMMANDS
 
@@ -238,7 +292,17 @@ class AutonomyPolicy:
         title and comment count" and stopped dead on the word "confirm" —
         exactly the failure the paragraph above describes, in the same place,
         two actions later. ``call_tool`` is deliberately *not* here: an MCP
-        tool is someone else's program and can do anything a program can.
+        tool is someone else's program and can do anything a program can — and
+        for a long time saying so was the whole of the defence. The tool name
+        and its arguments were never read, so classification fell back to the
+        model's own prose and ``CallTool(tool="bash", arguments={"command":
+        "rm -rf /"})`` under the sub-goal "organize the folder" scored
+        :attr:`Risk.NONE` and ran unattended. The call is now read the way a
+        click is: the tool's *name* joins the intent words, its argument values
+        are searched for commands and for destructive verbs, and a call that
+        matches nothing at all still floors at :attr:`Risk.ROUTINE` rather than
+        :attr:`Risk.NONE`, because "someone else's program" is the definition
+        of routine-but-stateful.
 
         ``target_label`` is the accessibility title of the control actually
         under the pointer, and it is what makes the guard a safety mechanism
@@ -256,8 +320,13 @@ class AutonomyPolicy:
             subject = f"{subject} {target_label}".lower()
         if isinstance(turn.action, PressHotkey):
             subject = f"{subject} {turn.action.key}".lower()
+        if isinstance(turn.action, CallTool):
+            # The tool's name is a short identifier the server chose
+            # (``delete_file``, ``send_message``), never prose — token matching
+            # it is exactly as safe as matching a control's accessibility title.
+            subject = f"{subject} {turn.action.tool}".lower()
 
-        words = _intent_words(subject)
+        words = intent_words(subject)
         if words & self.destructive_markers:
             return Risk.DESTRUCTIVE
         if words & self.typed_commands:
@@ -266,12 +335,24 @@ class AutonomyPolicy:
             turn.action.text, self.typed_commands
         ):
             return Risk.DESTRUCTIVE
+        if isinstance(turn.action, CallTool):
+            if _arguments_are_destructive(
+                turn.action.arguments, self.typed_commands, self.argument_markers
+            ):
+                return Risk.DESTRUCTIVE
+            if words & self.routine_markers:
+                return Risk.ROUTINE
+            # Nothing matched, and that is not the same as nothing happening: a
+            # tool this policy has never heard of is a third-party program with
+            # side effects the orchestrator cannot see. Guarded mode asks about
+            # it; full autonomy still runs it.
+            return Risk.ROUTINE
         if words & self.routine_markers:
             return Risk.ROUTINE
         return Risk.NONE
 
 
-def _intent_words(subject: str) -> set[str]:
+def intent_words(subject: str) -> set[str]:
     """Whole words of a phrase, punctuation folded (pure).
 
     Tokenised on whitespace so `rm` matches the *word* `rm`, never the letters
@@ -303,16 +384,100 @@ def _looks_like_a_command(text: str, commands: frozenset[str]) -> bool:
     A command lives at the start of a line, so a line beginning with one counts
     however long the payload is. Short text counts wherever the word falls,
     because `echo hi; rm -rf ~` is a command line whichever half you read.
+    Long single-line prose is never a command: window-slicing it would invent
+    fake line-starts mid-sentence (measured: a 480-char news body sliced at
+    200 chars starts its tail with 'shutdown ...', a false positive). Long-text
+    smuggling is answered at the tool-semantic level instead (a delete/execute
+    tool with a destructive verb is DESTRUCTIVE whatever its length).
     """
     lowered = text.lower()
     for line in lowered.splitlines():
-        leading = _intent_words(line)
+        leading = intent_words(line)
         first = line.strip().split()
-        if first and _intent_words(first[0]) & commands:
+        if first and intent_words(first[0]) & commands:
             return True
         if len(line) <= COMMAND_LENGTH_MAX and leading & commands:
             return True
     return False
+
+
+#: How deep to walk a tool's arguments looking for strings. MCP servers nest
+#: their parameters a level or two ({"file": {"path": ...}}); nothing
+#: legitimate hides a shell command eight levels down, and a bound means a
+#: hostile server cannot make classification recurse forever.
+ARGUMENT_WALK_MAX_DEPTH: Final[int] = 6
+
+
+def _argument_strings(value: object, *, depth: int) -> tuple[str, ...]:
+    """Every string reachable inside a tool's arguments (pure).
+
+    Values arrive as ``dict[str, object]`` off the wire, so the payload that
+    matters — the shell line, the SQL, the recipient — can be a bare string, an
+    element of a list, or a field of a nested object. Reading only the top
+    level would classify ``{"command": "rm -rf /"}`` and miss
+    ``{"exec": {"argv": ["rm", "-rf", "/"]}}``, which is the same call.
+    """
+    if depth > ARGUMENT_WALK_MAX_DEPTH:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, dict):
+        return tuple(
+            found
+            for item in cast(dict[str, object], value).values()
+            for found in _argument_strings(item, depth=depth + 1)
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(
+            found
+            for item in cast(Sequence[object], value)
+            for found in _argument_strings(item, depth=depth + 1)
+        )
+    return ()
+
+
+def _arguments_are_destructive(
+    arguments: dict[str, object],
+    commands: frozenset[str],
+    markers: frozenset[str],
+) -> bool:
+    """Does a tool call's payload ask for something destructive (pure)?
+
+    Two rules, because the payload carries two different kinds of danger and
+    they need different tests:
+
+    * A **shell command** is caught by :func:`_looks_like_a_command`, the same
+      test typed text gets — ``{"command": "rm -rf /"}`` is a command line
+      whether a person typed it or a model passed it as a parameter.
+    * A **destructive verb** ("delete", "pay", "send") only counts inside a
+      *short* value. An MCP tool that takes a document body will be handed
+      prose that talks about deleting things, and flagging that is the same
+      false positive that once stopped a full-autonomy run dead on the word
+      "shutdown" appearing inside a news summary.
+    """
+    for text in _argument_strings(arguments, depth=0):
+        if _looks_like_a_command(text, commands):
+            return True
+        # Verbs count only inside short values: a document body that talks
+        # about deleting things is prose, not an instruction (measured
+        # false-positive on a 1,575-char news summary). Long-text smuggling
+        # is answered by the command tail-check above, which requires an
+        # imperative line shape rather than a bare verb.
+        if len(text) <= COMMAND_LENGTH_MAX and intent_words(text.lower()) & markers:
+            return True
+    return False
+
+
+def is_command_payload(text: str) -> bool:
+    """Pure: does this typed/pasted payload read as a shell command?
+
+    The public form of the rule the classifier applies to ``type_text`` and
+    ``clipboard_paste``, exported because a capability grant has to be able to
+    ask the same question — a permission covering "shell" must agree with the
+    guard about what a shell command is, or it would authorise something the
+    guard never flagged (or fail to cover something it did).
+    """
+    return _looks_like_a_command(text, AutonomyPolicy().typed_commands)
 
 
 def classify_risk(
@@ -373,6 +538,8 @@ def decide_permission(level: AutonomyLevel, risk: Risk) -> PermissionDecision:
 #: from here keeps working; the definitions live in that leaf module to keep
 #: this one free to depend on the orchestrator's action schemas.
 __all__ = [
+    "DESTRUCTIVE_FAMILIES",
+    "SHELL_FAMILY",
     "AutonomyLevel",
     "AutonomyPolicy",
     "PermissionConfirmationRequired",
@@ -381,4 +548,6 @@ __all__ = [
     "Risk",
     "classify_risk",
     "decide_permission",
+    "intent_words",
+    "is_command_payload",
 ]

@@ -989,6 +989,34 @@
     justify-content: center;
   }
 
+  .trust-toggle-btn {
+    font-size: 9.5px;
+    font-weight: 600;
+    padding: 2px 7.5px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    outline: none;
+    line-height: 1.2;
+  }
+  .trust-toggle-btn.on {
+    color: var(--success);
+    background: rgba(120, 140, 93, 0.15);
+    border: 0.5px solid rgba(120, 140, 93, 0.4);
+  }
+  .trust-toggle-btn.on:hover {
+    background: rgba(120, 140, 93, 0.25);
+    box-shadow: 0 0 8px var(--success-glow);
+  }
+  .trust-toggle-btn.off {
+    color: var(--text-tertiary);
+    background: rgba(255, 255, 255, 0.05);
+    border: 0.5px solid rgba(255, 255, 255, 0.10);
+  }
+
   .pos-toggle-btn {
     font-size: 9.5px;
     font-weight: 600;
@@ -1424,6 +1452,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       <span>History</span>
     </button>
+    <button class="tab-btn" id="tabBtnControl" onclick="switchTab('control')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span>Kontrol</span>
+    </button>
     <button class="tab-btn" id="tabBtnAnalytics" onclick="switchTab('analytics')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
       <span>Analytics</span>
@@ -1468,6 +1500,39 @@
         <button class="clear-history-btn" onclick="clearAllHistory()">Clear All</button>
       </div>
       <div id="historyList" style="display:flex;flex-direction:column;gap:6px;"></div>
+    </div>
+  </section>
+
+  <!-- TAB: Kontrol — what the agent is waiting on, and what it may do -->
+  <section class="tab-pane" id="tabControl">
+    <div class="analytics-container">
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>
+        <span>SENİ BEKLEYENLER</span>
+      </div>
+      <div id="controlApprovals"></div>
+
+      <div class="section-title" style="margin-top:4px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        <span>DURAKLAMIŞ GÖREVLER</span>
+      </div>
+      <div id="controlMissions"></div>
+
+      <div class="section-title" style="margin-top:4px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span>DURAN İZİNLER</span>
+      </div>
+      <div id="controlGrants"></div>
+
+      <div class="section-title" style="margin-top:4px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span>RAPOR</span>
+        <span style="margin-left:auto;display:inline-flex;gap:4px;">
+          <button class="mcp-action-btn install" data-report-hours="24">24s</button>
+          <button class="mcp-action-btn install" data-report-hours="168">7g</button>
+        </span>
+      </div>
+      <pre id="controlReport" style="font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:10.5px;line-height:1.5;color:var(--text-secondary);background:#1A1A1A;border:0.5px solid var(--border);border-radius:8px;padding:10px 11px;white-space:pre-wrap;word-break:break-word;margin:0;">Bir pencere seç.</pre>
     </div>
   </section>
 
@@ -1605,6 +1670,12 @@
             </span>
             <span id="mcpLabel">MCP</span>
           </button>
+          <button class="trust-toggle-btn off" id="trustToggleBtn" type="button" title="Trust mode (--yes): CONFIRM adımlarını sormadan otomatik onayla. BLOCK ve kill-switch aktif kalır.">
+            <span class="mcp-icon">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+            </span>
+            <span id="trustLabel">Trust: Off</span>
+          </button>
           <button class="pos-toggle-btn" id="posToggleBtn" type="button" title="Konum: Ekranın alt ortası (Claude Dock stili) veya Menü Barı">
             <span class="pos-icon" id="posIcon">
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="16" width="16" height="4" rx="1"/><circle cx="12" cy="8" r="3"/><line x1="12" y1="11" x2="12" y2="16"/></svg>
@@ -1672,6 +1743,31 @@
     var savedLvl = parseInt(localStorage.getItem("cu_autonomy_level"), 10);
     if (savedLvl === 2 || savedLvl === 3) currentAutonomyLevel = savedLvl;
   } catch(e){}
+  // Trust mode (--yes): auto-approve CONFIRM, keep BLOCK + kill-switch.
+  // OFF by default, matching the CLI. On, the Approve/Deny card below can
+  // never appear and the standing capability grants are never consulted,
+  // because nothing ever reaches a confirmation — a panel that started this
+  // way made its own permission surface decorative.
+  var trustMode = false;
+  try {
+    var savedTrust = localStorage.getItem("cu_trust_mode");
+    if (savedTrust === "0") trustMode = false;
+    else if (savedTrust === "1") trustMode = true;
+  } catch(e){}
+  function updateTrustUI() {
+    var btn = document.getElementById("trustToggleBtn");
+    var label = document.getElementById("trustLabel");
+    if (!btn || !label) return;
+    if (trustMode) {
+      btn.className = "trust-toggle-btn on";
+      label.textContent = "Trust: On";
+      btn.title = "Trust mode AÇIK (--yes): CONFIRM adımları loglanarak otomatik onaylanır. Tıklayarak kapatabilirsiniz.";
+    } else {
+      btn.className = "trust-toggle-btn off";
+      label.textContent = "Trust: Off";
+      btn.title = "Trust mode KAPALI: yıkıcı adımlarda onay istenir. Tıklayarak kesintisiz otonomiye geçebilirsiniz.";
+    }
+  }
 
   var autonomyIcon = document.getElementById("autonomyIcon");
 
@@ -1776,13 +1872,21 @@
       var pane = document.getElementById("tabHistory");
       if (btn) btn.classList.add("active");
       if (pane) pane.classList.add("active");
+      if (window.refreshMemory) window.refreshMemory();
       if (typeof renderHistoryView === "function") renderHistoryView();
       else if (window.renderHistoryView) window.renderHistoryView();
+    } else if(tabName === "control"){
+      var btn = document.getElementById("tabBtnControl");
+      var pane = document.getElementById("tabControl");
+      if (btn) btn.classList.add("active");
+      if (pane) pane.classList.add("active");
+      if (window.refreshControlView) window.refreshControlView();
     } else if(tabName === "analytics"){
       var btn = document.getElementById("tabBtnAnalytics");
       var pane = document.getElementById("tabAnalytics");
       if (btn) btn.classList.add("active");
       if (pane) pane.classList.add("active");
+      if (window.refreshMemory) window.refreshMemory();
       if (typeof renderAnalyticsView === "function") renderAnalyticsView();
       else if (window.renderAnalyticsView) window.renderAnalyticsView();
     }
@@ -1793,14 +1897,239 @@
   var btnLive = document.getElementById("tabBtnLive");
   var btnMcp = document.getElementById("tabBtnMcp");
   var btnHist = document.getElementById("tabBtnHistory");
+  var btnCtl = document.getElementById("tabBtnControl");
   var btnAna = document.getElementById("tabBtnAnalytics");
   if (btnLive) btnLive.onclick = function(){ switchTab("live"); };
   if (btnMcp) btnMcp.onclick = function(){ switchTab("mcp"); };
   if (btnHist) btnHist.onclick = function(){ switchTab("history"); };
+  if (btnCtl) btnCtl.onclick = function(){ switchTab("control"); };
   if (btnAna) btnAna.onclick = function(){ switchTab("analytics"); };
 
+
+  /* ----- Kontrol: approvals, missions, grants, report -------------------- */
+  // Every value below was written by the agent but *quotes the screen*, so it
+  // is rendered as text through escapeHtml/escapeAttr and never interpolated
+  // into a handler. Same rule the MCP list follows.
+
+  function controlEmpty(message){
+    return '<div style="font-size:11px;color:var(--text-tertiary);padding:2px 0 6px;">'
+      + escapeHtml(message) + '</div>';
+  }
+
+  function controlCard(inner){
+    return '<div class="history-card" style="margin-bottom:6px;">' + inner + '</div>';
+  }
+
+  function renderApprovals(list){
+    var host = document.getElementById("controlApprovals");
+    if (!host) return;
+    var pending = (list || []).filter(function(r){ return r && r.decision === "pending"; });
+    if (!pending.length) { host.innerHTML = controlEmpty("Bekleyen bir karar yok."); return; }
+    var html = "";
+    pending.forEach(function(r){
+      var target = r.target_label
+        ? '<div style="font-size:10.5px;color:var(--warning);margin-top:2px;">'
+            + escapeHtml(String(r.target_label)) + '</div>'
+        : "";
+      html += controlCard(
+        '<div style="font-size:11.5px;font-weight:600;">' + escapeHtml(String(r.sub_goal || "")) + '</div>' +
+        '<div style="font-size:10.5px;color:var(--text-tertiary);margin-top:2px;">'
+          + escapeHtml(String(r.action_type || "")) + ' · ' + escapeHtml(String(r.risk || "")) + '</div>' +
+        target +
+        '<div style="display:flex;gap:5px;margin-top:7px;">' +
+          '<button class="mcp-action-btn install" data-approve="' + escapeAttr(String(r.request_id || "")) + '">Onayla</button>' +
+          '<button class="mcp-action-btn install" data-approve-always="' + escapeAttr(String(r.request_id || "")) + '">Onayla, bir daha sorma</button>' +
+          '<button class="mcp-action-btn installed" data-deny="' + escapeAttr(String(r.request_id || "")) + '">Reddet</button>' +
+        '</div>'
+      );
+    });
+    host.innerHTML = html;
+    host.querySelectorAll("[data-approve]").forEach(function(b){
+      b.addEventListener("click", function(){ decideApproval(b.getAttribute("data-approve"), true, false); });
+    });
+    host.querySelectorAll("[data-approve-always]").forEach(function(b){
+      b.addEventListener("click", function(){ decideApproval(b.getAttribute("data-approve-always"), true, true); });
+    });
+    host.querySelectorAll("[data-deny]").forEach(function(b){
+      b.addEventListener("click", function(){ decideApproval(b.getAttribute("data-deny"), false, false); });
+    });
+  }
+
+  function renderMissions(list){
+    var host = document.getElementById("controlMissions");
+    if (!host) return;
+    var blocked = (list || []).filter(function(m){ return m && m.status === "blocked"; });
+    if (!blocked.length) { host.innerHTML = controlEmpty("Duraklamış görev yok."); return; }
+    var html = "";
+    blocked.forEach(function(m){
+      html += controlCard(
+        '<div style="font-size:11.5px;font-weight:600;">' + escapeHtml(String(m.goal || "")) + '</div>' +
+        '<div style="font-size:10.5px;color:var(--text-tertiary);margin-top:2px;">'
+          + escapeHtml(String(m.app || "—")) + ' · ' + escapeHtml(String(m.attempts || 0)) + ' deneme</div>' +
+        (m.blocked_reason
+          ? '<div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">'
+              + escapeHtml(String(m.blocked_reason)) + '</div>'
+          : "")
+      );
+    });
+    host.innerHTML = html;
+  }
+
+  function renderGrants(list){
+    var host = document.getElementById("controlGrants");
+    if (!host) return;
+    var now = Date.now();
+    var live = (list || []).filter(function(g){
+      if (!g) return false;
+      var left = (g.max_invocations || 0) - (g.used || 0);
+      var expires = Date.parse(g.expires_at || "");
+      return left > 0 && (isNaN(expires) || expires > now);
+    });
+    if (!live.length) { host.innerHTML = controlEmpty("Duran izin yok — her yıkıcı eylem sorar."); return; }
+    var html = "";
+    live.forEach(function(g){
+      var left = (g.max_invocations || 0) - (g.used || 0);
+      html += controlCard(
+        '<div style="font-size:11.5px;font-weight:600;">' + escapeHtml(String(g.verb || "")) +
+          ' · ' + escapeHtml(String(g.app || "")) + '</div>' +
+        '<div style="font-size:10.5px;color:var(--text-tertiary);margin-top:2px;">'
+          + escapeHtml(String(g.target_pattern || "*")) + ' · ' + left + '/'
+          + escapeHtml(String(g.max_invocations || 0)) + ' kullanım kaldı</div>' +
+        (g.note
+          ? '<div style="font-size:10px;color:var(--text-secondary);margin-top:3px;">'
+              + escapeHtml(String(g.note)) + '</div>'
+          : "") +
+        '<div style="margin-top:7px;">' +
+          '<button class="mcp-action-btn installed" data-revoke="'
+            + escapeAttr(String(g.grant_id || "")) + '">İptal et</button>' +
+        '</div>'
+      );
+    });
+    host.innerHTML = html;
+    host.querySelectorAll("[data-revoke]").forEach(function(b){
+      b.addEventListener("click", function(){ post({cmd:"revoke_grant", id:b.getAttribute("data-revoke")}); });
+    });
+  }
+
+  function decideApproval(id, approve, always){
+    if (!id) return;
+    post({cmd:"decide", id:id, approve:!!approve, always:!!always});
+  }
+
+  window.refreshControlView = function(){
+    post({cmd:"get_control"});
+  };
+
+  window.onControlLoaded = function(approvals, missions, grants){
+    renderApprovals(approvals);
+    renderMissions(missions);
+    renderGrants(grants);
+  };
+
+  window.onDecided = function(id, ok, message){
+    showToast(ok ? "Karar kaydedildi" : ("Olmadı: " + (message || "").slice(0, 80)));
+    window.refreshControlView();
+  };
+
+  window.onGrantRevoked = function(id, ok, message){
+    showToast(ok ? "İzin iptal edildi" : ("Olmadı: " + (message || "").slice(0, 80)));
+    window.refreshControlView();
+  };
+
+  window.onReportLoaded = function(text){
+    var host = document.getElementById("controlReport");
+    if (host) host.textContent = text || "(boş)";
+  };
+
+  document.querySelectorAll("[data-report-hours]").forEach(function(b){
+    b.addEventListener("click", function(){
+      var host = document.getElementById("controlReport");
+      if (host) host.textContent = "Hazırlanıyor…";
+      post({cmd:"get_report", hours: parseFloat(b.getAttribute("data-report-hours"))});
+    });
+  });
+
+  // The host answers the load handshake with its live toggle state, so the
+  // panel's pills reflect what a run would actually do rather than what the
+  // browser last remembered.
+  window.onHostReady = function(level, trust, mcp){
+    if (level === 2 || level === 3) { currentAutonomyLevel = level; }
+    trustMode = !!trust;
+    window._mcpEnabled = !!mcp;
+    if (typeof updateAutonomyUI === "function") updateAutonomyUI();
+    if (typeof updateTrustUI === "function") updateTrustUI();
+    if (typeof updateMcpToggleUI === "function") updateMcpToggleUI();
+  };
+
   /* ----- Storage & Task History ------------------------------------------ */
+  /* ----- The agent's real memory, not this browser's copy ---------------- */
+  // History and Analytics used to read a localStorage mirror the panel wrote
+  // itself, so a fresh panel showed an empty history beside a store full of
+  // episodes, and the "success rate" was the rate of runs *this window* had
+  // watched. The host now reads ~/.computeruse and these adapters map its
+  // records onto the shapes the existing renderers already expect, so the
+  // rendering code is untouched and only the source of truth moved.
+  window._memory = null;   // null = the store has not answered yet
+
+  // The physical action types Analytics counts, mapped from the executed
+  // trajectory an episode actually recorded.
+  var ACTION_BUCKETS = {
+    mouse_click: "clicks", click_mark: "clicks", mouse_drag: "clicks",
+    type_text: "types", clipboard_paste: "pastes",
+    press_hotkey: "hotkeys", activate_app: "apps"
+  };
+
+  function episodeToHistoryItem(ep){
+    var actions = { clicks: 0, types: 0, pastes: 0, hotkeys: 0, apps: 0 };
+    (ep.steps || []).forEach(function(step){
+      var bucket = ACTION_BUCKETS[step && step.type];
+      if (bucket) actions[bucket] += 1;
+    });
+    return {
+      goal: String(ep.description || ""),
+      app: String(ep.app || ""),
+      // The episode outcome is binary; the panel's third state ("stopped")
+      // has no equivalent on disk, so it is not invented here.
+      status: ep.outcome === "success" ? "success" : "failed",
+      steps: (ep.steps || []).length,
+      actions: actions,
+      note: ep.retrospective ? String(ep.retrospective) : "",
+      ts: Date.parse(ep.recorded_at || "") || 0
+    };
+  }
+
+  function skillToCard(sk){
+    return {
+      id: String(sk.skill_id || ""),
+      name: String(sk.description || sk.skill_id || ""),
+      app: String(sk.app || ""),
+      uses: sk.uses || 0,
+      wins: sk.wins || 0,
+      steps: (sk.steps || []).length
+    };
+  }
+
+  window.onMemoryLoaded = function(episodes, skills, usage){
+    var history = (episodes || []).map(episodeToHistoryItem);
+    // Newest first, matching what the localStorage list did by construction.
+    history.sort(function(a, b){ return b.ts - a.ts; });
+    window._memory = {
+      history: history,
+      skills: (skills || []).map(skillToCard),
+      usage: usage || []
+    };
+    // Repaint whichever memory-backed tab is showing.
+    var active = document.querySelector(".tab-pane.active");
+    if (active && active.id === "tabHistory" && window.renderHistoryView) window.renderHistoryView();
+    if (active && active.id === "tabAnalytics" && window.renderAnalyticsView) window.renderAnalyticsView();
+  };
+
+  window.refreshMemory = function(){ post({cmd:"get_memory"}); };
+
   function getStoredHistory(){
+    // The store wins whenever it has answered; localStorage remains only as
+    // the pre-handshake placeholder so the first paint is not blank.
+    if (window._memory) return window._memory.history;
     try {
       return JSON.parse(localStorage.getItem("cu_history") || "[]");
     } catch(e) { return []; }
@@ -1813,6 +2142,7 @@
   }
 
   function getStoredSkills(){
+    if (window._memory) return window._memory.skills;
     try {
       return JSON.parse(localStorage.getItem("cu_skills") || "[]");
     } catch(e) { return []; }
@@ -1825,6 +2155,10 @@
   }
 
   function getStoredTotals(){
+    // Derived from the real trajectories once the store has answered: the
+    // renderer takes the max of these and the per-episode counts, so returning
+    // zeroes here lets the episodes speak for themselves.
+    if (window._memory) return { clicks: 0, types: 0, pastes: 0, hotkeys: 0, apps: 0 };
     try {
       return JSON.parse(localStorage.getItem("cu_totals") || '{"clicks":0,"types":0,"pastes":0,"hotkeys":0,"apps":0}');
     } catch(e) {
@@ -1910,7 +2244,7 @@
   function submit(){
     var g = goal.value.trim();
     if(!g) return;
-    var m = {cmd:"run", goal:g, level:currentAutonomyLevel};
+    var m = {cmd:"run", goal:g, level:currentAutonomyLevel, trust:trustMode, mcp:window._mcpEnabled};
     var a = app.value.trim();
     if(a) m.app = a;
 
@@ -1921,6 +2255,7 @@
     window._lastCalls = 0;
     statsTokens.innerHTML = BOLT_ICON + ' <span>0 tok</span>';
     statsElapsed.innerHTML = CLOCK_ICON + ' <span>0s</span>';
+    window.trustModeActive = trustMode;
     renderConnectCard();
     renderGoalCard(g, a, currentAutonomyLevel);
     setRunning(true);
@@ -2078,6 +2413,15 @@
     return (str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
+  // Attribute context needs the quotes too. escapeHtml is for text nodes and
+  // leaves " and ' alone, which is fine between tags and is an injection
+  // anywhere inside an attribute — the MCP config file is written by whoever
+  // installed a server, and menu.rs calls that file "attacker-influenced text"
+  // in as many words.
+  function escapeAttr(str) {
+    return escapeHtml(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
   function renderGoalCard(goalText, appText, level) {
     closeGroup();
     recordSessionEvent("Goal", (appText ? "[" + appText + "] " : "") + goalText);
@@ -2088,7 +2432,7 @@
       : '<span style="font-size:9.5px;font-weight:600;color:var(--accent);background:rgba(217,119,87,0.12);padding:1.5px 6px;border-radius:4px;border:0.5px solid rgba(217,119,87,0.3);margin-left:8px;display:inline-flex;align-items:center;gap:4px;"><svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Full Auto</span>';
     var html = 
       '<div class="feed-line feed-head"><span class="feed-icon">' + ICONS.laptop + '</span>' +
-      '<span class="feed-text">' + escapeHtml(goalText) + levelBadge + '</span></div>';
+      '<span class="feed-text">' + escapeHtml(goalText) + levelBadge + (window.trustModeActive ? ' <span style="font-size:9px;font-weight:600;color:var(--success);background:rgba(120,140,93,0.15);padding:1.5px 6px;border-radius:4px;border:0.5px solid rgba(120,140,93,0.35);margin-left:6px;">Trust</span>' : '') + '</span></div>';
     if (appText) {
       html += '<div class="feed-sub"><span class="feed-icon">' + ICONS.globe + '</span>' +
         '<span>Hedef uygulama · ' + escapeHtml(appText) + '</span></div>';
@@ -2538,7 +2882,12 @@
         '<div class="history-meta">' +
           '<div class="history-tags">' +
             statusBadge +
-            '<span class="tag-pill">' + (item.steps || 0) + ' steps · ' + (item.durationSec || 1) + 's</span>' +
+            // Duration only when it is actually known. An episode on disk
+            // carries no elapsed time and has no run_id to join it to the
+            // usage record that does, so the old `|| 1` printed "1s" against
+            // every run the store had ever recorded.
+            '<span class="tag-pill">' + (item.steps || 0) + ' steps'
+              + (item.durationSec ? ' · ' + item.durationSec + 's' : '') + '</span>' +
             (item.tokens ? '<span class="tag-pill" style="display:inline-flex;align-items:center;gap:3px;">' + ICONS.bolt + ' ' + Number(item.tokens).toLocaleString("tr-TR") + ' tok</span>' : '') +
             (item.app && item.app !== "Auto Focus" ? '<span class="tag-pill">' + escapeHtml(item.app) + '</span>' : '') +
           '</div>' +
@@ -2650,6 +2999,17 @@
     stopBtn.style.display = r ? "inline-flex" : "none";
     dot.className = "status-dot " + (r ? "busy" : (window._lastErr ? "err" : "ok"));
     setStatus(r ? "Running" : (window._lastErr ? "Error" : "Idle"), r ? "w" : (window._lastErr ? "e" : ""));
+  }
+
+  var trustToggleBtn = document.getElementById("trustToggleBtn");
+  updateTrustUI();
+  if (trustToggleBtn) {
+    trustToggleBtn.addEventListener("click", function(){
+      trustMode = !trustMode;
+      try { localStorage.setItem("cu_trust_mode", trustMode ? "1" : "0"); } catch(e){}
+      updateTrustUI();
+      showToast(trustMode ? "Trust Açık: kesintisiz otonomi (--yes)" : "Trust Kapalı: onay istenecek");
+    });
   }
 
   /* ----- MCP Store Logic & State ---------------------------------------- */
@@ -2798,6 +3158,81 @@
       desc: "Headless Chrome otomasyonu, sayfa kazıma ve ekran görüntüleri.",
       command: "npx",
       args: ["-y", "@modelcontextprotocol/server-puppeteer"]
+    },
+    {
+      id: "playwright",
+      name: "Playwright Browser",
+      category: "Developer",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#6A9BCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>',
+      desc: "Modern headless browser, dinamik sayfalar icin Puppeteer alternatifi.",
+      command: "npx",
+      args: ["-y", "@playwright/mcp@latest"]
+    },
+    {
+      id: "sequential-thinking",
+      name: "Sequential Thinking",
+      category: "Reasoning",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#9D79BC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04z"/></svg>',
+      desc: "Cok adimli planlama oncesi adim adim akil yurutme.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    },
+    {
+      id: "time",
+      name: "Time & Timezone",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D4A359" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+      desc: "Guncel saat, timezone cevrim ve zamanlama yardimcilari.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-time"]
+    },
+    {
+      id: "google-maps",
+      name: "Google Maps",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D05548" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.5-2.5v-13L9 7l6-2.5L20.5 7v13L15 17.5 9 20z"/></svg>',
+      desc: "Adres cozumleme, mekan arama ve yol tarifi.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-google-maps"],
+      envFields: [{key: "GOOGLE_MAPS_API_KEY", label: "Google Maps API Key", secret: true, placeholder: "AIza..."}]
+    },
+    {
+      id: "google-drive",
+      name: "Google Drive",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#6A9BCC" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 16l-4-7 4-7h8l4 7-4 7H8z"/></svg>',
+      desc: "Drive dosya listeleme, arama, okuma ve olusturma.",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-gdrive"],
+      envFields: [{key: "GDRIVE_CREDENTIALS_PATH", label: "Credentials JSON Path", secret: false, placeholder: "/Users/.../credentials.json"}]
+    },
+    {
+      id: "gmail",
+      name: "Gmail",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D05548" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 6L2 7"/></svg>',
+      desc: "Gmail arama, okuma, taslak ve gonderme.",
+      command: "npx",
+      args: ["-y", "@gongrzhe/server-gmail-autoauth-mcp"]
+    },
+    {
+      id: "youtube-transcript",
+      name: "YouTube Transcript",
+      category: "Media",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D05548" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><polygon points="10 9 15 12 10 15 10 9"/></svg>',
+      desc: "YouTube altyazi cekme, izlemeden ozet icin.",
+      command: "npx",
+      args: ["-y", "@kimtaeyoon83/mcp-server-youtube-transcript"]
+    },
+    {
+      id: "obsidian",
+      name: "Obsidian Vault",
+      category: "Productivity",
+      icon: '<svg viewBox="0 0 24 24" fill="none" stroke="#D4A359" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8v8l8-8v8"/></svg>',
+      desc: "Yerel Obsidian vault icinde not okuma, arama ve ekleme.",
+      command: "npx",
+      args: ["-y", "mcp-obsidian", "{vault_path}"],
+      fields: [{key: "vault_path", label: "Vault Path", placeholder: "/Users/.../vault"}]
     }
   ];
 
@@ -2823,10 +3258,17 @@
           '<div class="mcp-installed-pill">' +
             '<span class="mcp-pill-icon">' + (item.icon || ICONS.gear) + '</span>' +
             '<span>' + escapeHtml(item.name || key) + '</span>' +
-            '<span class="mcp-remove-btn" title="Kaldır" onclick="deleteMcpServer(\'' + key + '\')">' + ICONS.cross + '</span>' +
+            '<span class="mcp-remove-btn" title="Kaldır" data-mcp-key="' + escapeAttr(key) + '">' + ICONS.cross + '</span>' +
           '</div>';
       });
       installedListEl.innerHTML = stripHtml;
+      // Bound after render, never through an inline handler: the key comes
+      // from mcp.json and an inline onclick would execute it as code.
+      installedListEl.querySelectorAll(".mcp-remove-btn").forEach(function(btn){
+        btn.addEventListener("click", function(){
+          deleteMcpServer(btn.getAttribute("data-mcp-key"));
+        });
+      });
     }
 
     // Filter catalog
@@ -2852,9 +3294,13 @@
 
       items.forEach(function(item){
         var isInstalled = !!(window._installedMcp && window._installedMcp[item.id]);
+        // Bound by delegation below rather than inline. These ids come from
+        // the hardcoded catalogue, so nothing hostile reaches them today — but
+        // one renderer with two rules is how the next id from a config file
+        // ends up in the interpolating branch.
         var actionBtn = isInstalled
-          ? '<button class="mcp-action-btn installed" onclick="deleteMcpServer(\'' + item.id + '\')">' + ICONS.check + ' <span>Kurulu</span> <span style="display:inline-flex;margin-left:3px;opacity:0.6;">' + ICONS.cross + '</span></button>'
-          : '<button class="mcp-action-btn install" onclick="openMcpInstallModal(\'' + item.id + '\')">' + ICONS.plus + ' <span>Kur</span></button>';
+          ? '<button class="mcp-action-btn installed" data-mcp-remove="' + escapeAttr(item.id) + '">' + ICONS.check + ' <span>Kurulu</span> <span style="display:inline-flex;margin-left:3px;opacity:0.6;">' + ICONS.cross + '</span></button>'
+          : '<button class="mcp-action-btn install" data-mcp-install="' + escapeAttr(item.id) + '">' + ICONS.plus + ' <span>Kur</span></button>';
 
         html += 
           '<div class="mcp-card">' +
@@ -2873,6 +3319,16 @@
     });
 
     catalogContainer.innerHTML = html;
+    catalogContainer.querySelectorAll("[data-mcp-remove]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        deleteMcpServer(btn.getAttribute("data-mcp-remove"));
+      });
+    });
+    catalogContainer.querySelectorAll("[data-mcp-install]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        openMcpInstallModal(btn.getAttribute("data-mcp-install"));
+      });
+    });
   };
 
   window.filterMcpCatalog = function(q) {

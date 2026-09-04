@@ -331,13 +331,17 @@ def _provider_with_seen(seen: list[SkillDefinition | None]) -> Callable[[Working
 
 
 def test_decision_prompt_renders_mounted_skill() -> None:
+    # Skills are learned from screen text, so they render inside the
+    # untrusted-data block as a hint — never as bare operator instructions.
     state = WorkingState(goal="g", skill=_definition())
     prompt = decision_prompt(state, app="Safari")
-    assert "Mounted skill: safari.export-report.abc — export a report via File > Export" in prompt
-    assert "1. open File menu" in prompt
-    assert "3. pick CSV" in prompt
+    assert "safari.export-report.abc" in prompt
+    assert "export a report via File > Export" in prompt
+    assert "open File menu" in prompt
+    assert "pick CSV" in prompt
+    assert "<observed_data>" in prompt
     bare = WorkingState(goal="g")
-    assert "Mounted skill:" not in decision_prompt(bare, app="Safari")
+    assert "safari.export-report.abc" not in decision_prompt(bare, app="Safari")
 
 
 def test_agent_auto_mounts_matching_skill(tmp_path) -> None:

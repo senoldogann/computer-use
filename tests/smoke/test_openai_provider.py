@@ -22,7 +22,13 @@ from computeruse.cli import load_model
 from computeruse.orchestrator.loop import OodaRunner, WorkingState
 from computeruse.orchestrator.prompts import scaffolded_provider
 from computeruse.orchestrator.schemas import AgentTurn
-from computeruse.providers.openai import DEFAULT_MODEL, OpenAIError, openai_model
+from computeruse.providers.openai import (
+    _RETRY_AFTER_MAX_SECONDS,
+    DEFAULT_MODEL,
+    OpenAIError,
+    _retry_after_seconds,
+    openai_model,
+)
 
 CLICK_DECISION = json.dumps(
     {
@@ -296,3 +302,70 @@ def test_api_key_resolution_order(
     monkeypatch.delenv("OPENAI_API_KEY")
     monkeypatch.setattr(cli_module, "ENV_FILES", (tmp_path / "missing",))
     assert cli_module.load_api_key() is False
+
+
+# --- NET-01: "not now" is not "not ever" ------------------------------------
+
+
+def _http_error(status: int, message: str, headers: dict[str, str]) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://api.openai.com/v1/chat/completions",
+        status,
+        "error",
+        headers,  # type: ignore[arg-type]
+        io.BytesIO(json.dumps({"error": {"message": message}}).encode("utf-8")),
+    )
+
+
+def test_a_rate_limit_is_retried_rather_than_ending_the_run() -> None:
+    """429 clears on its own in seconds; treating it as terminal ended runs.
+
+    Defensible while a human sat watching — they could restart it. Not
+    defensible for an unattended session, where one 429 at 3am ends the night.
+    """
+    opener, captured = _fake_opener(
+        _http_error(429, "rate limit reached", {"Retry-After": "0"}),
+        _FakeResponse(json.dumps({"choices": [{"message": {"content": "the reply"}}]})),
+    )
+    model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
+    assert model("hi") == "the reply"
+    assert len(captured) == 2, "the throttled call must be retried, then succeed"
+
+
+def test_a_service_blip_is_retried() -> None:
+    opener, captured = _fake_opener(
+        _http_error(503, "service unavailable", {}),
+        _FakeResponse(json.dumps({"choices": [{"message": {"content": "the reply"}}]})),
+    )
+    model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
+    assert model("hi") == "the reply"
+    assert len(captured) == 2
+
+
+def test_a_bad_key_is_not_retried() -> None:
+    """Every other 4xx stays terminal: retrying only delays the real answer."""
+    opener, captured = _fake_opener(_http_error(401, "invalid api key", {}))
+    model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
+    with pytest.raises(OpenAIError, match="401"):
+        model("hi")
+    assert len(captured) == 1, "an unauthorized call must fail on the first try"
+
+
+def test_a_rate_limit_that_never_clears_still_ends_the_call() -> None:
+    """The retry ladder is bounded; a permanent 429 must not loop forever."""
+    opener, captured = _fake_opener(
+        *[_http_error(429, "quota", {"Retry-After": "0"}) for _ in range(6)]
+    )
+    model = openai_model("gpt-5.6-terra", api_key="sk-test", http_open=opener)
+    with pytest.raises(OpenAIError, match="429"):
+        model("hi")
+    assert len(captured) == 3, "bounded by _MAX_TRANSPORT_RETRIES"
+
+
+def test_retry_after_is_honoured_but_capped() -> None:
+    """The service knows when it will answer; an absurd value is still refused."""
+    assert _retry_after_seconds("2.5", 9.0) == 2.5
+    assert _retry_after_seconds(None, 9.0) == 9.0
+    assert _retry_after_seconds("not-a-number", 9.0) == 9.0
+    assert _retry_after_seconds("0", 9.0) == 9.0
+    assert _retry_after_seconds("86400", 9.0) == _RETRY_AFTER_MAX_SECONDS

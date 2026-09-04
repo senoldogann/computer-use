@@ -19,6 +19,7 @@ that works, and the interface the heavier semantic/vector matching (which
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Final, Literal
 
@@ -26,6 +27,8 @@ from pydantic import BaseModel, Field
 
 from computeruse.orchestrator.schemas import Action
 from computeruse.slug import ascii_slug
+
+LOGGER: Final = logging.getLogger(__name__)
 
 EntryKind = Literal["pattern", "preference", "shortcut", "coordinate"]
 
@@ -115,12 +118,21 @@ class SemanticStore:
         path.unlink()
 
     def entries(self) -> tuple[SemanticEntry, ...]:
-        """All entries, sorted by id (ids sort lexically = insertion order)."""
+        """All entries, sorted by id (ids sort lexically = insertion order).
+
+        Corrupt files are skipped with a warning, matching MissionStore: one
+        bad record must not hide every other fact the agent learned.
+        """
         entries: list[SemanticEntry] = []
+        if not self._store_dir.is_dir():
+            return ()
         for path in sorted(self._store_dir.glob("*.json")):
-            entries.append(
-                SemanticEntry.model_validate(json.loads(path.read_text(encoding="utf-8")))
-            )
+            try:
+                entries.append(
+                    SemanticEntry.model_validate(json.loads(path.read_text(encoding="utf-8")))
+                )
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("unreadable semantic entry %s: %s", path, exc)
         return tuple(entries)
 
     def upsert(self, entry: SemanticEntry) -> None:

@@ -114,6 +114,54 @@ def element_rect(element: AXElement) -> Rect:
     )
 
 
+class RecognizedLine(BaseModel):
+    """One line of text the OCR fallback read off the screen (ADR-2).
+
+    The same coordinate space and field names as :class:`AXElement`, in global
+    logical points, because both are grounding sources and the orchestrator
+    should not need two mental models for "where is this control".
+    """
+
+    text: str
+    #: Vision's own score, 0..1. Carried so a caller can raise the floor
+    #: without a driver rebuild.
+    confidence: float
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+def recognized_summaries(lines: tuple[RecognizedLine, ...]) -> tuple[str, ...]:
+    """Render OCR lines in the same summary shape elements use (pure).
+
+    Deliberately identical in format to :func:`element_summary`, which is what
+    lets the whole downstream pipeline consume OCR with no changes at all: the
+    viewport cull, the image-space rewrite and the Set-of-Marks parser all
+    drive off one regex over this line shape.
+
+    The reported point is the **centre**, for the reason
+    :func:`element_summary` documents at length — aiming at a corner cost six
+    consecutive misses on a real page, because one image pixel is several
+    logical points and a rounded corner lands outside the target.
+
+    The role is spelled ``Text`` rather than borrowed from the accessibility
+    vocabulary: it is honest about where the reading came from, and it tells
+    the model that this target was read off pixels rather than declared by the
+    application.
+    """
+    summaries: list[str] = []
+    for line in lines:
+        label = line.text.strip() or "(untitled)"
+        centre_x = line.x + line.width / 2
+        centre_y = line.y + line.height / 2
+        summaries.append(
+            f'Text "{label}" at '
+            f"({centre_x:.0f},{centre_y:.0f}) {line.width:.0f}x{line.height:.0f}"
+        )
+    return tuple(summaries)
+
+
 def element_summary(element: AXElement) -> str:
     """One compact, parseable line describing an actionable element (pure).
 
@@ -172,6 +220,37 @@ def focused_text_value(root: AXElement) -> str | None:
             if found is not None:
                 return found
         return None
+
+    return walk(root)
+
+
+#: The role macOS gives a field whose contents it redacts — a password box.
+#: Its *presence* is perfectly visible in the accessibility tree even though
+#: its value is not, which is what makes it a reliable signal that the screen
+#: is asking for a credential.
+SECURE_FIELD_ROLE: Final[str] = "SecureTextField"
+
+
+def asks_for_a_credential(root: AXElement) -> bool:
+    """Is a password field on screen at all (pure)?
+
+    Deliberately broader than "is one focused". Focus can move between the
+    snapshot the model decided from and the moment a keystroke lands, and
+    typing a password into the wrong field is worse than not typing it — so
+    the presence of the box anywhere on screen is the signal, and it fails
+    closed.
+
+    The apparent false positive is the wanted behaviour: on a sign-in form the
+    agent cannot complete the sign-in anyway, so filling the username field
+    achieves nothing except leaving a half-filled form and a person who now has
+    to work out what happened. "This one needs you" is the honest answer to the
+    whole screen, not to one field on it.
+    """
+
+    def walk(node: AXElement) -> bool:
+        if node.role == SECURE_FIELD_ROLE:
+            return True
+        return any(walk(child) for child in node.children)
 
     return walk(root)
 
@@ -399,14 +478,18 @@ def summaries_to_image_space(
     """
     if screen_map.is_identity or not summaries:
         return summaries
-    points_per_pixel = screen_map.points_per_pixel
+    # Per axis, matching ``to_image``: rounding in the downscale makes the two
+    # ratios differ slightly, and a width scaled by the Y factor describes a
+    # box the model is not looking at.
+    per_pixel_x = screen_map.points_per_pixel_x
+    per_pixel_y = screen_map.points_per_pixel_y
 
     def rescale(match: re.Match[str]) -> str:
         x, y, width, height = (int(g) for g in match.groups())
         centre = screen_map.to_image(Point(float(x), float(y)))
         return (
             f"at ({round(centre.x)},{round(centre.y)}) "
-            f"{round(width / points_per_pixel)}x{round(height / points_per_pixel)}"
+            f"{round(width / per_pixel_x)}x{round(height / per_pixel_y)}"
         )
 
     pattern = re.compile(r"at \((\d+),(\d+)\) (\d+)x(\d+)")

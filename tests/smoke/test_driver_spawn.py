@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from computeruse.cli import spawn_driver
+from computeruse.orchestrator.client import ActuationClient, DriverConnectionError
 
 # The fake drivers are executable scripts (shebang) so the command
 # ``[binary, socket_path]`` reaches them exactly like the real driver binary:
@@ -72,3 +73,40 @@ def test_spawn_driver_returns_process_once_socket_exists(tmp_path) -> None:
         process.terminate()
         process.wait(timeout=5)
         socket_path.unlink(missing_ok=True)
+
+
+# --- AUT-02: a socket that stopped answering usually means a dead process ----
+
+
+def test_the_client_asks_for_recovery_before_giving_up(tmp_path: Path) -> None:
+    """The hook fires once, late, and the run continues if it worked.
+
+    Reconnecting to a socket whose server has exited can never succeed, so the
+    client's own retries were guaranteed to run out. The hook is what gives the
+    driver's owner a chance to bring it back — and it is called before the last
+    attempt so the retry that follows can actually use the new process.
+    """
+    socket_path = str(tmp_path / "driver.sock")
+    calls: list[int] = []
+
+    def recover() -> None:
+        calls.append(1)
+
+    client = ActuationClient(
+        socket_path,
+        connect_retries=3,
+        retry_delay_seconds=0.0,
+        recover=recover,
+    )
+    with pytest.raises(DriverConnectionError):
+        client.connect()
+    assert calls == [1], "recovery is attempted once per connect, never in a loop"
+
+
+def test_a_client_with_no_recovery_hook_behaves_as_before(tmp_path: Path) -> None:
+    """Attaching to someone else's driver must not respawn it behind their back."""
+    client = ActuationClient(
+        str(tmp_path / "driver.sock"), connect_retries=2, retry_delay_seconds=0.0
+    )
+    with pytest.raises(DriverConnectionError):
+        client.connect()

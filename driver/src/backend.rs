@@ -126,6 +126,73 @@ pub struct HostElement {
     pub children: Vec<HostElement>,
 }
 
+/// One line of recognised text, in the same space `HostElement` uses.
+///
+/// ADR-2's fallback for windows with no accessibility tree. Deliberately flat
+/// where `HostElement` is a tree — OCR output has no hierarchy — and carrying
+/// the identical field names and units so the orchestrator can render it into
+/// the same summary line an element produces, and its existing Set-of-Marks
+/// parser consumes it with no changes at all.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TextLine {
+    pub text: String,
+    /// Vision's own confidence, 0..1. Carried so the caller can tighten the
+    /// floor without a driver rebuild.
+    pub confidence: f32,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Vision's answer for one line: a fraction of the image, origin lower-left.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalizedBox {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Where a captured frame sits in the global space, and how dense it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptureGeometry {
+    pub width_px: f64,
+    pub height_px: f64,
+    /// Pixels per logical point (2.0 on Retina).
+    pub scale: f64,
+    pub origin_x: f64,
+    pub origin_y: f64,
+}
+
+/// Vision's normalised box → the driver's global logical points (pure).
+///
+/// The two conventions disagree about both the origin corner and the direction
+/// of Y, which is the class of bug that compiles cleanly and sends every
+/// action to the wrong place — the same trap `scroll_wheels` documents. So
+/// this is a free function with its own tests rather than three lines inside
+/// the Vision call, and its inputs are grouped rather than nine bare floats in
+/// a row, because transposing two of those is precisely the mistake.
+///
+/// * Vision reports a fraction of the image with the origin at its
+///   **lower-left** and Y growing **up**.
+/// * The driver speaks global logical points with the origin at the primary
+///   display's **top-left** and Y growing **down**.
+///
+/// Returns `(x, y, width, height)` — the top-left corner and size, matching
+/// `HostElement`, so both grounding sources describe a rect the same way.
+pub fn vision_box_to_points(bbox: NormalizedBox, frame: CaptureGeometry) -> (f64, f64, f64, f64) {
+    let scale = if frame.scale > 0.0 { frame.scale } else { 1.0 };
+    let x = frame.origin_x + (bbox.x * frame.width_px) / scale;
+    // The flip: Vision's y is the box's *bottom* measured up from the image
+    // floor, so the top edge is one minus (that plus the box's own height).
+    let top_fraction = 1.0 - bbox.y - bbox.height;
+    let y = frame.origin_y + (top_fraction * frame.height_px) / scale;
+    let width = (bbox.width * frame.width_px) / scale;
+    let height = (bbox.height * frame.height_px) / scale;
+    (x, y, width, height)
+}
+
 impl std::fmt::Debug for CaptureFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Don't dump megabytes of pixels into a debug log.
@@ -218,6 +285,25 @@ pub trait Backend: Send + Sync {
     /// orchestrator's summary ordering) so a pathological app cannot balloon
     /// either the walk time or the response.
     fn ax_snapshot(&self, pid: u32, max_depth: u8, max_nodes: u32) -> Result<HostElement, BackendError>;
+
+    /// Recognise the text on screen, for windows with no accessibility tree.
+    ///
+    /// ADR-2's stated fallback, and the reason it matters: marks are derived
+    /// from AX elements, so a window that exposes none leaves the model with
+    /// no indexed target at all and nothing to do but guess coordinates off a
+    /// downscaled screenshot. Games, virtual machines, remote desktops, a
+    /// canvas, and Electron apps with poor accessibility are all in that set.
+    ///
+    /// Deliberately has no default body: a default returning "no text" would
+    /// let the simulated backend answer an empty screen forever, which is the
+    /// precise failure the fixture was rewritten to eliminate.
+    fn recognize_text(
+        &self,
+        display_id: u32,
+        window_pid: Option<u32>,
+        min_confidence: f32,
+        max_lines: u32,
+    ) -> Result<Vec<TextLine>, BackendError>;
 
     /// Ask the accessibility element under a point to activate itself.
     ///
@@ -661,6 +747,51 @@ impl Backend for SimulatedBackend {
         Ok(truncate_nodes(root, &mut budget, false))
     }
 
+    fn recognize_text(
+        &self,
+        _display_id: u32,
+        _window_pid: Option<u32>,
+        min_confidence: f32,
+        max_lines: u32,
+    ) -> Result<Vec<TextLine>, BackendError> {
+        // The same four controls the AX fixture reports, at the same
+        // rectangles. That is the point: a test can assert the OCR marks and
+        // the AX marks land on identical boxes, which pins the real Vision
+        // coordinate transform against an independent oracle — in CI, on a
+        // machine with no Screen Recording consent.
+        //
+        // The address field reads its live value, so OCR output *changes when
+        // the agent acts* and can serve as a verification witness offline
+        // rather than being a static list.
+        let state = self.state();
+        let mut lines: Vec<TextLine> = Vec::new();
+        for (index, (_role, title, x, y, width, height)) in FIXTURE_ELEMENTS.iter().enumerate() {
+            if lines.len() as u32 >= max_lines {
+                break;
+            }
+            let text = if index == ADDRESS_FIELD_INDEX {
+                state.address_value.clone()
+            } else {
+                (*title).to_string()
+            };
+            // A fixture confidence just under certainty, so a caller raising
+            // the floor to 1.0 gets an empty list rather than a silent pass.
+            let confidence = 0.95_f32;
+            if confidence < min_confidence {
+                continue;
+            }
+            lines.push(TextLine {
+                text,
+                confidence,
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+            });
+        }
+        Ok(lines)
+    }
+
     fn app_window(&self, pid: u32) -> Result<FocusedWindow, BackendError> {
         // The fixture owns exactly one app, so asking it about a pid it does
         // not have is a caller bug worth surfacing rather than answering.
@@ -1028,5 +1159,143 @@ mod node_budget_tests {
 
     fn repr_of(node: &HostElement) -> &HostElement {
         node
+    }
+
+    // --- Vision's box -> the driver's points -----------------------------
+
+    use super::{vision_box_to_points, CaptureGeometry, NormalizedBox};
+
+    /// Points are compared with a tolerance: the transform multiplies and
+    /// subtracts fractions, so `1.0 - 0.9 - 0.1` is not exactly zero and never
+    /// will be. A tenth of a point is far below anything a click can express.
+    fn close(left: f64, right: f64) -> bool {
+        (left - right).abs() < 0.1
+    }
+
+    fn assert_point(actual: (f64, f64), expected: (f64, f64)) {
+        assert!(
+            close(actual.0, expected.0) && close(actual.1, expected.1),
+            "expected ~{expected:?}, got {actual:?}"
+        );
+    }
+
+    /// A 1000x800-pixel frame at scale 1, sitting at the global origin.
+    fn plain_frame() -> CaptureGeometry {
+        CaptureGeometry {
+            width_px: 1000.0,
+            height_px: 800.0,
+            scale: 1.0,
+            origin_x: 0.0,
+            origin_y: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_box_at_visions_origin_lands_at_the_bottom_of_the_frame() {
+        // Vision's (0,0) is the image's LOWER-left. In the driver's space that
+        // is the bottom, not the top — the single inversion this whole
+        // function exists for. A box 10% tall sitting on the floor has its top
+        // edge at 90% of the height: 720 of 800.
+        let (x, y, width, height) = vision_box_to_points(
+            NormalizedBox { x: 0.0, y: 0.0, width: 0.5, height: 0.1 },
+            plain_frame(),
+        );
+        assert_point((x, y), (0.0, 720.0));
+        assert_point((width, height), (500.0, 80.0));
+    }
+
+    #[test]
+    fn a_box_at_the_top_of_the_screen_lands_at_y_zero() {
+        // Flush with the image's top: Vision reports y + height == 1.
+        let (_, y, _, height) = vision_box_to_points(
+            NormalizedBox { x: 0.0, y: 0.9, width: 1.0, height: 0.1 },
+            plain_frame(),
+        );
+        assert_point((y, height), (0.0, 80.0));
+    }
+
+    #[test]
+    fn retina_pixels_are_divided_back_into_logical_points() {
+        // A 2x display: the frame is 2000x1600 pixels over 1000x800 points, so
+        // every derived rect has to come back in points or every click lands
+        // at twice its intended distance from the origin.
+        let frame = CaptureGeometry {
+            width_px: 2000.0,
+            height_px: 1600.0,
+            scale: 2.0,
+            origin_x: 0.0,
+            origin_y: 0.0,
+        };
+        let (x, y, width, height) = vision_box_to_points(
+            NormalizedBox { x: 0.25, y: 0.5, width: 0.25, height: 0.25 },
+            frame,
+        );
+        assert_point((x, width), (250.0, 250.0));
+        // Top fraction = 1 - 0.5 - 0.25 = 0.25 -> 0.25 * 1600 / 2 = 200.
+        assert_point((y, height), (200.0, 200.0));
+    }
+
+    #[test]
+    fn a_secondary_displays_origin_is_carried_through() {
+        // A display to the right of the main one: a rect read off its frame
+        // must come back in GLOBAL points, or the click goes to the main
+        // display at the same relative position.
+        let frame = CaptureGeometry {
+            width_px: 1000.0,
+            height_px: 800.0,
+            scale: 1.0,
+            origin_x: 1920.0,
+            origin_y: -200.0,
+        };
+        let (x, y, _, _) = vision_box_to_points(
+            NormalizedBox { x: 0.0, y: 0.9, width: 0.1, height: 0.1 },
+            frame,
+        );
+        assert_point((x, y), (1920.0, -200.0));
+    }
+
+    #[test]
+    fn a_degenerate_scale_does_not_divide_by_zero() {
+        let frame = CaptureGeometry { scale: 0.0, ..plain_frame() };
+        let (_, _, width, _) = vision_box_to_points(
+            NormalizedBox { x: 0.0, y: 0.0, width: 0.5, height: 0.1 },
+            frame,
+        );
+        assert!(close(width, 500.0), "got {width}");
+    }
+
+    #[test]
+    fn the_simulated_backend_reports_the_fixture_text_where_ax_reports_it() {
+        // The strongest offline check there is: OCR and AX are two independent
+        // grounding sources, and on the fixture they must name the same
+        // controls at the same rectangles. A transform that inverts an axis
+        // fails this without a display, a camera, or Screen Recording consent.
+        let backend = SimulatedBackend::default();
+        let lines = backend
+            .recognize_text(0, None, 0.0, 64)
+            .expect("simulated OCR");
+        let tree = backend.ax_snapshot(4242, 20, 4096).expect("simulated AX");
+
+        fn find(node: &HostElement, title: &str) -> Option<(f64, f64, f64, f64)> {
+            if node.title == title {
+                return Some((node.x, node.y, node.width, node.height));
+            }
+            node.children.iter().find_map(|child| find(child, title))
+        }
+
+        assert!(!lines.is_empty(), "the fixture must produce text");
+        for line in &lines {
+            // The address field's OCR text is its live value, not its title,
+            // so it is matched by position instead.
+            let matched = find(&tree, &line.text).or_else(|| find(&tree, "address"));
+            let (ax_x, ax_y, ax_w, ax_h) =
+                matched.unwrap_or_else(|| panic!("no AX element for {:?}", line.text));
+            assert_eq!(
+                (line.x, line.y, line.width, line.height),
+                (ax_x, ax_y, ax_w, ax_h),
+                "OCR and AX disagree about {:?}",
+                line.text
+            );
+        }
     }
 }

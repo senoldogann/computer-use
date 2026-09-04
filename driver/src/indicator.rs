@@ -181,11 +181,24 @@ fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
 }
 
 /// Reposition the halo panel so its centre sits on the cursor.
+///
+/// The Y flip pivots on the **main** display's height, and that is correct on
+/// any number of monitors — it is not an approximation to be improved. Cocoa's
+/// global coordinate space has its origin at the bottom-left of the screen
+/// carrying the menu bar, so `NSMaxY(NSScreen.screens[0].frame) - quartz_y` is
+/// the whole conversion; the display the cursor happens to be over does not
+/// enter into it.
+///
+/// This was once "fixed" to pivot on the cursor's own display, which is right
+/// only while that display has the same origin and height as the main one.
+/// Checked against a second monitor placed above the main (quartz y = -450):
+/// the main pivot gives 1530, the cursor-display pivot gives -450, and the
+/// halo lands on the wrong screen entirely.
 fn follow_cursor(panel: &NSWindow) {
     let Some((x, y)) = cursor_location() else {
         return;
     };
-    let screen_height = screen_height();
+    let screen_height = main_display_height();
     let origin = CGPoint::new(x - PANEL / 2.0, screen_height - y - PANEL / 2.0);
     panel.setFrameOrigin(origin);
 }
@@ -201,8 +214,12 @@ fn cursor_location() -> Option<(f64, f64)> {
     Some((location.x, location.y))
 }
 
-/// Height of the main display in logical points (for the Y-axis flip).
-fn screen_height() -> f64 {
+/// Height of the main display in logical points — the pivot for the Y flip.
+///
+/// "Main" is load-bearing: Cocoa measures its global Y from the bottom of the
+/// menu-bar screen, so this is the only height that converts a Quartz point
+/// correctly, whatever monitor the cursor is on. See `follow_cursor`.
+fn main_display_height() -> f64 {
     core_graphics::display::CGDisplay::main().bounds().size.height
 }
 
