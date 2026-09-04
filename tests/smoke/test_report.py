@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from computeruse.inbox import FailedInboxItem, InboxCounts
 from computeruse.memory.schemas import Episode
 from computeruse.orchestrator.mission import (
     mission_blocked,
@@ -292,3 +293,78 @@ def test_one_corrupt_usage_record_does_not_hide_the_others(tmp_path: Path) -> No
 
 def test_an_empty_usage_store_is_not_an_error(tmp_path: Path) -> None:
     assert UsageStore(tmp_path / "never-created").records() == ()
+
+
+# --- the watched folder ------------------------------------------------------
+
+
+def _inbox(
+    *,
+    processed: int = 0,
+    failed: tuple[FailedInboxItem, ...] = (),
+    orphaned: int = 0,
+) -> InboxCounts:
+    return InboxCounts(
+        watch_dir="/tmp/inbox", processed=processed, failed=failed, orphaned=orphaned
+    )
+
+
+def _lost(name: str, reason: str | None = "RuntimeError: the disk is gone") -> FailedInboxItem:
+    return FailedInboxItem(name=name, reason=reason)
+
+
+def test_quarantined_files_render_right_after_pending_decisions() -> None:
+    """A failed task order is an unanswered question in another shape."""
+    text = render(
+        _report(
+            episodes=(_episode(description="a run", outcome="success", at=LAST_NIGHT),),
+            approvals=(_parked(),),
+            missions=(_blocked_mission(),),
+            inbox=_inbox(processed=2, failed=(_lost("order.txt"),)),
+        )
+    )
+    assert (
+        text.index("waiting on you")
+        < text.index("paused —")
+        < text.index("inbox /tmp/inbox")
+        < text.index("ran —")
+    )
+    assert "lost order.txt" in text
+    assert "the disk is gone" in text
+    assert "2 processed, 1 failed, 0 orphaned" in text
+
+
+def test_failed_and_orphaned_items_ignore_the_window() -> None:
+    """Inbox archives carry no timestamps by design: a failure from three days
+    ago is still an unanswered question, exactly like a parked approval."""
+    report = _report(inbox=_inbox(failed=(_lost("old.txt"),), orphaned=1))
+    assert report.period.since > LAST_WEEK
+    text = render(report)
+    assert "lost old.txt" in text
+    assert "1 claim(s) still in .processing/" in text
+
+
+def test_failed_inbox_items_break_the_quiet() -> None:
+    """Failures are news even on a night nothing ran."""
+    text = render(_report(inbox=_inbox(failed=(_lost("order.txt"),))))
+    assert "nothing ran, and nothing is waiting on you." not in text
+    assert "lost order.txt" in text
+
+
+def test_a_clean_folder_leaves_a_receipt_on_a_quiet_period() -> None:
+    """The reader asked about *that folder*: the section confirms it was read."""
+    text = render(_report(inbox=_inbox()))
+    assert "nothing ran, and nothing is waiting on you." in text
+    assert "inbox /tmp/inbox — 0 processed, 0 failed, 0 orphaned" in text
+
+
+def test_a_missing_reason_renders_as_unknown_not_as_blank() -> None:
+    text = render(_report(inbox=_inbox(failed=(_lost("order.txt", reason=None),))))
+    assert "(no reason recorded)" in text
+
+
+def test_summarize_passes_the_folder_through_untouched() -> None:
+    """Selection applies to stores; the folder count is already decided."""
+    counts = _inbox(processed=3)
+    assert _report(inbox=counts).inbox is counts
+    assert _report().inbox is None

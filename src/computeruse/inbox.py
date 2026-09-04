@@ -138,14 +138,25 @@ def is_group_or_world_writable(mode: int) -> bool:
 def check_inbox_writable(directory: Path) -> None:
     """Refuse an inbox anyone else can write to (I/O shell).
 
+    Also refuses anything that is not a directory at all: without this a
+    ``--watch`` pointing at a file passed the stat, then died later with a
+    raw ``NotADirectoryError`` while creating ``.processing/`` — a typed
+    boundary must not leak past itself.
+
     Raises :class:`InboxRefusedError` naming the path and its mode: whoever
     can write the folder can command the agent, and that fact must be said
     plainly, not hidden behind a generic permission error.
     """
     try:
-        mode = stat.S_IMODE(os.stat(directory).st_mode)
+        folder_stat = os.stat(directory)
     except OSError as exc:
         raise InboxError(f"inbox directory {directory} cannot be used: {exc}") from exc
+    if not stat.S_ISDIR(folder_stat.st_mode):
+        raise InboxError(
+            f"inbox {directory} is not a directory "
+            "(--watch needs a folder to claim task files from, not a file)"
+        )
+    mode = stat.S_IMODE(folder_stat.st_mode)
     if is_group_or_world_writable(mode):
         raise InboxRefusedError(
             f"inbox directory {directory} is writable by group/others "
@@ -234,6 +245,14 @@ def claim_next_task(directory: Path, *, now: float, pid: int) -> ClaimedTask | N
         try:
             task = parse_claimed_file(target)
         except InvalidInboxFileError as exc:
+            # Said out loud, not just archived: the operator dropped a file
+            # expecting work, and silence about where it went would read as
+            # the agent ignoring them.
+            LOGGER.warning(
+                "inbox: %s is unusable, archived to .failed/ (%s)",
+                entry.name,
+                exc.reason,
+            )
             settle_failed(target, failed_dir=failed, reason=exc.reason)
             continue
         # The proposal cites the name the operator dropped, not the claim
@@ -265,13 +284,17 @@ def settle_failed(processing_path: Path, *, failed_dir: Path, reason: str) -> Pa
 
 
 def sweep_processing(directory: Path, *, reason: str) -> tuple[str, ...]:
-    """Quarantine claims a dead session left behind (I/O shell, run once).
+    """Quarantine claims a suddenly-dead session left behind (I/O shell, run once).
 
-    A claim sitting in ``.processing/`` at session start belongs to a process
-    that will never settle it. Re-running it silently would repeat unknown
-    work; dropping it silently would lose work without a trace. ``.failed/``
-    with the reason written down is the honest middle: nothing is lost, and
-    nothing runs twice.
+    Only sudden death orphans: every orderly ending settles its own claim —
+    success and parked runs archive to ``.processed/``, and even a
+    kill-switch takeover or an exhausted budget passes through the runner's
+    failure path into ``.failed/`` with its reason. A claim still sitting in
+    ``.processing/`` at session start therefore belongs to a process that
+    died without unwinding, and neither re-running it silently (repeating
+    unknown work) nor dropping it silently (losing work without a trace) is
+    honest. ``.failed/`` with the reason written down is the middle that
+    keeps both promises: nothing is lost, and nothing runs twice.
     """
     processing = directory / PROCESSING_DIRNAME
     if not processing.is_dir():
@@ -284,6 +307,94 @@ def sweep_processing(directory: Path, *, reason: str) -> tuple[str, ...]:
         settle_failed(child, failed_dir=failed, reason=reason)
         moved.append(child.name)
     return tuple(moved)
+
+
+@dataclass(frozen=True)
+class FailedInboxItem:
+    """One quarantined task file and why it is there (pure data)."""
+
+    name: str
+    #: The archived reason, or ``None`` when its sidecar is missing or
+    #: unreadable — the quarantine itself is the fact, the reason a bonus.
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class InboxCounts:
+    """What a watched folder holds right now (pure data, no rendering).
+
+    Counts, not contents: the report needs to know how much sits where, and
+    only the failures need their whys. ``failed`` runs newest first, so the
+    freshest unanswered question is the first line a person reads.
+    """
+
+    watch_dir: str
+    processed: int
+    failed: tuple[FailedInboxItem, ...]
+    orphaned: int
+
+
+def count_inbox(directory: Path) -> InboxCounts:
+    """Count a watched folder's archives for the report (I/O shell).
+
+    A missing or unreadable folder raises :class:`InboxError` rather than
+    reporting zeros: zeros would claim the night was quiet while the operator
+    mistyped the path. Dotfiles and reason sidecars are bookkeeping, never
+    tasks, and are not counted.
+    """
+    if not directory.is_dir():
+        raise InboxError(
+            f"inbox {directory} is not a readable directory "
+            "(--report --watch needs the folder a session watched)"
+        )
+    processed = _count_archive(directory / PROCESSED_DIRNAME)
+    failed_dir = directory / FAILED_DIRNAME
+    failed = _read_failures(failed_dir)
+    orphaned = _count_archive(directory / PROCESSING_DIRNAME)
+    return InboxCounts(
+        watch_dir=str(directory),
+        processed=processed,
+        failed=failed,
+        orphaned=orphaned,
+    )
+
+
+def _count_archive(archive: Path) -> int:
+    """How many archived files sit in ``archive`` (I/O shell)."""
+    if not archive.is_dir():
+        return 0
+    count = 0
+    for child in archive.iterdir():
+        if child.name.startswith(".") or child.is_symlink() or not child.is_file():
+            continue
+        if child.name.endswith(REASON_SUFFIX):
+            continue
+        count += 1
+    return count
+
+
+def _read_failures(failed_dir: Path) -> tuple[FailedInboxItem, ...]:
+    """Quarantined files with their reasons, newest first (I/O shell)."""
+    if not failed_dir.is_dir():
+        return ()
+    found: list[tuple[int, str, str | None]] = []
+    for child in failed_dir.iterdir():
+        if child.name.startswith(".") or child.is_symlink() or not child.is_file():
+            continue
+        if child.name.endswith(REASON_SUFFIX):
+            continue
+        try:
+            mtime = child.stat().st_mtime_ns
+        except OSError:
+            mtime = 0
+        sidecar = child.with_name(child.name + REASON_SUFFIX)
+        try:
+            reason = sidecar.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            reason = None
+        found.append((mtime, child.name, reason))
+    found.sort(key=lambda item: (-item[0], item[1]))
+    return tuple(FailedInboxItem(name=name, reason=reason) for _, name, reason in found)
 
 
 def _parse_bytes(raw: bytes, *, source_name: str) -> InboxTask:
