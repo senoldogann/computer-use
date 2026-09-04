@@ -75,6 +75,7 @@ from computeruse.security.grants import (
 )
 from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
+from computeruse.skills.playbook import PlaybookRegistry
 from computeruse.skills.registry import SkillRegistry, refined_route, skill_for_goal
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.vision import AXElement
@@ -365,6 +366,7 @@ class Agent:
     def run(self) -> AgentResult:
         episodes_store = EpisodicStore(self._config.store_dir / "episodes")
         skills_registry = SkillRegistry(self._config.store_dir / "skills")
+        playbook_registry = PlaybookRegistry()
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
         # Law 5.1 delegation: the user's standing capability grants. They apply
         # whenever any exist — a permission someone deliberately wrote, with an
@@ -959,6 +961,7 @@ class Agent:
                 # full definition.
                 skill_scan=lambda q: tuple(skills_registry.search(q)),
                 skill_loader=skills_registry.load,
+                playbook_scan=playbook_registry.best,
                 app=app,
                 # The focus guard only makes sense for a run pinned to a named
                 # app: when the app was merely discovered from whatever was

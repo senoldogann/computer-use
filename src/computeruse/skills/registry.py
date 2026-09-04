@@ -128,7 +128,7 @@ def refined_route(
     )
 
 
-def _content_tokens(text: str) -> frozenset[str]:
+def content_tokens(text: str) -> frozenset[str]:
     """Lowercased content words of a phrase, punctuation stripped (pure)."""
     cleaned = re.sub(r"[^\w]+", " ", text.lower(), flags=re.UNICODE)
     return frozenset(
@@ -136,6 +136,9 @@ def _content_tokens(text: str) -> frozenset[str]:
         for token in cleaned.split()
         if len(token) > 1 and token not in UNINFORMATIVE_WORDS
     )
+
+
+_content_tokens = content_tokens
 
 
 def search(
