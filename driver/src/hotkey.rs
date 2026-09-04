@@ -70,6 +70,45 @@ pub fn tripped() -> bool {
     KILL_TRIPPED.load(Ordering::SeqCst)
 }
 
+/// What the tap callback should do about one delivered event (SYS-01).
+///
+/// Pure and total over the event type plus whether the key payload (when the
+/// event carries one) matched the kill combo — no tap handle, no atomics, no
+/// display server — so the re-arm rule is unit-testable without hardware:
+/// * ``Rearm`` — macOS switched the tap off and is telling us so; the tap
+///   must be switched back on or the kill hotkey dies silently (Law 5.2).
+/// * ``Trip`` — a real kill-combo keypress; consume it and flag the takeover.
+/// * ``Pass`` — anything else; let it through untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TapAction {
+    Pass,
+    Rearm,
+    Trip,
+}
+
+/// Pure: map one tap event to its action (SYS-01 decision rule).
+///
+/// The disable notifications outrank everything — even a kill combo arriving
+/// in the same instant must not shadow the re-arm, because a dead tap makes
+/// every later press (kill or not) unobservable. ``is_kill_combo`` is only
+/// meaningful for ``KeyDown``; the callback computes it from the key payload
+/// and passes ``false`` for anything else.
+pub(crate) fn handle_tap_event_type(
+    event_type: CGEventType,
+    is_kill_combo: bool,
+) -> TapAction {
+    if matches!(
+        event_type,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
+        TapAction::Rearm
+    } else if matches!(event_type, CGEventType::KeyDown) && is_kill_combo {
+        TapAction::Trip
+    } else {
+        TapAction::Pass
+    }
+}
+
 /// Read an event's modifier flags. The crate exposes ``set_flags`` but no
 /// getter; ``CGEventGetFlags`` is a stable CoreGraphics symbol.
 fn event_flags(event: &CGEvent) -> CGEventFlags {
@@ -124,31 +163,33 @@ pub fn spawn_listener() {
                 CGEventType::TapDisabledByUserInput,
             ],
             |_proxy, etype, event| {
-                if matches!(
-                    etype,
-                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
-                ) {
-                    // Re-arm unconditionally, including the by-user-input case
-                    // Apple describes as deliberate. This tap is the user's
-                    // escape hatch; leaving it off because something asked
-                    // nicely is not a trade a kill switch may make. Keystrokes
-                    // during the disabled window are genuinely lost, so a
-                    // combo pressed exactly then must be pressed again — the
-                    // line below is what makes a second press work at all.
-                    rearm_tap();
-                    eprintln!("[driver] kill-hotkey tap was disabled by the system; re-armed");
-                    return CallbackResult::Keep;
-                }
-                if matches_kill_combo(
-                    event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
-                    event_flags(event),
-                ) {
-                    KILL_TRIPPED.store(true, Ordering::SeqCst);
-                    // Consume the combo: it is the kill gesture, not an app
-                    // shortcut — nothing else should react to it.
-                    CallbackResult::Drop
-                } else {
-                    CallbackResult::Keep
+                // The decision itself is pure (`handle_tap_event_type`); the
+                // arms below only perform the side effects it selects.
+                let is_kill = matches!(etype, CGEventType::KeyDown)
+                    && matches_kill_combo(
+                        event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                        event_flags(event),
+                    );
+                match handle_tap_event_type(etype, is_kill) {
+                    TapAction::Rearm => {
+                        // Re-arm unconditionally, including the by-user-input case
+                        // Apple describes as deliberate. This tap is the user's
+                        // escape hatch; leaving it off because something asked
+                        // nicely is not a trade a kill switch may make. Keystrokes
+                        // during the disabled window are genuinely lost, so a
+                        // combo pressed exactly then must be pressed again — the
+                        // line below is what makes a second press work at all.
+                        rearm_tap();
+                        eprintln!("[driver] kill-hotkey tap was disabled by the system; re-armed");
+                        CallbackResult::Keep
+                    }
+                    TapAction::Trip => {
+                        KILL_TRIPPED.store(true, Ordering::SeqCst);
+                        // Consume the combo: it is the kill gesture, not an app
+                        // shortcut — nothing else should react to it.
+                        CallbackResult::Drop
+                    }
+                    TapAction::Pass => CallbackResult::Keep,
                 }
             },
         ) {
@@ -209,5 +250,50 @@ mod tests {
         assert!(event_flags(&event).contains(CGEventFlags::CGEventFlagShift));
         let plain = key_event(53, CGEventFlags::empty());
         assert!(event_flags(&plain).is_empty());
+    }
+
+    // SYS-01: the re-arm decision is pure — no tap, no display server, no
+    // hardware — so CI pins it deterministically.
+    #[test]
+    fn tap_disable_notifications_rearm_instead_of_dying() {
+        assert_eq!(
+            handle_tap_event_type(CGEventType::TapDisabledByTimeout, false),
+            TapAction::Rearm
+        );
+        assert_eq!(
+            handle_tap_event_type(CGEventType::TapDisabledByUserInput, false),
+            TapAction::Rearm
+        );
+        // A disable outranks everything: even a kill combo arriving in the
+        // same instant must not shadow the re-arm.
+        assert_eq!(
+            handle_tap_event_type(CGEventType::TapDisabledByTimeout, true),
+            TapAction::Rearm
+        );
+        assert_eq!(
+            handle_tap_event_type(CGEventType::TapDisabledByUserInput, true),
+            TapAction::Rearm
+        );
+    }
+
+    #[test]
+    fn key_events_never_rearm_and_trip_only_on_the_kill_combo() {
+        assert_eq!(
+            handle_tap_event_type(CGEventType::KeyDown, false),
+            TapAction::Pass
+        );
+        assert_eq!(
+            handle_tap_event_type(CGEventType::KeyDown, true),
+            TapAction::Trip
+        );
+        // Non-key traffic is never a kill gesture and never a disable.
+        assert_eq!(
+            handle_tap_event_type(CGEventType::Null, false),
+            TapAction::Pass
+        );
+        assert_eq!(
+            handle_tap_event_type(CGEventType::Null, true),
+            TapAction::Pass
+        );
     }
 }

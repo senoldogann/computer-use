@@ -145,6 +145,47 @@ const STOP_GRACE_SECONDS: u64 = 5;
 /// reported as stopped five seconds later.
 const STOP_POLL_MS: u64 = 100;
 
+/// First signal sent to a stopped agent's process group (SYS-02).
+///
+/// Catchable by design: the orchestrator's SIGINT handler trips its kill
+/// switch, and *that* path is what records the interrupted run as a failed
+/// episode carrying a retrospective (Law 4.1). A named constant rather than
+/// a bare `libc::SIGINT` at each call site, so the graceful-first ordering
+/// is unit-testable and cannot silently regress to SIGKILL.
+const STOP_FIRST_SIGNAL: libc::c_int = libc::SIGINT;
+
+/// Last-resort signal once the grace period expires (SYS-02 fail-safe).
+///
+/// Uncatchable: a run that ignored SIGINT is wedged somewhere it cannot
+/// return from, and the user asked for the machine back — which outranks the
+/// retrospective.
+const STOP_FINAL_SIGNAL: libc::c_int = libc::SIGKILL;
+
+/// Where a stopped agent stands in the graceful-termination ladder (SYS-02).
+///
+/// Pure over the reaper flag and the time already waited, so the escalation
+/// policy is unit-testable without spawning a live child process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopPhase {
+    /// The child already exited and was reaped: nothing left to signal.
+    Done,
+    /// Still inside the grace window: keep waiting for SIGINT to land.
+    Grace,
+    /// Grace expired while the child lives: escalate to SIGKILL.
+    Escalate,
+}
+
+/// Pure: map (child alive?, time waited) to the stop ladder step (SYS-02).
+fn stop_phase(child_alive: bool, waited_ms: u64) -> StopPhase {
+    if !child_alive {
+        StopPhase::Done
+    } else if waited_ms >= STOP_GRACE_SECONDS * 1000 {
+        StopPhase::Escalate
+    } else {
+        StopPhase::Grace
+    }
+}
+
 fn store_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/me".to_string());
     PathBuf::from(home).join(".computeruse")
@@ -1268,8 +1309,8 @@ fn stop_agent() {
             // process with everything the run learned still in memory.
             // SAFETY: signalling the child's process group and the child.
             unsafe {
-                libc::killpg(pid as i32, libc::SIGINT);
-                libc::kill(pid as i32, libc::SIGINT);
+                libc::killpg(pid as i32, STOP_FIRST_SIGNAL);
+                libc::kill(pid as i32, STOP_FIRST_SIGNAL);
             }
             push_dim("— stopping agent, saving what it learned —".to_string());
             // The escalation runs off the UI thread: this is called from a
@@ -1277,11 +1318,22 @@ fn stop_agent() {
             // freeze the panel for as long as the agent takes to unwind.
             std::thread::spawn(move || {
                 let polls = STOP_GRACE_SECONDS * 1000 / STOP_POLL_MS;
+                let mut waited_ms: u64 = 0;
                 for _ in 0..polls {
                     std::thread::sleep(std::time::Duration::from_millis(STOP_POLL_MS));
-                    if !CHILD_ALIVE.load(core::sync::atomic::Ordering::SeqCst) {
-                        push_dim("— agent stopped by user —".to_string());
-                        return;
+                    waited_ms += STOP_POLL_MS;
+                    // The ladder step itself is pure (`stop_phase`); this loop
+                    // only performs the side effect the step selects.
+                    match stop_phase(
+                        CHILD_ALIVE.load(core::sync::atomic::Ordering::SeqCst),
+                        waited_ms,
+                    ) {
+                        StopPhase::Done => {
+                            push_dim("— agent stopped by user —".to_string());
+                            return;
+                        }
+                        StopPhase::Grace => {}
+                        StopPhase::Escalate => break,
                     }
                 }
                 // Out of grace. A run that ignored SIGINT is wedged somewhere
@@ -1289,13 +1341,17 @@ fn stop_agent() {
                 // back — which outranks the retrospective.
                 // SAFETY: CHILD_ALIVE is still set, so this pid is the child's
                 // and has not been recycled.
-                unsafe {
-                    libc::killpg(pid as i32, libc::SIGKILL);
-                    libc::kill(pid as i32, libc::SIGKILL);
+                if CHILD_ALIVE.load(core::sync::atomic::Ordering::SeqCst) {
+                    unsafe {
+                        libc::killpg(pid as i32, STOP_FINAL_SIGNAL);
+                        libc::kill(pid as i32, STOP_FINAL_SIGNAL);
+                    }
+                    push_err(format!(
+                        "agent did not stop within {STOP_GRACE_SECONDS}s; killed"
+                    ));
+                } else {
+                    push_dim("— agent stopped by user —".to_string());
                 }
-                push_err(format!(
-                    "agent did not stop within {STOP_GRACE_SECONDS}s; killed"
-                ));
             });
         }
         None => push_dim("nothing running to stop".to_string()),
@@ -1579,7 +1635,10 @@ fn in_polygon(x: f64, y: f64, p: &[(f64, f64)]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_args as args, collect_store_records, icon_pixel};
+    use super::{
+        agent_args as args, collect_store_records, icon_pixel, stop_phase, StopPhase,
+        STOP_FINAL_SIGNAL, STOP_FIRST_SIGNAL, STOP_GRACE_SECONDS,
+    };
     use std::path::Path;
 
     #[test]
@@ -1683,5 +1742,39 @@ mod tests {
         let missing = std::env::temp_dir().join("cu-definitely-absent-store");
         let _ = std::fs::remove_dir_all(&missing);
         assert_eq!(collect_store_records(&missing), "[]");
+    }
+
+    // --- SYS-02: graceful termination ladder --------------------------------
+    //
+    // No live child is spawned: `stop_phase` is pure over the reaper flag and
+    // the waited time, so CI pins the escalation policy deterministically.
+
+    #[test]
+    fn stop_prefers_catchable_sigint_with_sigkill_only_as_fail_safe() {
+        // A regression to direct SIGKILL would silently drop the failed
+        // episode and its retrospective (Law 4.1): the first signal must stay
+        // catchable and distinct from the uncatchable last resort.
+        assert_eq!(STOP_FIRST_SIGNAL, libc::SIGINT);
+        assert_eq!(STOP_FINAL_SIGNAL, libc::SIGKILL);
+        assert_ne!(STOP_FIRST_SIGNAL, STOP_FINAL_SIGNAL);
+    }
+
+    #[test]
+    fn reaped_child_needs_no_signal_at_any_wait() {
+        assert_eq!(stop_phase(false, 0), StopPhase::Done);
+        assert_eq!(
+            stop_phase(false, STOP_GRACE_SECONDS * 1000),
+            StopPhase::Done
+        );
+    }
+
+    #[test]
+    fn living_child_gets_grace_then_escalates() {
+        let grace_ms = STOP_GRACE_SECONDS * 1000;
+        assert_eq!(stop_phase(true, 0), StopPhase::Grace);
+        assert_eq!(stop_phase(true, grace_ms - 1), StopPhase::Grace);
+        assert_eq!(stop_phase(true, grace_ms), StopPhase::Escalate);
+        // Past the deadline the answer never flips back to waiting.
+        assert_eq!(stop_phase(true, grace_ms + 1), StopPhase::Escalate);
     }
 }
