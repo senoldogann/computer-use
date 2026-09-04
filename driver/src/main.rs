@@ -259,6 +259,17 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                 Err(BackendError(message)) => Response::Error { message },
             };
         }
+        Request::RecognizeText(params) => {
+            return match backend.recognize_text(
+                params.display_id,
+                params.pid,
+                params.min_confidence,
+                params.max_lines,
+            ) {
+                Ok(lines) => Response::RecognizeText { lines },
+                Err(BackendError(message)) => Response::Error { message },
+            };
+        }
         Request::AxSnapshot(params) => {
             return match backend.ax_snapshot(params.pid, params.max_depth, params.max_nodes) {
                 Ok(root) => Response::AxSnapshot { root },

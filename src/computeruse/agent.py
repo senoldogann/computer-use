@@ -40,7 +40,13 @@ from computeruse.mcp import DEFAULT_CONFIG_PATH, McpRegistry, load_server_config
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.memory.semantic import SemanticStore
-from computeruse.orchestrator.client import AX_MAX_DEPTH, AX_MAX_NODES, ActuationClient
+from computeruse.orchestrator.client import (
+    AX_MAX_DEPTH,
+    AX_MAX_NODES,
+    OCR_MAX_LINES,
+    OCR_MIN_CONFIDENCE,
+    ActuationClient,
+)
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import (
     SETTLE_INTERVAL_S,
@@ -77,11 +83,38 @@ from computeruse.vision.ax import (
     content_digest,
     interactive_summaries,
     open_tabs_from_tree,
+    recognized_summaries,
 )
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
 from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.coordinates import Point, Rect, Size
 from computeruse.vision.focus import FocusedWindow
+
+#: How few accessibility elements count as "this window told us nothing".
+#: Above it the AX tree is the primary source and OCR would only add noise and
+#: a Vision pass to every turn; at or below it the model has essentially no
+#: indexed target and is reduced to guessing coordinates off a screenshot.
+#: A handful rather than zero, because a window that exposes only its own title
+#: bar is as unusable as one that exposes nothing.
+AX_BLINDNESS_THRESHOLD: Final[int] = 3
+
+
+def ax_left_us_blind(summaries: tuple[str, ...], *, threshold: int) -> bool:
+    """Should the OCR fallback run against this frame (pure)?
+
+    ADR-2 makes the accessibility tree primary, so this answers "did that
+    source fail", not "would more data be nice". A frame with real elements
+    gets none of it: a text pass costs a few hundred milliseconds and would
+    bury the tree's own controls under duplicate readings of their labels.
+
+    The truncation note the probe appends when it exhausts its element budget
+    is not an element, and counting it would let a *rich* frame look like an
+    empty one — the exact inversion, since a truncated list means the tree had
+    more to say rather than less.
+    """
+    grounded = [line for line in summaries if not line.startswith("(")]
+    return len(grounded) <= threshold
+
 
 
 @dataclass(frozen=True)
@@ -677,6 +710,47 @@ class Agent:
                     return False
                 return client.ax_press(current_pid, point.x, point.y)
 
+            def ocr_fallback(summaries: tuple[str, ...]) -> tuple[str, ...]:
+                """Read the screen with OCR when the AX tree gave us nothing.
+
+                ADR-2's fallback, and it fires only where ADR-2 says it should:
+                the accessibility tree is the primary source, so this stays out
+                of the way whenever that source answered. A Vision pass on every
+                turn would cost a few hundred milliseconds and bury the real
+                elements under duplicate readings of their own labels.
+
+                Best-effort by contract. An older driver returns nothing, a
+                refused Screen Recording consent raises, and either way the run
+                continues exactly as it did before — a fallback that could end
+                a run would be worse than the blindness it is treating.
+                """
+                if not ax_left_us_blind(
+                    summaries, threshold=AX_BLINDNESS_THRESHOLD
+                ):
+                    return ()
+                try:
+                    lines = client.recognize_text(
+                        display_id=self._config.display_id,
+                        window_pid=(
+                            _current_pid()
+                            if self._config.background_actuation
+                            else None
+                        ),
+                        min_confidence=OCR_MIN_CONFIDENCE,
+                        max_lines=OCR_MAX_LINES,
+                    )
+                except Exception as exc:  # noqa: BLE001 - a fallback may not raise
+                    LOGGER.debug("OCR fallback unavailable: %s", exc)
+                    return ()
+                if not lines:
+                    return ()
+                LOGGER.info(
+                    "AX exposed %d element(s); grounding on %d OCR line(s) instead",
+                    len(summaries),
+                    len(lines),
+                )
+                return recognized_summaries(lines)
+
             def ax_probe() -> AxProbeResult:
                 current_pid = target_pid()
                 if current_pid is None:
@@ -703,6 +777,7 @@ class Agent:
                         "be missing; rely on the screenshot map for coordinates)"
                     )
                     summaries = summaries + (truncation_note,)
+                summaries = summaries + ocr_fallback(summaries)
                 return AxProbeResult(
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),

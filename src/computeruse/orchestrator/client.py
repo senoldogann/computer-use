@@ -31,7 +31,7 @@ from computeruse.orchestrator.schemas import (
     MouseMove,
     TypeText,
 )
-from computeruse.vision.ax import AXElement
+from computeruse.vision.ax import AXElement, RecognizedLine
 from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.focus import FocusedWindow
 
@@ -103,6 +103,16 @@ ACTIVATE_TIMEOUT_SECONDS: Final[float] = 45.0
 # A heavy page (YouTube, a large document) exposes tens of thousands of AX
 # nodes; the driver's budgeted walk is bounded but not instant.
 AX_TIMEOUT_SECONDS: Final[float] = 20.0
+# Text recognition is a capture *plus* a synchronous Vision pass, and the pass
+# is accurate-level on a full Retina frame — hundreds of milliseconds, and more
+# on a dense screen. It gets its own ceiling rather than borrowing the capture's.
+OCR_TIMEOUT_SECONDS: Final[float] = 25.0
+#: Discard readings Vision is less sure of than this. The driver applies the
+#: same floor; passing it explicitly keeps the policy in the orchestrator.
+OCR_MIN_CONFIDENCE: Final[float] = 0.3
+#: How many lines to accept. Above the element budget the model is shown, so
+#: the trimming decision stays with the orchestrator rather than the driver.
+OCR_MAX_LINES: Final[int] = 128
 # Headroom over an action's own computed duration, for scheduling jitter.
 TIMEOUT_MARGIN_SECONDS: Final[float] = 10.0
 # The driver clamps its inter-keystroke delay to this band (quartz.rs);
@@ -506,6 +516,56 @@ class ActuationClient:
             return None
         seconds = response.get("seconds")
         return float(seconds) if isinstance(seconds, (int, float)) else None
+
+    def recognize_text(
+        self,
+        display_id: int,
+        window_pid: int | None,
+        min_confidence: float,
+        max_lines: int,
+    ) -> tuple[RecognizedLine, ...]:
+        """Text on screen with its boxes, for windows with no AX tree (ADR-2).
+
+        Returns an empty tuple — never raises — when the driver does not offer
+        the call. This is a *fallback*: it exists for the case where the
+        primary grounding source gave nothing, and a run must not die because
+        the driver binary predates it. That is the same contract
+        :meth:`idle_seconds` has, for the same reason.
+
+        Boxes come back in global logical points, the space ``ax_snapshot``
+        already speaks, so both grounding sources describe a rectangle
+        identically.
+        """
+        try:
+            response = self.request(
+                "recognize_text",
+                {
+                    "display_id": display_id,
+                    "pid": window_pid,
+                    "min_confidence": min_confidence,
+                    "max_lines": max_lines,
+                },
+                timeout_seconds=OCR_TIMEOUT_SECONDS,
+            )
+        except DriverRpcError:
+            return ()
+        if response.get("ok") != "recognize_text":
+            return ()
+        raw = response.get("lines")
+        if not isinstance(raw, list):
+            return ()
+        lines: list[RecognizedLine] = []
+        for item in cast(list[object], raw):
+            if not isinstance(item, dict):
+                continue
+            record = cast(dict[str, object], item)
+            try:
+                lines.append(RecognizedLine.model_validate(record))
+            except ValueError as exc:
+                # One malformed line must not discard the rest: this is the
+                # only grounding the caller has when it reaches for it.
+                LOGGER.debug("skipping malformed recognized line: %s", exc)
+        return tuple(lines)
 
     def ax_press(self, pid: int, x: float, y: float) -> bool:
         """Ask the element at a point inside an app to activate itself.

@@ -32,7 +32,8 @@ use core_graphics::geometry::CGPoint;
 use objc2_app_kit::{NSApplicationActivationOptions, NSWorkspace};
 
 use crate::backend::{
-    Backend, BackendError, Button, CaptureFrame, FocusedWindow, HostElement, Modifier, TrajectoryStep,
+    Backend, BackendError, Button, CaptureFrame, CaptureGeometry, FocusedWindow, HostElement,
+    Modifier, TextLine, TrajectoryStep,
 };
 use crate::bezier::Point;
 
@@ -507,56 +508,42 @@ impl Backend for QuartzBackend {
     }
 
     fn capture(&self, display_id: u32, window_pid: Option<u32>) -> Result<CaptureFrame, BackendError> {
-        use core_graphics::access::ScreenCaptureAccess;
-        use core_graphics::display::CGDisplay;
-
-        // Screen capture is a distinct consent from Accessibility; without it
-        // CGDisplayCreateImage returns garbage or nil. Fail loudly (Law 6.3)
-        // rather than ship an empty frame the orchestrator would misread as
-        // "nothing changed".
-        if !ScreenCaptureAccess.preflight() {
-            let _ = ScreenCaptureAccess.request();
-            return Err(BackendError(
-                "Screen Recording consent required. Grant it in System Settings \
-                 > Privacy & Security > Screen & System Audio Recording, then \
-                 restart the driver."
-                    .to_string(),
-            ));
-        }
-        if let Some(pid) = window_pid {
-            return capture_window(pid);
-        }
-        // 0 is the protocol's sentinel for "the main display".
-        let display = if display_id == 0 {
-            CGDisplay::main()
-        } else {
-            CGDisplay::new(display_id)
-        };
-        let image = display
-            .image()
-            .ok_or_else(|| BackendError(format!("failed to capture display {display_id}")))?;
-        let width = image.width();
-        let height = image.height();
-        let bgra = image_to_bgra(&image, width, height)?;
-        // Retina scale: pixels per point, derived from the display's logical
-        // bounds. Guards against degenerate 0-height bounds.
-        let bounds = display.bounds();
-        let scale = if bounds.size.height > 0.0 {
-            height as f64 / bounds.size.height
-        } else {
-            1.0
-        };
+        let captured = capture_cgimage(display_id, window_pid)?;
+        let bgra = image_to_bgra(&captured.image, captured.width, captured.height)?;
         Ok(CaptureFrame {
-            display_id,
-            width: width as u32,
-            height: height as u32,
-            scale: scale.max(1.0),
-            // Global logical origin of this display: what turns a coordinate
-            // read off this frame back into a point the driver can click.
-            origin_x: bounds.origin.x,
-            origin_y: bounds.origin.y,
+            display_id: if window_pid.is_some() { 0 } else { display_id },
+            width: captured.width as u32,
+            height: captured.height as u32,
+            scale: captured.scale,
+            origin_x: captured.origin_x,
+            origin_y: captured.origin_y,
             bgra,
         })
+    }
+
+    fn recognize_text(
+        &self,
+        display_id: u32,
+        window_pid: Option<u32>,
+        min_confidence: f32,
+        max_lines: u32,
+    ) -> Result<Vec<TextLine>, BackendError> {
+        let captured = capture_cgimage(display_id, window_pid)?;
+        // Never through `image_to_bgra`: Vision consumes the CGImage directly,
+        // so OCR skips the bitmap-context draw, the multi-megabyte buffer and
+        // the base64 encode that a screenshot pays for. The answer is a few KB.
+        crate::vision::recognize(
+            &captured.image,
+            CaptureGeometry {
+                width_px: captured.width as f64,
+                height_px: captured.height as f64,
+                scale: captured.scale,
+                origin_x: captured.origin_x,
+                origin_y: captured.origin_y,
+            },
+            min_confidence,
+            max_lines,
+        )
     }
 
     fn is_real(&self) -> bool {
@@ -569,42 +556,101 @@ impl Backend for QuartzBackend {
 /// `kCGWindowImageBoundsIgnoreFraming` keeps the frame to the window's own
 /// content rect, so the returned origin and the pixels agree — anything else
 /// would offset every coordinate the model reads off it by the shadow's width.
-fn capture_window(pid: u32) -> Result<CaptureFrame, BackendError> {
-    use core_graphics::window::{
-        create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowListOptionIncludingWindow,
-    };
+/// One captured CGImage plus where it sits and how dense it is.
+///
+/// Both the screenshot path and the OCR path need exactly this, and they used
+/// to derive it twice from copy-pasted blocks — so a fix to one (the consent
+/// gate, the degenerate-bounds guard, the `scale.max(1.0)` clamp) silently
+/// missed the other. Sharing it also makes an OCR rectangle and a screenshot
+/// pixel agree by construction rather than by coincidence.
+struct CapturedImage {
+    image: core_graphics::image::CGImage,
+    width: usize,
+    height: usize,
+    scale: f64,
+    origin_x: f64,
+    origin_y: f64,
+}
 
-    let (window_id, bounds) = crate::ax::window_for_pid(pid as i32).ok_or_else(|| {
-        BackendError(format!(
-            "no on-screen window belongs to pid {pid}; the app may be hidden, \
-             minimised, or have no ordinary window"
-        ))
-    })?;
-    let image = create_image(
-        bounds,
-        kCGWindowListOptionIncludingWindow,
-        window_id,
-        kCGWindowImageBoundsIgnoreFraming,
-    )
-    .ok_or_else(|| BackendError(format!("failed to capture window {window_id} of pid {pid}")))?;
+/// Capture a display or a window as a CGImage, gated on Screen Recording.
+fn capture_cgimage(display_id: u32, window_pid: Option<u32>) -> Result<CapturedImage, BackendError> {
+    use core_graphics::access::ScreenCaptureAccess;
+    use core_graphics::display::CGDisplay;
+
+    // Screen capture is a distinct consent from Accessibility; without it
+    // CGDisplayCreateImage returns garbage or nil. Fail loudly (Law 6.3)
+    // rather than ship an empty frame the orchestrator would misread as
+    // "nothing changed".
+    if !ScreenCaptureAccess.preflight() {
+        let _ = ScreenCaptureAccess.request();
+        return Err(BackendError(
+            "Screen Recording consent required. Grant it in System Settings \
+             > Privacy & Security > Screen & System Audio Recording, then \
+             restart the driver."
+                .to_string(),
+        ));
+    }
+    if let Some(pid) = window_pid {
+        use core_graphics::window::{
+            create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowListOptionIncludingWindow,
+        };
+        let (window_id, bounds) = crate::ax::window_for_pid(pid as i32).ok_or_else(|| {
+            BackendError(format!(
+                "no on-screen window belongs to pid {pid}; the app may be hidden, \
+                 minimised, or have no ordinary window"
+            ))
+        })?;
+        let image = create_image(
+            bounds,
+            kCGWindowListOptionIncludingWindow,
+            window_id,
+            kCGWindowImageBoundsIgnoreFraming,
+        )
+        .ok_or_else(|| BackendError(format!("failed to capture window {window_id} of pid {pid}")))?;
+        let width = image.width();
+        let height = image.height();
+        let scale = if bounds.size.height > 0.0 {
+            height as f64 / bounds.size.height
+        } else {
+            1.0
+        };
+        return Ok(CapturedImage {
+            image,
+            width,
+            height,
+            scale: scale.max(1.0),
+            origin_x: bounds.origin.x,
+            origin_y: bounds.origin.y,
+        });
+    }
+    // 0 is the protocol's sentinel for "the main display".
+    let display = if display_id == 0 {
+        CGDisplay::main()
+    } else {
+        CGDisplay::new(display_id)
+    };
+    let image = display
+        .image()
+        .ok_or_else(|| BackendError(format!("failed to capture display {display_id}")))?;
     let width = image.width();
     let height = image.height();
-    let bgra = image_to_bgra(&image, width, height)?;
-    // Backing scale from the window's own logical height, the same derivation
-    // the display path uses.
+    // Retina scale: pixels per point, derived from the display's logical
+    // bounds. Guards against degenerate 0-height bounds.
+    let bounds = display.bounds();
     let scale = if bounds.size.height > 0.0 {
         height as f64 / bounds.size.height
     } else {
         1.0
     };
-    Ok(CaptureFrame {
-        display_id: 0,
-        width: width as u32,
-        height: height as u32,
+    Ok(CapturedImage {
+        image,
+        width,
+        height,
         scale: scale.max(1.0),
+        // Global logical origin of this display: what turns a coordinate read
+        // off this frame back into a point the driver can click.
         origin_x: bounds.origin.x,
         origin_y: bounds.origin.y,
-        bgra,
     })
 }
 

@@ -28,12 +28,12 @@ recorded there as ADR-1 and ADR-2:
   coordinates/role/state, stable across DPI/theme).
 - Screenshots and the regional vision-diff **verify** candidate coordinates
   before acting.
-- **Not yet built:** the OCR grounding fallback ADR-2 specifies for apps with
-  no AX tree. Marks are derived from AX elements alone, so in a window that
-  exposes none (games, VMs, remote desktop, a canvas, some Electron apps) the
-  agent has no indexed targets and can only read coordinates off the
-  screenshot. This is the largest open gap in perception, not an omission from
-  this list.
+- **OCR is the fallback, not the source.** When the accessibility tree exposes
+  almost nothing (games, VMs, remote desktop, a canvas, some Electron apps),
+  the driver reads the screen with Vision.framework and those lines become
+  marks in the same format AX elements do. It fires only when AX came back
+  empty — a text pass on every turn would bury the real elements under
+  duplicate readings of their own labels.
 
 ## Repository map
 
@@ -74,6 +74,7 @@ src/computeruse/
     ├── diff.py        # ADR-2: regional visual-diff core (anti-aliasing-safe)
     ├── capture.py     # ADR-2: driver response -> ScreenCapture + BGRA->luma
     ├── som.py         # Set-of-Marks annotator (live: marks every OBSERVE frame)
+    ├── ax.py          # …also renders OCR lines into the same summary shape
     └── focus.py       # focused-app discovery + activation
 driver/              # Rust actuation micro-driver (Unix-socket JSON-RPC)
                      #   main.rs    : socket accept loop (driver binary)
@@ -81,6 +82,7 @@ driver/              # Rust actuation micro-driver (Unix-socket JSON-RPC)
                      #   backend.rs : Backend trait + SimulatedBackend (+capture, +ax)
                      #   ax.rs      : real macOS AXUIElement tree traversal (ADR-2)
                      #   quartz.rs  : real macOS CGEvent backend + CGDisplay capture
+                     #   vision.rs  : ADR-2 OCR fallback (Vision.framework text)
                      #   bezier.rs  : pure cubic-Bezier trajectory planning
                      #   hotkey.rs  : kill-switch event tap (Command+Shift+Escape)
                      #   indicator.rs: menu-bar status item + cursor halo

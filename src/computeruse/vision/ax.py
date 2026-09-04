@@ -114,6 +114,54 @@ def element_rect(element: AXElement) -> Rect:
     )
 
 
+class RecognizedLine(BaseModel):
+    """One line of text the OCR fallback read off the screen (ADR-2).
+
+    The same coordinate space and field names as :class:`AXElement`, in global
+    logical points, because both are grounding sources and the orchestrator
+    should not need two mental models for "where is this control".
+    """
+
+    text: str
+    #: Vision's own score, 0..1. Carried so a caller can raise the floor
+    #: without a driver rebuild.
+    confidence: float
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+def recognized_summaries(lines: tuple[RecognizedLine, ...]) -> tuple[str, ...]:
+    """Render OCR lines in the same summary shape elements use (pure).
+
+    Deliberately identical in format to :func:`element_summary`, which is what
+    lets the whole downstream pipeline consume OCR with no changes at all: the
+    viewport cull, the image-space rewrite and the Set-of-Marks parser all
+    drive off one regex over this line shape.
+
+    The reported point is the **centre**, for the reason
+    :func:`element_summary` documents at length — aiming at a corner cost six
+    consecutive misses on a real page, because one image pixel is several
+    logical points and a rounded corner lands outside the target.
+
+    The role is spelled ``Text`` rather than borrowed from the accessibility
+    vocabulary: it is honest about where the reading came from, and it tells
+    the model that this target was read off pixels rather than declared by the
+    application.
+    """
+    summaries: list[str] = []
+    for line in lines:
+        label = line.text.strip() or "(untitled)"
+        centre_x = line.x + line.width / 2
+        centre_y = line.y + line.height / 2
+        summaries.append(
+            f'Text "{label}" at '
+            f"({centre_x:.0f},{centre_y:.0f}) {line.width:.0f}x{line.height:.0f}"
+        )
+    return tuple(summaries)
+
+
 def element_summary(element: AXElement) -> str:
     """One compact, parseable line describing an actionable element (pure).
 

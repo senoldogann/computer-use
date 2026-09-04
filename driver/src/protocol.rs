@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::backend::HostElement;
+use crate::backend::{HostElement, TextLine};
 
 /// Versioned request envelope. Every method carries an explicit `method`, and
 /// typed params are validated at parse time.
@@ -33,6 +33,7 @@ pub enum Request {
     AppPid(AppPidParams),
     ActivateApp(ActivateAppParams),
     ClipboardPaste(ClipboardPasteParams),
+    RecognizeText(RecognizeTextParams),
 }
 
 /// Ask one application which window it has focused, instead of asking the
@@ -152,6 +153,36 @@ pub fn default_ax_max_nodes() -> u32 {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RecognizeTextParams {
+    /// 0 is the main display, matching the screenshot contract.
+    pub display_id: u32,
+    /// Read this application's frontmost window instead of the whole display.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// Discard readings Vision is less sure of than this (0..1). Filtering in
+    /// the driver keeps both the socket payload and the model's context small.
+    #[serde(default = "default_ocr_min_confidence")]
+    pub min_confidence: f32,
+    /// Payload budget, for the same reason `ax_snapshot` has one: a dense
+    /// screen produces hundreds of lines, and the orchestrator shows the model
+    /// a few dozen elements.
+    #[serde(default = "default_ocr_max_lines")]
+    pub max_lines: u32,
+}
+
+/// Back-compat default: Vision's own scores cluster high, and a floor here is
+/// about discarding noise (single stray glyphs) rather than ranking.
+pub fn default_ocr_min_confidence() -> f32 {
+    0.3
+}
+
+/// Back-compat default, comfortably above the element budget the orchestrator
+/// shows the model so the cap is the orchestrator's to spend, not the driver's.
+pub fn default_ocr_max_lines() -> u32 {
+    128
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ActivateAppParams {
     /// Display name of the application to bring to the front (e.g. "Google
     /// Chrome"), as LaunchServices resolves it.
@@ -252,6 +283,12 @@ pub enum Response {
         /// the pragmatic v1 framing (a future optimisation could stream via a
         /// side channel or PNG-compress in Rust).
         data_base64: String,
+    },
+    RecognizeText {
+        /// Recognised lines in global logical points, same space as
+        /// ``AxSnapshot``'s elements — so both grounding sources describe a
+        /// rectangle identically and the orchestrator needs one parser.
+        lines: Vec<TextLine>,
     },
     Error { message: String },
 }
@@ -377,6 +414,26 @@ mod tests {
             }
             other => panic!("unexpected variant {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_recognize_text_with_and_without_its_optional_budgets() {
+        // Both shapes must parse: an older orchestrator sends neither budget,
+        // so a driver upgrade must not break it.
+        let bare = r#"{"method":"recognize_text","params":{"display_id":0}}"#;
+        let Request::RecognizeText(params) = serde_json::from_str(bare).expect("bare parses")
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(params.display_id, 0);
+        assert_eq!(params.max_lines, default_ocr_max_lines());
+
+        let full = r#"{"method":"recognize_text","params":{"display_id":1,"pid":42,"min_confidence":0.8,"max_lines":10}}"#;
+        let Request::RecognizeText(params) = serde_json::from_str(full).expect("full parses")
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!((params.display_id, params.pid, params.max_lines), (1, Some(42), 10));
     }
 
     #[test]
