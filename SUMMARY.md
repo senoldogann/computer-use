@@ -116,7 +116,7 @@ Arayüzdeki tüm emojiler kaldırıldı; yerlerine yüksek çözünürlüklü ve
 
 | Bileşen | Çalıştırılan Doğrulama | Durum (4 Eylül 2026, ölçüldü) |
 |---|---|---|
-| **Rust Micro-Driver** | `cargo test` | **55 passed + 1 ignored** |
+| **Rust Micro-Driver** | `cargo test` | **60 passed + 1 ignored** |
 | **Rust Linter** | `cargo clippy --all-targets -- -D warnings` | **0 Uyarı** |
 | **Python Backend** | `pytest tests/` | **698 / 698 Test Başarılı** |
 | **Öz-değerlendirme Bataryası** | `computeruse --eval` | **12 / 12 passed** |

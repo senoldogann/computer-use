@@ -1,18 +1,28 @@
 # Kapsamlı Proje Code-Review Raporu
 
 > **Durum (4 Eylül 2026, güncel):** Aşağıdaki bulgular yeniden doğrulandı.
-> Ölçülen zemin: `pytest` 698/698, `cargo test` 55 passed + 1 ignored,
+> Ölçülen zemin: `pytest` 698/698, `cargo test` 60 passed + 1 ignored,
 > `ruff`/`pyright`/`clippy -D warnings` temiz, `--eval` 12/12.
 >
 > **Kapatıldı, regresyon testiyle sabitlendi:** CLI-01, SEC-01, SEC-02,
-> SEC-03, NET-01, ve rapora sonradan eklenen AUT-02 (ölen driver'ı geri getiren
-> yoktu → `orchestrator/supervisor.py`; canlı olarak SIGKILL'lenen bir driver
-> geri getirilerek doğrulandı).
+> SEC-03, NET-01, SYS-01, SYS-02, ve rapora sonradan eklenen AUT-02 (ölen
+> driver'ı geri getiren yoktu → `orchestrator/supervisor.py`; canlı olarak
+> SIGKILL'lenen bir driver geri getirilerek doğrulandı).
+> * SYS-01 — tap karar mantığı saf `handle_tap_event_type` + `TapAction`
+>   enum'ına ayrıldı (`driver/src/hotkey.rs`): `TapDisabledByTimeout` /
+>   `TapDisabledByUserInput` → `Rearm`, kill-combo `KeyDown` → `Trip`,
+>   diğerleri → `Pass`. `tap_disable_notifications_rearm_instead_of_dying`
+>   ve `key_events_never_rearm_and_trip_only_on_the_kill_combo` testleriyle
+>   CI'da donanımsız pinli.
+> * SYS-02 — SIGINT-önce / süre-bitiminde-SIGKILL merdiveni saf `stop_phase`
+>   + `STOP_FIRST_SIGNAL` / `STOP_FINAL_SIGNAL` sabitlerine ayrıldı
+>   (`driver/src/menu.rs`). `stop_prefers_catchable_sigint_with_sigkill_only_as_fail_safe`,
+>   `reaped_child_needs_no_signal_at_any_wait` ve
+>   `living_child_gets_grace_then_escalates` testleriyle pinli.
 >
-> **Kapatıldı, test yok:** SYS-01 (event tap yeniden silahlandırma) ve SYS-02
-> (SIGINT'ten sonra süreli SIGKILL). İkisi de Rust tarafında ve canlı bir tap
-> ya da canlı bir alt süreç gerektirdiği için mevcut `cargo test` süitiyle
-> kapsanamıyor — davranış elle doğrulandı, otomatik testi yok.
+> **Kapatıldı, test yok:** kalmadı — SYS-01/SYS-02 yukarı taşındı. MEM-01 ve
+> GUI-01 donanım (gerçek ekran / çoklu monitör) gerektirdiği için elle
+> doğrulandı, otomatik testi yok (aşağıda ilgili maddelerde notlu).
 >
 > **Kapatıldı (önceden "hâlâ açık" yazan beş bulgu, 4 Eylül 2026'da kodda
 > yeniden doğrulandı):**
