@@ -19,12 +19,14 @@ from computeruse.orchestrator.loop import (
     MaxStepsError,
     OodaRunner,
     WorkingState,
+    _extend_trail,
     decide_step,
     equivalent_action,
     map_action_to_screen,
     repetition_diagnostic,
     same_physical_action,
 )
+from computeruse.orchestrator.prompts import completion_auditor, completion_prompt
 from computeruse.orchestrator.schemas import (
     AgentTurn,
     Finish,
@@ -634,3 +636,55 @@ def test_runner_refreshes_observation_between_batch_actions() -> None:
     runner.run(goal="batch observe")
     # Turn-start observe + one per action after the first batch element.
     assert len(observes) >= 2
+
+# --- auditor navigation trail --------------------------------------------------
+
+
+def test_auditor_accepts_opened_search_result_without_visible_serp() -> None:
+    """An opened top result is primary evidence; the SERP need not persist.
+
+    Field pathology: the agent searched "latest AI news", opened the top
+    result, and finished on the article — and the auditor rejected it for
+    showing no search-results evidence beside the article, demanding two
+    pages on screen at once. Two fixes pin the correction: the trail keeps
+    the results list the article replaced, and the contract names the opened
+    target the primary evidence for search-and-open goals.
+    """
+    window = FocusedWindow(pid=1, app_name="Chrome", window_title="Google Chrome")
+    trail = _extend_trail(
+        (),
+        window,
+        ("StaticText=Top stories", "Link=OneRail uses Nvidia AI to cut emissions"),
+        6,
+    )
+    trail = _extend_trail(
+        trail,
+        window,
+        ("StaticText=OneRail uses Nvidia AI to cut emissions", "StaticText=By Jane Doe"),
+        6,
+    )
+    assert len(trail) == 2, f"the results list must survive the article: {trail}"
+    assert "Top stories" in trail[0]
+    assert "Jane Doe" in trail[1]
+
+    state = WorkingState(
+        goal="search for the latest AI news and open the top result",
+        active_window="Chrome — OneRail uses Nvidia AI to cut emissions",
+        ui_elements=('StaticText "OneRail uses Nvidia AI to cut emissions" at (100,100) 400x24',),
+        observed_trail=trail,
+    )
+    prompt = completion_prompt(state, "opened the top result", app="Google Chrome")
+    assert "Do NOT reject simply because the" in prompt
+    assert "Top stories" in prompt
+
+    def model(prompt_text: str, _image_b64: object = None) -> str:
+        # The verdict below is only meaningful if the auditor decided with
+        # both exhibits in front of it — the article on screen and the
+        # results list in the trail. A regression that drops either fails
+        # here, not in a field run at 2am.
+        assert "OneRail uses Nvidia AI" in prompt_text
+        assert "Top stories" in prompt_text
+        return '{"satisfied": true, "evidence": "article open and visibly on the requested topic"}'
+
+    verdict = completion_auditor(model, app="Google Chrome")(state, "opened the top result")
+    assert verdict.satisfied is True

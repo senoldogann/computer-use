@@ -114,12 +114,14 @@ Arayüzdeki tüm emojiler kaldırıldı; yerlerine yüksek çözünürlüklü ve
 
 ## 8. 🧪 Test, Doğrulama ve Paketleme Durumu
 
-| Bileşen | Çalıştırılan Doğrulama | Durum |
+| Bileşen | Çalıştırılan Doğrulama | Durum (4 Eylül 2026, ölçüldü) |
 |---|---|---|
-| **Rust Micro-Driver** | `cargo test` | **45 / 45 Test Başarılı** |
-| **Python Backend** | `pytest tests/smoke/test_mcp.py` | **18 / 18 Test Başarılı** |
+| **Rust Micro-Driver** | `cargo test` | **55 passed + 1 ignored** |
+| **Rust Linter** | `cargo clippy --all-targets -- -D warnings` | **0 Uyarı** |
+| **Python Backend** | `pytest tests/` | **645 / 645 Test Başarılı** |
+| **Öz-değerlendirme Bataryası** | `computeruse --eval` | **12 / 12 passed** |
 | **Python Linter** | `ruff check src/ tests/` | **0 Hata / 0 Uyarı** |
-| **Python Tip Denetimi** | `pyright src/` | **0 Hata / 0 Uyarı** |
+| **Python Tip Denetimi** | `pyright` | **0 Hata / 0 Uyarı** |
 | **macOS Paketi** | `scripts/package_app.sh` | **Kuruldu (`~/Applications/ComputerUse.app`)** |
 | **Çalışma Durumu** | macOS LaunchServices | **Aktif** |
 
@@ -138,4 +140,4 @@ Arayüzdeki tüm emojiler kaldırıldı; yerlerine yüksek çözünürlüklü ve
   - Her iki sunucu da hem Python `CURATED_CATALOG` (`src/computeruse/mcp/catalog.py`) hem de UI MCP Mağazasına (`menu.html`) kuruluma hazır şekilde entegre edildi.
 
 ---
-*Doküman Güncelleme Tarihi: 3 Eylül 2026*
+*Doküman Güncelleme Tarihi: 4 Eylül 2026*

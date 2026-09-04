@@ -23,6 +23,7 @@ from computeruse.orchestrator.prompts import (
     COMPLETION_AUDIT_CONTRACT,
     InvalidDecisionError,
     _call_model,
+    _normalize_action_dict,
     completion_prompt,
     decision_prompt,
     parse_decision,
@@ -120,6 +121,19 @@ def test_parse_normalizes_aliases() -> None:
     assert t3.action.text == "hello"  # type: ignore[union-attr]
 
     # open_app alias
+
+
+def test_normalize_action_dict_copies_instead_of_mutating() -> None:
+    """RUL-01: normalizing aliases must not rewrite the caller's payload.
+
+    The normalizer used to set keys on the dict it was given, mutating the
+    model's raw payload in place — a pure-function violation with real
+    consequences wherever the original is logged, retried or audited.
+    """
+    original: dict[str, object] = {"type": "click", "x": 10, "y": 20}
+    normalized = _normalize_action_dict(original)
+    assert normalized["type"] == "mouse_click"
+    assert original == {"type": "click", "x": 10, "y": 20}
 
 
 def test_parse_unescapes_html_in_pasted_url() -> None:
