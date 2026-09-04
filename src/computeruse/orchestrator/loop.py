@@ -95,6 +95,7 @@ from computeruse.security.permissions import (
     PermissionDeniedError,
 )
 from computeruse.skills.distiller import Trajectory
+from computeruse.skills.playbook import PlaybookSummary
 from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.tools import WebError, fetch_page
@@ -302,6 +303,7 @@ class WorkingState:
     # full instructions on demand). None until the RETRIEVE step mounts a
     # scan match or the provider explicitly emits ``load_skill``.
     skill: SkillDefinition | None = None
+    playbook: PlaybookSummary | None = None
     # Multimodal visual perception: base64-encoded PNG of current display
     screenshot_b64: str | None = None
     #: Machine-observed facts from earlier in this run, oldest first — one
@@ -1083,6 +1085,7 @@ class OodaRunner:
         | None
     ) = None
     skill_loader: Callable[[str], SkillDefinition] | None = None
+    playbook_scan: Callable[[str], PlaybookSummary | None] | None = None
     kill_switch: KillSwitch | None = None
     # VALIDATE (Law 5.1). Takes the observation as well as the decision:
     # a safety verdict about a click has to be able to look at what is
@@ -1252,12 +1255,16 @@ class OodaRunner:
         # here only so an abnormal ending can be remembered against the state
         # the run actually reached, not against the empty one it started from.
         self._last_state: WorkingState = WorkingState(goal="")
+        self._playbook: PlaybookSummary | None = None
+        self._playbook_scanned: bool = False
 
     def run(self, goal: str) -> WorkingState:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
         self._executed = []
         self._sub_goals = []
         self._skill = None
+        self._playbook = None
+        self._playbook_scanned = False
         self._window_probe_warned = False
         self._ax_probe_warned = False
         self._screenshot_warned = False
@@ -3075,7 +3082,7 @@ class OodaRunner:
         return self.skill_loader(skill_id)
 
     def _retrieve(self, state: WorkingState) -> WorkingState:
-        """Two-stage skill retrieval before a decision (Law 3).
+        """Two-stage skill and playbook retrieval before a decision (Law 3).
 
         Stage 1 scans the summary index with the goal as the query; Stage 2
         loads the top *same-app* match (skills are app-scoped — another app's
@@ -3084,18 +3091,30 @@ class OodaRunner:
         explicit ``load_skill`` swaps the mounted skill (or repeated failures
         unmount it). Best-effort: a scan or load failure degrades to the
         unmounted context with a warning, never aborts the workflow.
+
+        In addition, scans for on-disk SKILL.md playbooks. At most one
+        playbook enters the working state (the highest scoring one).
         """
+        if not self._playbook_scanned and self.playbook_scan is not None:
+            self._playbook_scanned = True
+            try:
+                self._playbook = self.playbook_scan(state.goal)
+            except Exception as exc:  # noqa: BLE001 - retrieval is best-effort
+                LOGGER.warning("playbook scan failed: %s", exc)
+
+        playbook = state.playbook if state.playbook is not None else self._playbook
+
         if self.skill_scan is None or self.skill_loader is None:
-            return state
+            return replace(state, playbook=playbook) if playbook != state.playbook else state
         if self._skill is not None:
-            return state
+            return replace(state, playbook=playbook) if playbook != state.playbook else state
         try:
             matches = self.skill_scan(state.goal)
         except Exception as exc:  # noqa: BLE001 - retrieval is best-effort
             LOGGER.warning("skill scan failed: %s", exc)
-            return state
+            return replace(state, playbook=playbook) if playbook != state.playbook else state
         if not matches:
-            return state
+            return replace(state, playbook=playbook) if playbook != state.playbook else state
         mounted = _first_mountable(matches, self.app)
         if mounted is None:
             LOGGER.info(
@@ -3105,13 +3124,13 @@ class OodaRunner:
                 self.app,
                 SKILL_MOUNT_MIN_SCORE,
             )
-            return state
+            return replace(state, playbook=playbook) if playbook != state.playbook else state
         try:
             self._skill = self.skill_loader(mounted.skill_id)
         except Exception as exc:  # noqa: BLE001 - retrieval is best-effort
             LOGGER.warning("skill load failed: %s", exc)
-            return state
-        return replace(state, skill=self._skill)
+            return replace(state, playbook=playbook) if playbook != state.playbook else state
+        return replace(state, skill=self._skill, playbook=playbook)
 
 
 class UnknownMarkError(RuntimeError):
