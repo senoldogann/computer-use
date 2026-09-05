@@ -34,7 +34,13 @@ from pydantic import ValidationError
 
 from computeruse.orchestrator.evidence import CompletionVerdict
 from computeruse.orchestrator.loop import WorkingState
-from computeruse.orchestrator.schemas import Action, AgentTurn, ClipboardPaste, TypeText
+from computeruse.orchestrator.schemas import (
+    Action,
+    AgentTurn,
+    CallTool,
+    ClipboardPaste,
+    TypeText,
+)
 from computeruse.orchestrator.untrusted import (
     ObservedSection,
     render_observed_data,
@@ -92,7 +98,7 @@ ACTION_CONTRACT: Final[str] = (
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
     '- activate_app: {"type": "activate_app", "app": str} — brings an application (e.g. "Google Chrome", "Notes", "Finder") to the front\n'
     '- wait: {"type": "wait", "duration_ms": int, "reason": str}\n'
-    '- call_tool: {"type": "call_tool", "tool": str, "arguments": object} — run a tool from a connected MCP server. Only the tools listed in your state exist; if none are listed, this action is unavailable.\n'
+    '- call_tool: {"type": "call_tool", "tool": str, "arguments": object} — run an MCP tool or CUA REPL JavaScript (e.g. tool \"js\" with code: var app = await cua.getApp(\"AppName\"); await app.click(index);).\n'
     '- finish: {"type": "finish", "status": "success|failed", "summary": str} — "summary" is what the USER READS. If the goal asked a question, the answer goes there: finish with it. Do not hunt for a text box to type it into — you have no one to hand it to but the summary.\n'
     "\n"
     "3. THE CYCLE YOU ARE INSIDE:\n"
@@ -542,6 +548,16 @@ def _normalize_action_dict(action: dict[str, object]) -> dict[str, object]:
         action["type"] = "press_hotkey"
     elif action_type in ("open_app", "launch_app", "switch_app"):
         action["type"] = "activate_app"
+    elif action_type in ("js", "javascript", "code", "run_js", "execute_js"):
+        action["type"] = "call_tool"
+        action["tool"] = "js"
+        if "arguments" not in action or not isinstance(action.get("arguments"), dict):
+            code = action.get("code") or action.get("script") or ""
+            action["arguments"] = {"code": str(code)}
+    elif action_type == "call_tool":
+        tool_name = str(action.get("tool", ""))
+        if tool_name in ("cua_repl.js", "cua_repl", "eval_js"):
+            action["tool"] = "js"
 
     # Default missing modifiers and normalize hotkeys
     if action["type"] == "press_hotkey":
@@ -616,6 +632,18 @@ def _normalize_action_payload(payload: dict[str, object]) -> dict[str, object]:
     Pydantic gate rejects them with its own corrective hint (Law 2).
     """
     result = dict(payload)
+    if payload.get("type") == "mcpToolCall" or (payload.get("tool") == "js" and "server" in payload):
+        args = payload.get("arguments")
+        args_dict = dict(cast(dict[object, object], args)) if isinstance(args, dict) else {}
+        title = str(args_dict.get("title", "")) if "title" in args_dict else "Run CUA REPL JavaScript"
+        result["thought"] = str(payload.get("thought") or "CUA REPL execution")
+        result["sub_goal"] = str(payload.get("sub_goal") or title)
+        result["action"] = {
+            "type": "call_tool",
+            "tool": "js",
+            "arguments": {str(k): v for k, v in args_dict.items()},
+        }
+        return result
     action_raw = payload.get("action")
     if isinstance(action_raw, dict):
         raw_dict = cast(dict[object, object], action_raw)
@@ -709,7 +737,26 @@ def parse_decision(raw: str) -> AgentTurn:
             candidate = None
 
     if candidate is None:
-        # Fallback: take the first *parseable* balanced ``{...}`` span.
+        # Fallback 1: check for direct markdown JS code blocks
+        js_block = re.search(
+            r"""```(?:javascript|js)\s*\n(.*?)\n```""",
+            stripped,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if js_block is not None:
+            js_code = js_block.group(1).strip()
+            if "cua." in js_code or "await " in js_code:
+                return AgentTurn(
+                    thought="Execute CUA REPL JavaScript block",
+                    sub_goal="Run CUA REPL code",
+                    action=CallTool(
+                        type="call_tool",
+                        tool="js",
+                        arguments={"code": js_code},
+                    ),
+                )
+
+        # Fallback 2: take the first *parseable* balanced ``{...}`` span.
         candidate = _first_json_object(stripped)
         if candidate is None:
             raise InvalidDecisionError(
