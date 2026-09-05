@@ -128,9 +128,16 @@ class KillSwitch:
         long run, instead of freezing the trip at construction time.
         ``signal_triggered`` is a construction-time static flag (tests, or a
         one-shot semantic) and is mutually exclusive with the predicate.
+
+        Every channel is consulted, because the point of having three is that
+        any one of them can reclaim the machine. Returning the predicate's
+        answer directly meant a switch built with both a predicate and a shake
+        monitor never polled the monitor at all — measured: twelve calls, zero
+        cursor samples taken. A quiet predicate silenced the channel beside it,
+        which is the one failure mode a kill switch may not have.
         """
-        if self._signal_predicate is not None:
-            return self._signal_predicate()
+        if self._signal_predicate is not None and self._signal_predicate():
+            return True
         if self._signal_triggered:
             return True
         if self._monitor is None:

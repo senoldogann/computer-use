@@ -1,0 +1,6 @@
+[driver] actuator: quartz/real (socket /var/folders/zg/ck3g8b9x3m14ly_tk4w7kntr0000gn/T/cu-audit-cqeca708/real.sock)
+[driver] listening on /var/folders/zg/ck3g8b9x3m14ly_tk4w7kntr0000gn/T/cu-audit-cqeca708/real.sock
+
+thread '<unnamed>' (8150811) panicked at /Users/dogan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/core-graphics-0.25.0/src/event.rs:627:24:
+attempt to shift left with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

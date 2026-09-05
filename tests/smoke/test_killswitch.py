@@ -183,3 +183,29 @@ def test_killswitch_polls_signal_predicate_live() -> None:
     assert switch.tripped() is False
     flag[0] = True  # a SIGINT lands later, during the run
     assert switch.tripped() is True
+
+def test_a_quiet_predicate_does_not_silence_the_shake_monitor() -> None:
+    """Every channel is consulted; one saying "no" is not the answer.
+
+    ``tripped`` returned the predicate's verdict directly, so a switch holding
+    both a SIGINT predicate and a shake monitor never polled the monitor —
+    twelve calls, zero cursor samples. A kill switch whose channels shadow each
+    other is the one failure mode it may not have (Law 5.3).
+    """
+    samples: list[CursorSample] = []
+
+    def cursor() -> CursorSample:
+        # Alternating x: the reversal pattern a hand shaking the mouse makes.
+        sample = CursorSample(x=100 if len(samples) % 2 else 0, y=0, time=float(len(samples)))
+        samples.append(sample)
+        return sample
+
+    switch = KillSwitch(
+        monitor=MouseShakeMonitor(cursor, window_size=4, min_reversals=2),
+        signal_predicate=lambda: False,
+    )
+
+    tripped = any(switch.tripped() for _ in range(12))
+
+    assert samples, "the monitor must be polled even when the predicate is quiet"
+    assert tripped, "a shaken cursor must trip the switch"
