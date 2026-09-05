@@ -1778,9 +1778,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return spawn_driver(driver_binary, driver_socket, real=driver_real)
 
             driver_process = _spawn_driver_again()
+            # The recovery hook fires only after the client's own RPC retries
+            # are spent, so a driver still running at that point is one that
+            # is not answering — ``restart_unresponsive`` ends it first rather
+            # than leaving the run to retry a socket nobody is listening on.
             driver_recover = supervisor_for(
                 _spawn_driver_again, driver_process
-            ).ensure_alive
+            ).restart_unresponsive
         # Autonomous app resolution: the goal may carry an explicit `[App
         # Name]` prefix, or name the target implicitly ("Excel'de aç",
         # "YouTube'da arat"). Resolve it here so the provider sees the
