@@ -20,7 +20,7 @@ from pathlib import Path
 from computeruse.agent import Agent, AgentConfig
 from computeruse.memory.schemas import Episode
 from computeruse.orchestrator.evidence import CompletionVerdict
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick, Wait
 from computeruse.security.autonomy import AutonomyLevel
 from computeruse.skills.distiller import Trajectory
@@ -170,3 +170,35 @@ def test_forced_flag_survives_the_full_distill_chain() -> None:
     trajectory, forced = seen[0]
     assert forced is True
     assert [s.type for s in trajectory.steps] == ["wait"]
+
+
+def test_an_unreachable_auditor_marks_the_finish_unverified() -> None:
+    """A provider outage must not turn every claimed success into a skill.
+
+    The auditor may never kill a run, so a transport failure lets the finish
+    stand. But it was not verified, and the distill gate reads exactly this
+    flag: leaving it unset meant an unreachable auditor silently restored the
+    memory poisoning P0-1 closed. Measured before the fix: forced_finish=false
+    while the auditor raised on every call.
+    """
+
+    def provider(state: WorkingState) -> AgentTurn:
+        return AgentTurn(
+            thought="t",
+            sub_goal="s",
+            action=Finish(type="finish", status="success", summary="claimed"),
+        )
+
+    def unreachable(state: WorkingState, summary: str) -> CompletionVerdict:
+        raise RuntimeError("audit transport unavailable")
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _action: None,
+        ax_probe=lambda: AxProbeResult(summaries=()),
+        completion_check=unreachable,
+        max_steps=3,
+    )
+    runner.run("do the thing")
+
+    assert runner._forced_finish is True
