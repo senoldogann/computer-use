@@ -44,11 +44,27 @@ def _sig(steps: tuple[object, ...], app: str = "Numbers") -> str:
     return signature_of(Trajectory(app=app, description="x", steps=typed))  # type: ignore[arg-type]
 
 
-def test_f1_same_action_types_different_text_distinct_signatures() -> None:
-    """type_text with different payloads must NOT collide (F1)."""
+def test_f1_same_action_types_different_text_share_signature() -> None:
+    """type_text with different payloads shares one signature — text is an operand.
+
+    This deliberately reverses F1's original assertion. F1 required distinct
+    signatures so that typing "save" and typing "delete" could not collide.
+    Measured against a real store, that rule cost more than it protected:
+    every payload forked its own skill copy, so one Notes flow became a new
+    skill on each run ("write the Bitcoin price", "write the Tokyo time"),
+    and the store grew write-only against Law 3.3, which asks that a repeated
+    flow *update* its skill rather than spawn a sibling.
+
+    What still separates genuinely different flows is the action sequence
+    itself — types plus key/modifiers/button/click_count plus app — which the
+    hotkey test below pins. The residual risk (two same-shaped flows in one
+    app meaning different things) is absorbed downstream: a skill is retrieved
+    through description scoring with an app scope, and is mounted as a hint
+    the model may ignore, never replayed blindly.
+    """
     a = _sig((MouseClick(type="mouse_click", x=5, y=5), TypeText(type="type_text", text="save", wpm=40)))
     b = _sig((MouseClick(type="mouse_click", x=5, y=5), TypeText(type="type_text", text="delete", wpm=40)))
-    assert a != b, "workflows typing different text must have distinct signatures"
+    assert a == b, "workflows typing different text share one parametric signature"
 
 
 def test_f1_same_action_types_different_hotkey_distinct_signatures() -> None:

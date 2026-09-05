@@ -48,10 +48,11 @@ _MIN_STEPS: int = 2
 APP_SLUG_MAX_CHARS: Final[int] = 60
 
 
-#: Dynamic fragments abstracted out of signatures: digit runs (amounts,
-#: counts, versions) and URLs. A calculator flow typing "47x23" and the same
-#: flow typing "12x8" are one parametric workflow, not two skills — hashing
-#: the literals would fork every operand into its own copy.
+#: Dynamic fragments abstracted out of the string fields that still reach the
+#: signature: digit runs (version numbers, counts) and URLs. Typed and pasted
+#: text no longer reaches the hash at all — it left ``_SEMANTIC_KEYS`` — so
+#: what these normalise now is naming: "Photoshop 2024" and "Photoshop 2025"
+#: are one application to a workflow, not two.
 _DYNAMIC_NUMBER: Final = re.compile(r"\d+(?:[.,]\d+)*")
 _DYNAMIC_URL: Final = re.compile(r"https?://\S+", flags=re.IGNORECASE)
 
@@ -59,10 +60,11 @@ _DYNAMIC_URL: Final = re.compile(r"https?://\S+", flags=re.IGNORECASE)
 def _abstract_dynamic(text: str) -> str:
     """Template the dynamic fragments of a signature input (pure).
 
-    Numbers and URLs are operands, not workflow meaning; case is typing
-    accident, not intent. Words survive untouched — "click Save" and "click
-    Cancel" are different flows, while "compute 47x23" and "compute 12x8"
-    are one flow with different operands.
+    Applied to the string fields that still feed the hash (``app``,
+    ``skill_id``, ``key``, ``button``): case is a naming accident rather than
+    intent, and a version number inside an application name is not what makes
+    one workflow different from another. Operand text is no longer routed
+    through here — it is excluded from the signature outright.
     """
     templated = _DYNAMIC_URL.sub("<url>", text.lower())
     return _DYNAMIC_NUMBER.sub("<num>", templated)
@@ -73,24 +75,24 @@ def signature_of(trajectory: Trajectory) -> str:
 
     Two runs of the *same* UI flow in the same app must produce the same
     signature (so the distiller can de-duplicate); two different flows must
-    differ. We hash the ordered (action-type, semantic-params, intent) pairs
-    plus the app. Including semantic parameters and step intent makes
-    different click sequences in the same app distinct.
+    differ. We hash the ordered (action-type, semantic-params) pairs
+    plus the app. The action sequence itself (type + key/modifiers/button/
+    click_count + app) makes different click sequences and hotkey flows
+    distinct without relying on run-to-run variations in natural language step
+    descriptions.
 
     Coordinates are deliberately *excluded*: pixel positions drift between
     runs of the same workflow, so including them would defeat de-dup. Dynamic
-    values are *abstracted* for the same reason at the next level up: operand
-    text ("47x23", a pasted URL) varies between runs of one parametric
-    workflow, so it is templated before hashing rather than hashed literally.
+    operands (typed or pasted text) and natural-language step descriptions
+    (intent) vary across runs of one parametric workflow, so they are excluded
+    from the hash.
     """
     flow: list[dict[str, str]] = []
-    for i, step in enumerate(trajectory.steps):
-        desc = trajectory.step_descriptions[i] if i < len(trajectory.step_descriptions) else ""
+    for step in trajectory.steps:
         flow.append(
             {
                 "type": step.type,
                 "params": _semantic_params(step),
-                "intent": _abstract_dynamic(desc.strip()),
             }
         )
     payload = json.dumps(
@@ -211,10 +213,13 @@ _COORDINATE_KEYS: frozenset[str] = frozenset({"x", "y", "start_x", "start_y", "e
 # de-dup, and so are the *pacing* fields (``duration_ms`` for waits/moves,
 # ``wpm`` for typing): the same flow run at a different pace is still the same
 # flow — hashing pacing would break de-dup across two runs of one workflow
-# (L14). Text/keys/buttons do distinguish otherwise-identical flows.
+# (L14). Typed/pasted text (``text``) is likewise excluded: written or pasted
+# content is an operand, not workflow structure ("paste text into Notes" is
+# one flow regardless of what text is pasted; hashing text would fork every
+# payload into its own skill copy). Keys/modifiers/buttons/click_count/
+# skill_id/app do distinguish otherwise-identical flows.
 _SEMANTIC_KEYS: frozenset[str] = frozenset(
     {
-        "text",
         "key",
         "modifiers",
         "button",
@@ -230,9 +235,10 @@ def _semantic_params(action: Action) -> str:
 
     Coordinates are dropped; everything else that defines the *meaning* of the
     step is kept, sorted for determinism. This is what makes the signature
-    distinguish real workflow differences (F1) while staying insensitive to
-    pixel drift between runs. Free-text values are abstracted through
-    :func:`_abstract_dynamic` first: the operands vary, the workflow does not.
+    distinguish real workflow differences while staying insensitive to
+    pixel drift between runs. The string fields that remain are normalised
+    through :func:`_abstract_dynamic`, so an application's version number does
+    not fork one workflow into two.
     """
     data = action.model_dump(exclude_none=True)
     data.pop("type", None)
