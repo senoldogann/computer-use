@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import selectors
 import subprocess
 import time
 from collections.abc import Callable
@@ -227,60 +228,71 @@ class CuaReplEngine:
         self._proc.stdin.flush()
 
         deadline = start_time + timeout_s
+        sel = selectors.DefaultSelector()
+        sel.register(self._proc.stdout, selectors.EVENT_READ)
 
-        while time.monotonic() < deadline:
-            line = self._proc.stdout.readline()
-            if not line:
-                break
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        try:
+            while time.monotonic() < deadline:
+                remaining = max(0.05, deadline - time.monotonic())
+                events = sel.select(timeout=remaining)
+                if not events:
+                    break
 
-            msg_id = msg.get("id")
+                line = self._proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-            # Check if this is the final response to our eval request
-            if msg_id == eval_id:
-                duration_ms = int((time.monotonic() - start_time) * 1000)
-                if "error" in msg:
+                msg_id = msg.get("id")
+
+                # Check if this is the final response to our eval request
+                if msg_id == eval_id:
+                    duration_ms = int((time.monotonic() - start_time) * 1000)
+                    if "error" in msg:
+                        return CuaReplResult(
+                            status="failed",
+                            duration_ms=duration_ms,
+                            content="",
+                            error=msg["error"].get("message", "Unknown error"),
+                        )
+                    # Success
+                    content = msg.get("result", {}).get("content", "")
+                    if not content and self._last_content:
+                        content = self._last_content
+                    if not content:
+                        content = "## Computer Use"
+
                     return CuaReplResult(
-                        status="failed",
+                        status="completed",
                         duration_ms=duration_ms,
-                        content="",
-                        error=msg["error"].get("message", "Unknown error"),
+                        content=content,
                     )
-                # Success
-                content = msg.get("result", {}).get("content", "")
-                if not content and self._last_content:
-                    content = self._last_content
-                if not content:
-                    content = "## Computer Use"
 
-                return CuaReplResult(
-                    status="completed",
-                    duration_ms=duration_ms,
-                    content=content,
-                )
+                # Otherwise, this is a method call from JS to Python (e.g. getApp, click, getAXState)
+                method = msg.get("method")
+                params = msg.get("params", {})
+                try:
+                    result = self._dispatch_js_call(method, params)
+                    resp = json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": result})
+                except Exception as exc:
+                    LOGGER.exception("Error executing bridge RPC %s", method)
+                    resp = json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": msg_id,
+                            "error": {"code": -32603, "message": str(exc)},
+                        }
+                    )
 
-            # Otherwise, this is a method call from JS to Python (e.g. getApp, click, getAXState)
-            method = msg.get("method")
-            params = msg.get("params", {})
-            try:
-                result = self._dispatch_js_call(method, params)
-                resp = json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": result})
-            except Exception as exc:
-                LOGGER.exception("Error executing bridge RPC %s", method)
-                resp = json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "error": {"code": -32603, "message": str(exc)},
-                    }
-                )
+                self._proc.stdin.write(resp + "\n")
+                self._proc.stdin.flush()
+        finally:
+            sel.close()
 
-            self._proc.stdin.write(resp + "\n")
-            self._proc.stdin.flush()
-
+        self._emergency_reset()
         duration_ms = int((time.monotonic() - start_time) * 1000)
         return CuaReplResult(
             status="failed",
@@ -293,6 +305,50 @@ class CuaReplEngine:
         if app_name not in self.trackers:
             self.trackers[app_name] = AXStateTracker(app_name=app_name)
         return self.trackers[app_name]
+
+    def _emergency_reset(self) -> None:
+        """Reset input states and recycle process on hang or timeout."""
+        if self.driver_client:
+            try:
+                self.driver_client.send(PressHotkey(type="press_hotkey", modifiers=[], key="Escape"))
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("Emergency reset input dispatch failed: %s", exc)
+        self.stop()
+        self.start()
+
+    def _select_menu_item(self, app_name: str, path: list[str]) -> bool:
+        """Select a macOS menu bar item natively via AppleScript System Events."""
+        if not path:
+            return False
+        try:
+            reversed_path = list(reversed(path))
+            target_item = reversed_path[0]
+            hierarchy_parts: list[str] = []
+            for i, part in enumerate(reversed_path[1:]):
+                if i == 0:
+                    hierarchy_parts.append(f'of menu "{part}"')
+                else:
+                    hierarchy_parts.append(f'of menu item "{part}" of menu 1')
+
+            hierarchy = " ".join(hierarchy_parts)
+            script = (
+                f'tell application "System Events"\n'
+                f'    tell process "{app_name}"\n'
+                f'        click menu item "{target_item}" {hierarchy} of menu bar 1\n'
+                f'    end tell\n'
+                f'end tell'
+            )
+            proc = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            return proc.returncode == 0
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("AppleScript selectMenuItem failed for %s (%s): %s", app_name, path, exc)
+            return False
 
     def _ensure_app_active(self, app_name: str) -> None:
         """Ensure targeted application is frontmost before actuation."""
@@ -521,6 +577,74 @@ class CuaReplEngine:
             )
             self._last_content = state_text
             return state_text
+
+        if method == "selectMenuItem":
+            app_name = str(params["app"])
+            path_segments = cast(list[str], params.get("path", []))
+            self._ensure_app_active(app_name)
+            success = self._select_menu_item(app_name, path_segments)
+            return {"success": success, "path": path_segments}
+
+        if method == "findVisualElement":
+            app_name = str(params["app"])
+            query = str(params.get("query", "")).strip().casefold()
+            pid: int | None = self.driver_client.app_pid(app_name) if self.driver_client else None
+
+            if self.driver_client and hasattr(self.driver_client, "recognize_text"):
+                try:
+                    lines = cast(list[Any], self.driver_client.recognize_text(pid=pid))
+                    for line in lines:
+                        text_val = str(getattr(line, "text", ""))
+                        if query in text_val.casefold():
+                            lx = int(getattr(line, "x", 0))
+                            ly = int(getattr(line, "y", 0))
+                            lw = int(getattr(line, "width", 0))
+                            lh = int(getattr(line, "height", 0))
+                            res_box: dict[str, object] = {
+                                "text": text_val,
+                                "x": lx,
+                                "y": ly,
+                                "width": lw,
+                                "height": lh,
+                                "centre_x": lx + lw // 2,
+                                "centre_y": ly + lh // 2,
+                                "confidence": float(getattr(line, "confidence", 1.0)),
+                            }
+                            return res_box
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("findVisualElement failed for %s: %s", app_name, exc)
+            return None
+
+        if method == "getWindowBounds":
+            app_name = str(params["app"])
+            pid_val: int | None = self.driver_client.app_pid(app_name) if self.driver_client else None
+
+            if self.driver_client and hasattr(self.driver_client, "focused_window"):
+                try:
+                    win = cast(dict[str, object], self.driver_client.focused_window(pid=pid_val))
+                    res_win: dict[str, object] = {
+                        "title": str(win.get("title", "")),
+                        "x": int(cast(int, win.get("x", 0))),
+                        "y": int(cast(int, win.get("y", 0))),
+                        "width": int(cast(int, win.get("width", 0))),
+                        "height": int(cast(int, win.get("height", 0))),
+                        "pid": pid_val,
+                    }
+                    return res_win
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.debug("Could not query window bounds for %s: %s", app_name, exc)
+            fallback_win: dict[str, object] = {"title": app_name, "x": 0, "y": 0, "width": 800, "height": 600, "pid": pid_val}
+            return fallback_win
+
+        if method == "cropScreenshot":
+            bounds = cast(dict[str, int], params.get("bounds", {}))
+            return {
+                "x": bounds.get("x", 0),
+                "y": bounds.get("y", 0),
+                "width": bounds.get("width", 0),
+                "height": bounds.get("height", 0),
+                "format": "png",
+            }
 
         if method == "findElement":
             app_name = str(params["app"])
