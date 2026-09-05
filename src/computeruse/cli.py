@@ -171,6 +171,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description="Autonomous physical computer-use agent (macOS).",
     )
     parser.add_argument(
+        "--cua-repl",
+        action="store_true",
+        help="Start the CUA REPL MCP server (serving standard cua_repl / js tool over stdio).",
+    )
+    parser.add_argument(
         "--goal",
         default=None,
         help="The task to accomplish. Required unless --autonomous is given, in "
@@ -260,8 +265,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--grant-uses",
         type=int,
         default=1,
-        help="How many times the grant may be used before it is spent "
-        "(default: 1).",
+        help="How many times the grant may be used before it is spent (default: 1).",
     )
     parser.add_argument(
         "--grant-hours",
@@ -384,7 +388,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "lend the agent their tools. Off by default: these are other people's "
         "programs, started as subprocesses.",
     )
-    parser.add_argument("--socket", default=DEFAULT_SOCKET, help="Driver Unix socket path.")
+    parser.add_argument(
+        "--socket", default=DEFAULT_SOCKET, help="Driver Unix socket path."
+    )
     parser.add_argument(
         "--driver",
         default=None,
@@ -410,7 +416,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=True,
         help="Enable multimodal visual perception (screenshot to VLM).",
     )
-    parser.add_argument("--store", default=str(DEFAULT_STORE), help="Episodes + skills directory.")
+    parser.add_argument(
+        "--store", default=str(DEFAULT_STORE), help="Episodes + skills directory."
+    )
     parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument(
         "--plan",
@@ -505,7 +513,9 @@ def scripted_provider(goal: str) -> Callable[[WorkingState], AgentTurn]:
         return AgentTurn(
             thought="done",
             sub_goal="workflow complete",
-            action=Finish(type="finish", status="success", summary="demo workflow done"),
+            action=Finish(
+                type="finish", status="success", summary="demo workflow done"
+            ),
         )
 
     return provider
@@ -581,7 +591,10 @@ def load_model_binding(
     if spec == OPENAI_PREFIX or spec.startswith(f"{OPENAI_PREFIX}:"):
         model_id = spec.split(":", 1)[1].strip() if ":" in spec else ""
         if _accepts_keyword(openai_model, "stats_sink"):
-            model = cast(Callable[[str], str], openai_model(model_id or None, stats_sink=stats_sink))
+            model = cast(
+                Callable[[str], str],
+                openai_model(model_id or None, stats_sink=stats_sink),
+            )
         else:
             # Legacy/experimental transports that predate usage telemetry get
             # a plain call; the panel then simply shows no token counters.
@@ -672,7 +685,11 @@ def _accepts_keyword(func: Callable[..., object], keyword: str) -> bool:
     params = signature.parameters
     return any(
         p.kind is inspect.Parameter.VAR_KEYWORD
-        or (p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) and p.name == keyword)
+        or (
+            p.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            and p.name == keyword
+        )
         for p in params.values()
     )
 
@@ -869,7 +886,9 @@ def build_config(
     )
 
 
-def spawn_driver(binary: str, socket_path: str, *, real: bool) -> subprocess.Popen[bytes]:
+def spawn_driver(
+    binary: str, socket_path: str, *, real: bool
+) -> subprocess.Popen[bytes]:
     """Start the driver if the socket is not already served; return the process.
 
     The driver logs its startup diagnosis on stderr — most importantly *why*
@@ -886,7 +905,9 @@ def spawn_driver(binary: str, socket_path: str, *, real: bool) -> subprocess.Pop
     command = [binary, socket_path]
     if real:
         command.append("--real")
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
     stderr_tail: list[str] = []
 
     def _drain_stderr() -> None:
@@ -989,9 +1010,7 @@ def _run_autonomous_session(
         tokens["total"] += int(getattr(call, "total_tokens", 0) or 0)
         cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
 
-    def usage_since(
-        mark: tuple[int, float, float]
-    ) -> tuple[int, float, float]:
+    def usage_since(mark: tuple[int, float, float]) -> tuple[int, float, float]:
         """What has been spent since ``mark`` (tokens, dollars, seconds).
 
         The session's counters are cumulative because the *budget* is the
@@ -1033,9 +1052,7 @@ def _run_autonomous_session(
         # mid-action still leaves a record that this work was started and how
         # far it got. Its attempt is spent here for the same reason.
         mission = mission_started(
-            new_mission(
-                goal=proposal.goal, app=proposal.app, plan=None, now=now_utc()
-            ),
+            new_mission(goal=proposal.goal, app=proposal.app, plan=None, now=now_utc()),
             now_utc(),
         )
         missions.save(mission)
@@ -1075,6 +1092,7 @@ def _run_autonomous_session(
         )
         if proposal.app is not None:
             config = replace(config, app=proposal.app)
+
         def record(run_id: str, outcome: str, steps: int) -> None:
             spent_tokens, spent_cost, spent_seconds = usage_since(mark)
             _record_usage(
@@ -1134,8 +1152,7 @@ def _run_autonomous_session(
                     # must not replace it (the orphan sweep quarantines the
                     # claim at the next session start instead).
                     print(
-                        f"warning: could not archive failed inbox task "
-                        f"({settle_exc})",
+                        f"warning: could not archive failed inbox task ({settle_exc})",
                         file=sys.stderr,
                     )
             raise
@@ -1145,7 +1162,9 @@ def _run_autonomous_session(
             )
         )
         record(result.run_id, "success", len(result.state.completed_steps))
-        print(f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps")
+        print(
+            f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps"
+        )
         if claim is not None and watch_dir is not None:
             settle_processed(
                 claim.processing_path, processed_dir=watch_dir / PROCESSED_DIRNAME
@@ -1190,9 +1209,7 @@ def _run_autonomous_session(
                         f"from watched folder {watch_dir}"
                     ),
                 )
-        open_work = resumable(
-            missions.missions(), max_attempts=DEFAULT_MAX_ATTEMPTS
-        )
+        open_work = resumable(missions.missions(), max_attempts=DEFAULT_MAX_ATTEMPTS)
         for mission in open_work:
             if mission.goal in waiting:
                 continue
@@ -1208,9 +1225,7 @@ def _run_autonomous_session(
         # rng.choice would discard the legitimate candidates left in the pool
         # along with the excluded one and end the session early. A None here
         # therefore means the pools are genuinely empty — not an unlucky roll.
-        return propose_goal(
-            skills, episodes, rng=rng, exclude=waiting | operator_goals
-        )
+        return propose_goal(skills, episodes, rng=rng, exclude=waiting | operator_goals)
 
     done = run_autonomously(
         SessionLimits(
@@ -1231,7 +1246,9 @@ def _run_autonomous_session(
         print(f"awaiting you: {len(parked)} action(s) need a decision")
         for request in parked:
             target = f" on {request.target_label!r}" if request.target_label else ""
-            print(f"  - [{request.request_id}] {request.action_type}{target} — {request.sub_goal}")
+            print(
+                f"  - [{request.request_id}] {request.action_type}{target} — {request.sub_goal}"
+            )
         print("  review with: computeruse --approvals")
     return 0
 
@@ -1357,7 +1374,10 @@ def _run_eval(args: argparse.Namespace) -> int:
         # The score on stdout is the instrument reading; a store that
         # cannot be written degrades to a warning rather than failing a
         # battery that may itself be red (Law 6.3: carry the reason).
-        print(f"warning: could not save benchmark {record.benchmark_id}: {exc}", file=sys.stderr)
+        print(
+            f"warning: could not save benchmark {record.benchmark_id}: {exc}",
+            file=sys.stderr,
+        )
     summary = summarize_eval(
         battery_version=record.battery_version,
         run_id=record.run_id if record.run_id is not None else record.benchmark_id,
@@ -1440,8 +1460,12 @@ def _review_grants(args: argparse.Namespace) -> int:
             return 2
         grants.save(grant)
         print(f"granted {grant.grant_id}")
-        print(f"  {grant.verb} in {grant.app}, controls matching {grant.target_pattern!r}")
-        print(f"  {grant.max_invocations} use(s), expires {grant.expires_at.isoformat(timespec='seconds')}")
+        print(
+            f"  {grant.verb} in {grant.app}, controls matching {grant.target_pattern!r}"
+        )
+        print(
+            f"  {grant.max_invocations} use(s), expires {grant.expires_at.isoformat(timespec='seconds')}"
+        )
         return 0
 
     live = active_grants(grants.grants(), now)
@@ -1496,9 +1520,11 @@ def _review_approvals(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             else:
-                print(f"  granted {grant.grant_id}: {grant.verb} in {grant.app}, "
-                      f"{grant.max_invocations} use(s), controls matching "
-                      f"{grant.target_pattern!r}")
+                print(
+                    f"  granted {grant.grant_id}: {grant.verb} in {grant.app}, "
+                    f"{grant.max_invocations} use(s), controls matching "
+                    f"{grant.target_pattern!r}"
+                )
         if answered.mission_id is not None:
             try:
                 mission = missions.load(answered.mission_id)
@@ -1554,9 +1580,7 @@ def _apply_resume(args: argparse.Namespace) -> int | None:
     try:
         checkpoint = SessionCheckpoint.load(checkpoint_path)
     except (OSError, ValueError) as exc:
-        print(
-            f"error: cannot load checkpoint {args.resume!r}: {exc}", file=sys.stderr
-        )
+        print(f"error: cannot load checkpoint {args.resume!r}: {exc}", file=sys.stderr)
         return 2
     # One definition of "what is left", shared with the mission store: two
     # would eventually disagree about whether a half-done plan resumes at step
@@ -1585,6 +1609,15 @@ def _dispatch_store_command(args: argparse.Namespace) -> int | None:
     the score — so all of them dispatch before every check that assumes a
     run is about to start.
     """
+    if getattr(args, "cua_repl", False):
+        from computeruse.mcp.cua_repl import CuaReplServer
+
+        server = CuaReplServer()
+        try:
+            server.run_stdio()
+        finally:
+            server.engine.stop()
+        return 0
     if args.eval or args.eval_json or args.eval_only is not None:
         return _run_eval(args)
     if args.report:
@@ -1919,7 +1952,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"skill       : {result.skill.skill_id} (mounted)")
         return 0
     except KillSwitchTripped:
-        print("interrupted: human reclaimed control (kill-switch tripped)", file=sys.stderr)
+        print(
+            "interrupted: human reclaimed control (kill-switch tripped)",
+            file=sys.stderr,
+        )
         return 130
     except PermissionDeniedError as exc:
         print(f"blocked by autonomy guard: {exc}", file=sys.stderr)
@@ -1949,7 +1985,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The recovery ladder ran out: the agent could not get past one
         # obstacle. Report the classified failure rather than a traceback —
         # the kind names what to fix (consent, a wrong app, a dead driver).
-        print(f"unrecoverable failure ({exc.failure.kind.value}): {exc}", file=sys.stderr)
+        print(
+            f"unrecoverable failure ({exc.failure.kind.value}): {exc}", file=sys.stderr
+        )
         return 1
     except BudgetExceededError as exc:
         # A ceiling the operator set, not a failure of the agent: the run
