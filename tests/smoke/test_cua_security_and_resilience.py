@@ -162,7 +162,7 @@ def test_cua_repl_security_permits_destructive_action_with_valid_grant(
         assert any(isinstance(a, MouseClick) for a in driver.sent_actions)
 
         # Verify grant was consumed
-        stored = [g for g in grant_store.grants() if g.grant_id == "grant.finder.trash"][0]
+        stored = next(g for g in grant_store.grants() if g.grant_id == "grant.finder.trash")
         assert stored.used == 1
         assert stored.remaining == 0
 
@@ -255,7 +255,7 @@ def test_cua_repl_self_healing_stale_locators() -> None:
         assert res2.status == "completed"
 
         # The driver should have clicked the newly healed Submit button at y=250 (centre_y=265)!
-        click = [a for a in driver.sent_actions if isinstance(a, MouseClick)][0]
+        click = next(a for a in driver.sent_actions if isinstance(a, MouseClick))
         assert click.y == 265
     finally:
         engine.stop()
