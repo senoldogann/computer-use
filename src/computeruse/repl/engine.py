@@ -12,7 +12,6 @@ Provides enterprise-grade resilience:
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import selectors
@@ -48,6 +47,13 @@ from computeruse.security.permissions import (
 )
 from computeruse.vision.ax import AXElement
 from computeruse.vision.ax_diff import AXStateTracker
+from computeruse.vision.capture import (
+    ScreenCapture,
+    capture_to_base64_png,
+    crop_capture,
+    logical_region_to_pixels,
+)
+from computeruse.vision.coordinates import Point, Rect, Size
 
 LOGGER = logging.getLogger(__name__)
 
@@ -381,6 +387,72 @@ class CuaReplEngine:
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("AppleScript selectMenuItem failed for %s (%s): %s", app_name, path, exc)
             return False
+
+    def _crop_data_uri(self, region: Rect, *, padding: float) -> str:
+        """A base64 PNG data URI of one region of the live screen.
+
+        The point of this is what it does *not* send. A full Retina frame costs
+        the model roughly 2000 tokens per look; the region around a single
+        control is two orders of magnitude smaller, and for the question
+        visual confirmation actually asks — "did this button change?" — the
+        rest of the screen is noise the model still pays for.
+
+        ``region`` is in global logical points, the space AX bounds and actions
+        already use, and is converted through
+        :func:`logical_region_to_pixels` — the same conversion the ORIENT diff
+        uses, so the rectangle a witness measures and the rectangle a model is
+        shown are one rectangle.
+
+        ``padding`` widens the region on every side. A control cropped exactly
+        to its own bounds shows the control and nothing it changed *about* its
+        surroundings — a checkbox's label, a button's focus ring — so a caller
+        that wants context asks for it in points rather than doing rectangle
+        arithmetic in JavaScript.
+        """
+        if region.size.width <= 0 or region.size.height <= 0:
+            raise ValueError(
+                f"crop region must have positive size, got "
+                f"{region.size.width}x{region.size.height}"
+            )
+        capture = self._capture_screen()
+        padded = Rect(
+            origin=Point(region.origin.x - padding, region.origin.y - padding),
+            size=Size(
+                region.size.width + padding * 2, region.size.height + padding * 2
+            ),
+        )
+        cropped = crop_capture(capture, logical_region_to_pixels(capture, padded))
+        if cropped.width == 0 or cropped.height == 0:
+            raise ScreenCaptureUnavailableError(
+                f"crop region {padded.origin.x:.0f},{padded.origin.y:.0f} "
+                f"{padded.size.width:.0f}x{padded.size.height:.0f} does not "
+                "overlap the captured display"
+            )
+        return f"data:image/png;base64,{capture_to_base64_png(cropped)}"
+
+    def _capture_screen(self) -> ScreenCapture:
+        """One frame of the live screen, or a typed refusal (never a blank).
+
+        Shared by ``getScreenshot`` and the crops so both fail the same way.
+        """
+        if self.driver_client is None:
+            raise ScreenCaptureUnavailableError(
+                "cannot capture the screen: the engine has no driver client"
+            )
+        try:
+            if hasattr(self.driver_client, "capture"):
+                capture = self.driver_client.capture()
+            else:
+                capture = self.driver_client.screenshot()
+        except Exception as exc:
+            raise ScreenCaptureUnavailableError(
+                f"cannot capture the screen: {exc}"
+            ) from exc
+        if not capture.data:
+            raise ScreenCaptureUnavailableError(
+                "cannot capture the screen: the driver returned no image data"
+            )
+        return cast(ScreenCapture, capture)
 
     def _frontmost_is(self, app_name: str) -> bool:
         """Is ``app_name`` the application that owns the front window right now?
@@ -739,14 +811,19 @@ class CuaReplEngine:
             return fallback_win
 
         if method == "cropScreenshot":
-            bounds = cast(dict[str, int], params.get("bounds", {}))
-            return {
-                "x": bounds.get("x", 0),
-                "y": bounds.get("y", 0),
-                "width": bounds.get("width", 0),
-                "height": bounds.get("height", 0),
-                "format": "png",
-            }
+            raw_bounds = cast(dict[str, float], params.get("bounds", {}))
+            return self._crop_data_uri(
+                Rect(
+                    origin=Point(
+                        float(raw_bounds.get("x", 0)), float(raw_bounds.get("y", 0))
+                    ),
+                    size=Size(
+                        float(raw_bounds.get("width", 0)),
+                        float(raw_bounds.get("height", 0)),
+                    ),
+                ),
+                padding=float(cast(float, params.get("padding", 0))),
+            )
 
         if method == "findElement":
             app_name = str(params["app"])
@@ -949,26 +1026,8 @@ class CuaReplEngine:
             return None
 
         if method == "getScreenshot":
-            if self.driver_client is None:
-                raise ScreenCaptureUnavailableError(
-                    "cannot capture the screen: the engine has no driver client"
-                )
-            try:
-                if hasattr(self.driver_client, "capture"):
-                    cap = self.driver_client.capture()
-                else:
-                    cap = self.driver_client.screenshot()
-            except Exception as exc:
-                raise ScreenCaptureUnavailableError(
-                    f"cannot capture the screen: {exc}"
-                ) from exc
-            data: bytes = cap.data
-            if not data:
-                raise ScreenCaptureUnavailableError(
-                    "cannot capture the screen: the driver returned no image data"
-                )
-            b64 = base64.b64encode(data).decode("ascii")
-            return f"data:image/png;base64,{b64}"
+            capture = self._capture_screen()
+            return f"data:image/png;base64,{capture_to_base64_png(capture)}"
 
         if method == "listApps":
             if self.driver_client:
