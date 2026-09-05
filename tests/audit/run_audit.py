@@ -23,6 +23,7 @@ def run_probe(name: str, script: str) -> tuple[int, str]:
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     if res.returncode != 0:
         print(f"[-] {name} FAILED with exit code {res.returncode}:\n{res.stderr}", flush=True)
@@ -59,7 +60,7 @@ def main() -> int:
             try:
                 data = json.loads(line)
                 print(f"  • {data.get('probe')}: {json.dumps(data.get('result', data))[:100]}...")
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
                 print(f"  • {line[:120]}")
 
     print("\n" + "=" * 60)

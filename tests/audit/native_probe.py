@@ -9,11 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from driver_probe import BIN, OUT, await_socket
+
 from computeruse.orchestrator.client import ActuationClient
 from computeruse.orchestrator.schemas import MouseClick, PressHotkey, TypeText
 from computeruse.vision.ax import AXElement, asks_for_a_credential
-
-from driver_probe import BIN, OUT, await_socket
 
 
 def matching_fields(root: AXElement) -> tuple[AXElement, ...]:

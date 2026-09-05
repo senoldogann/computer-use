@@ -9,11 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from computeruse.orchestrator.client import ActuationClient, DriverRpcError
-from computeruse.orchestrator.schemas import PressHotkey, TypeText
-
 from driver_probe import OUT, ROOT, await_socket
 from native_probe import read_state
+
+from computeruse.orchestrator.client import ActuationClient, DriverRpcError
+from computeruse.orchestrator.schemas import PressHotkey, TypeText
 
 
 def main() -> None:

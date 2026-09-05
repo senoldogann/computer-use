@@ -6,9 +6,26 @@ from datetime import UTC, datetime, timedelta
 
 from computeruse.agent import guarded
 from computeruse.orchestrator.evidence import Evidence, combine
-from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState, resolve_mark
-from computeruse.orchestrator.schemas import Action, AgentTurn, ClickMark, Finish, MouseClick, PressHotkey, TypeText
-from computeruse.security.autonomy import AutonomyLevel, classify_risk, decide_permission
+from computeruse.orchestrator.loop import (
+    AxProbeResult,
+    OodaRunner,
+    WorkingState,
+    resolve_mark,
+)
+from computeruse.orchestrator.schemas import (
+    Action,
+    AgentTurn,
+    ClickMark,
+    Finish,
+    MouseClick,
+    PressHotkey,
+    TypeText,
+)
+from computeruse.security.autonomy import (
+    AutonomyLevel,
+    classify_risk,
+    decide_permission,
+)
 from computeruse.security.grants import authorize, new_grant
 from computeruse.security.killswitch import CursorSample, KillSwitch, MouseShakeMonitor
 from computeruse.skills.distiller import Trajectory, distill, signature_of

@@ -36,6 +36,7 @@ def run_cli(argv: list[str], label: str, env: dict[str, str]) -> None:
         text=True,
         capture_output=True,
         timeout=65,
+        check=False,
     )
     (OUT / f"{label}.log").write_text(result.stdout + result.stderr)
     if result.returncode != 0:
@@ -85,7 +86,7 @@ def main() -> None:
                     "requests": [
                         {
                             "decision": request.decision,
-                            "action": request.action.model_dump() if hasattr(request.action, "model_dump") else request.action,
+                            "action": request.action if isinstance(request.action, dict) else request.action.model_dump(),
                             "mission": request.mission_id,
                         }
                         for request in queue.requests()
