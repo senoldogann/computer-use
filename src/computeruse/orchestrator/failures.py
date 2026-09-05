@@ -32,6 +32,7 @@ from typing import Final
 from computeruse.orchestrator.schemas import (
     Action,
     ActivateApp,
+    ClickMark,
     ClipboardPaste,
     MouseClick,
     MouseDrag,
@@ -138,6 +139,13 @@ def _target_of(action: Action | None) -> str:
         return "-"
     if isinstance(action, MouseClick):
         return _bucketed_point(action.x, action.y)
+    if isinstance(action, ClickMark):
+        # The mark is the target's identity, the way a coordinate is for a raw
+        # click. Without this every mark collapsed to the bare action type, so
+        # failing on [1] and then trying [2] read as one target refusing twice:
+        # the streak climbed on four *different* elements and the ladder
+        # aborted a run that had not repeated itself once.
+        return f"mark:{action.mark}"
     if isinstance(action, MouseDrag):
         return f"{_bucketed_point(action.start_x, action.start_y)}>{_bucketed_point(action.end_x, action.end_y)}"
     if isinstance(action, (TypeText, ClipboardPaste)):

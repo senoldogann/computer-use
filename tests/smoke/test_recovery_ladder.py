@@ -229,3 +229,23 @@ def test_dead_driver_reads_as_driver_down_not_frozen_app() -> None:
     final = runner.run(goal="edit the file")
     assert final.completed_steps
     assert [a.type for a in acted] == []  # type: ignore[union-attr]
+
+
+def test_different_marks_are_different_failure_targets() -> None:
+    """Failing on [1] then trying [2] is new work, not one target refusing twice.
+
+    Every ClickMark used to collapse to the bare action type, so the streak
+    counted four *different* elements as one repeat and the ladder aborted a
+    run that had never retried the same thing. The mark is the target's
+    identity here, the way a coordinate is for a raw click.
+    """
+    from computeruse.orchestrator.failures import classify_failure
+    from computeruse.orchestrator.schemas import ClickMark
+
+    exc = RuntimeError("element did not respond")
+    first = classify_failure(exc, ClickMark(type="click_mark", mark=1))
+    second = classify_failure(exc, ClickMark(type="click_mark", mark=2))
+    same = classify_failure(exc, ClickMark(type="click_mark", mark=1))
+
+    assert first.signature != second.signature
+    assert first.signature == same.signature
