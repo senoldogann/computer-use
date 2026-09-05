@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
+from smoke.cua_fakes import model_focus
+
 from computeruse.repl.engine import CuaReplEngine
 
 
@@ -29,6 +31,12 @@ def test_cua_native_menu_item_selection() -> None:
     """Model can trigger macOS application menu items natively via selectMenuItem."""
     mock_client = MagicMock()
     mock_client.app_pid.return_value = 8001
+    mock_client.focused_window.return_value = {
+        "app_name": "Finder",
+        "app": "Finder",
+        "bundle_id": "",
+    }
+    model_focus(mock_client)
 
     engine = CuaReplEngine(driver_client=mock_client)
     engine.start()
@@ -51,6 +59,12 @@ def test_cua_hybrid_vision_ocr_fallback() -> None:
     """Model seamlessly discovers elements via Apple Vision OCR when AX tree is opaque."""
     mock_client = MagicMock()
     mock_client.app_pid.return_value = 8002
+    mock_client.focused_window.return_value = {
+        "app_name": "Finder",
+        "app": "Finder",
+        "bundle_id": "",
+    }
+    model_focus(mock_client)
     mock_client.recognize_text.return_value = [
         DummyOcrLine(text="Search Google", x=120.0, y=45.0, width=180.0, height=30.0),
         DummyOcrLine(text="I'm Feeling Lucky", x=320.0, y=45.0, width=150.0, height=30.0),
@@ -88,6 +102,7 @@ def test_cua_window_bounds_inspection() -> None:
         "width": 1280,
         "height": 800,
     }
+    model_focus(mock_client)
 
     engine = CuaReplEngine(driver_client=mock_client)
     engine.start()

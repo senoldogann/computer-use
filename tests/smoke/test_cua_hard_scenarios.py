@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from smoke.cua_fakes import model_focus
+
 from computeruse.repl.engine import CuaReplEngine
 from computeruse.vision.ax import AXElement
 
@@ -31,6 +33,7 @@ def test_smart_locator_click_by_title_query() -> None:
         "width": 900.0,
         "height": 700.0,
     }
+    model_focus(mock_client)
     ax_root = AXElement(
         role="AXApplication",
         title="SystemSettings",
@@ -101,6 +104,7 @@ def test_smart_locator_click_by_role_and_title_object() -> None:
         "width": 800.0,
         "height": 600.0,
     }
+    model_focus(mock_client)
     ax_root = AXElement(
         role="AXApplication",
         title="TextEdit",
@@ -164,6 +168,7 @@ def test_wait_for_element_dynamic_appearance() -> None:
         "width": 600.0,
         "height": 400.0,
     }
+    model_focus(mock_client)
 
     initial_root = AXElement(
         role="AXApplication",
@@ -250,6 +255,7 @@ def test_wait_for_element_timeout_raises_descriptive_error() -> None:
         "width": 600.0,
         "height": 400.0,
     }
+    model_focus(mock_client)
     empty_root = AXElement(
         role="AXApplication",
         title="SampleApp",
@@ -291,6 +297,7 @@ def test_multi_app_interleaving_and_isolation() -> None:
         "width": 800.0,
         "height": 600.0,
     }
+    model_focus(mock_client)
 
     notes_root = AXElement(
         role="AXApplication",

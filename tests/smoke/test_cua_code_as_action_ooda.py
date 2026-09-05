@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+from smoke.cua_fakes import model_focus
+
 from computeruse.orchestrator.loop import (
     AxProbeResult,
     FocusedWindow,
@@ -98,6 +100,7 @@ def test_ooda_runner_executes_cua_repl_call_tool() -> None:
         "width": 800.0,
         "height": 600.0,
     }
+    model_focus(mock_client)
     mock_ax_root = AXElement(
         role="AXApplication",
         title="TextEdit",
@@ -221,6 +224,7 @@ def test_cua_repl_click_action_dispatches_mouse_click() -> None:
         "width": 800.0,
         "height": 600.0,
     }
+    model_focus(mock_client)
     mock_ax_root = AXElement(
         role="AXApplication",
         title="TextEdit",
