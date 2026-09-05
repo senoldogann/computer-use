@@ -25,6 +25,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
+from computeruse.atomic import write_atomic
 from computeruse.orchestrator.schemas import Action
 from computeruse.slug import ascii_slug
 
@@ -102,7 +103,7 @@ class SemanticStore:
                 f"semantic entry {entry.entry_id!r} already exists; "
                 "delete it explicitly before updating"
             )
-        path.write_text(entry.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        write_atomic(path, entry.model_dump_json(indent=2) + "\n")
 
     def get(self, entry_id: str) -> SemanticEntry:
         path = self._store_dir / f"{entry_id}.json"
@@ -139,7 +140,7 @@ class SemanticStore:
         """Write or overwrite an entry (for learning evolving UI facts)."""
         self._store_dir.mkdir(parents=True, exist_ok=True)
         path = self._store_dir / f"{entry.entry_id}.json"
-        path.write_text(entry.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        write_atomic(path, entry.model_dump_json(indent=2) + "\n")
 
     def search(self, query: str, *, app: str | None = None) -> tuple[SemanticEntry, ...]:
         """Convenience: query the on-disk index (pure scoring underneath)."""

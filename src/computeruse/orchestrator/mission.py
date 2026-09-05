@@ -38,6 +38,7 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
+from computeruse.atomic import write_atomic
 from computeruse.orchestrator.planner import (
     GoalPlan,
     goal_from_sub_goals,
@@ -229,7 +230,7 @@ class MissionStore:
     def save(self, mission: Mission) -> Path:
         self._directory.mkdir(parents=True, exist_ok=True)
         target = self._directory / f"{mission.mission_id}.json"
-        target.write_text(mission.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        write_atomic(target, mission.model_dump_json(indent=2) + "\n")
         return target
 
     def missions(self) -> tuple[Mission, ...]:

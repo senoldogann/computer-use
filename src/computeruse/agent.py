@@ -983,7 +983,16 @@ class Agent:
                 trace=trace_sink,
                 budget_guard=self._config.budget_guard,
             )
-            state = runner.run(self._config.goal)
+            try:
+                state = runner.run(self._config.goal)
+            finally:
+                # MCP servers are other people's programs, started as our
+                # subprocesses. Nothing closed them: a run that ended any way
+                # other than cleanly — kill switch, budget stop, a raise from
+                # deep in the loop — left its npx children orphaned, and a
+                # night of unattended work left a pile of them.
+                if mcp is not None:
+                    mcp.close()
 
         return AgentResult(
             state=state,
