@@ -3,6 +3,7 @@
 Indexes interactive UI elements with numeric IDs for programmatic code actuation
 and computes unified-diff style token-efficient updates (+, -, ~) across turns,
 matching OpenAI CUA REPL (`cua.getApp`, `app.getAXState`) design.
+Includes historical node tracking and self-healing locator capabilities.
 """
 
 from __future__ import annotations
@@ -124,6 +125,7 @@ class AXStateTracker:
     last_window_title: str | None = None
     last_nodes: list[IndexedNode] = field(default_factory=_default_nodes_list)
     current_index_map: dict[int, IndexedNode] = field(default_factory=_default_index_map)
+    historical_index_map: dict[int, IndexedNode] = field(default_factory=_default_index_map)
     user_interrupted: bool = False
 
     def mark_user_interruption(self) -> None:
@@ -134,6 +136,19 @@ class AXStateTracker:
         """Find an indexed element by its index in the latest observation."""
         return self.current_index_map.get(index)
 
+    def get_historical_element(self, index: int) -> IndexedNode | None:
+        """Find an indexed element from historical observations (for self-healing)."""
+        return self.historical_index_map.get(index) or self.current_index_map.get(index)
+
+    def find_matching_element(self, role: str, title: str) -> IndexedNode | None:
+        """Find a currently live element matching role and title (case-insensitive)."""
+        clean_title = title.strip().casefold()
+        clean_role = role.strip().casefold()
+        for elem in self.current_index_map.values():
+            if elem.role.strip().casefold() == clean_role and elem.title.strip().casefold() == clean_title:
+                return elem
+        return None
+
     def render_state(
         self,
         root: AXElement,
@@ -143,6 +158,7 @@ class AXStateTracker:
         """Generate token-efficient state string (initial full tree, or incremental diff)."""
         new_nodes = index_accessible_elements(root, start_index=0)
         self.current_index_map = {node.index: node for node in new_nodes}
+        self.historical_index_map.update(self.current_index_map)
 
         # Handle user disruption / drift guard
         if self.user_interrupted:

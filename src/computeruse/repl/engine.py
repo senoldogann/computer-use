@@ -3,6 +3,11 @@
 Executes model-generated JavaScript in a dedicated Node.js bridge environment
 with the `globalThis.cua` API surface, coordinating with the Rust Micro-Driver
 for fast accessibility-guided actions and token-efficient AX diffing.
+
+Provides enterprise-grade resilience:
+- Constitutional autonomy and capability grant enforcement (security gate).
+- Dynamic self-healing element resolution (stale node recovery).
+- Cross-application focus synchronization and state isolation.
 """
 
 from __future__ import annotations
@@ -14,10 +19,13 @@ import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from computeruse.orchestrator.schemas import (
+    Action,
+    AgentTurn,
     ClipboardPaste,
     MouseClick,
     MouseDrag,
@@ -25,6 +33,16 @@ from computeruse.orchestrator.schemas import (
     MouseScroll,
     PressHotkey,
     TypeText,
+)
+from computeruse.security.autonomy import (
+    AutonomyLevel,
+    classify_risk,
+    decide_permission,
+)
+from computeruse.security.grants import GrantStore, authorize
+from computeruse.security.permissions import (
+    PermissionDecision,
+    PermissionDeniedError,
 )
 from computeruse.vision.ax import AXElement
 from computeruse.vision.ax_diff import AXStateTracker
@@ -128,13 +146,20 @@ class CuaReplEngine:
         driver_client: Any = None,
         node_binary: str = "node",
         snapshot_provider: Callable[[str], tuple[AXElement, str]] | None = None,
+        autonomy_level: AutonomyLevel = AutonomyLevel.FULL,
+        grant_store: GrantStore | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self.driver_client = driver_client
         self.node_binary = node_binary
         self.snapshot_provider = snapshot_provider
+        self.autonomy_level = autonomy_level
+        self.grant_store = grant_store
+        self.now_provider = now_provider
         self.trackers: dict[str, AXStateTracker] = {}
         self._proc: subprocess.Popen[str] | None = None
         self._last_content: str = ""
+        self._active_app: str | None = None
 
     def start(self) -> None:
         """Spawn the background Node.js bridge process."""
@@ -265,6 +290,16 @@ class CuaReplEngine:
             self.trackers[app_name] = AXStateTracker(app_name=app_name)
         return self.trackers[app_name]
 
+    def _ensure_app_active(self, app_name: str) -> None:
+        """Ensure targeted application is frontmost before actuation."""
+        if self._active_app != app_name and self.driver_client:
+            try:
+                self.driver_client.activate_app(app_name)
+                self._active_app = app_name
+                time.sleep(0.05)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("activate_app failed for %s: %s", app_name, exc)
+
     def _get_app_snapshot(self, app_name: str) -> tuple[AXElement, str]:
         """Fetch accessibility snapshot and window title for an app."""
         if self.snapshot_provider:
@@ -274,6 +309,7 @@ class CuaReplEngine:
             # Native driver call
             try:
                 self.driver_client.activate_app(app_name)
+                self._active_app = app_name
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("activate_app failed for %s: %s", app_name, exc)
 
@@ -311,38 +347,111 @@ class CuaReplEngine:
         elem_index: int | None,
         x: int | None,
         y: int | None,
-    ) -> tuple[int | None, int | None]:
-        """Resolve either element center coordinates or explicit (x, y) point."""
+    ) -> tuple[int | None, int | None, str | None]:
+        """Resolve element coordinates and target label with self-healing stale locator recovery."""
         if elem_index is not None:
+            idx = int(elem_index)
             tracker = self._get_tracker(app_name)
-            elem = tracker.get_element_by_index(int(elem_index))
+            elem = tracker.get_element_by_index(idx)
             if elem:
-                return elem.centre_x, elem.centre_y
-            LOGGER.warning(
-                "Element index %d not found in %s tracker", elem_index, app_name
+                label = elem.title or elem.role
+                return elem.centre_x, elem.centre_y, label
+
+            # Self-healing locator: Check historical elements
+            historical = tracker.get_historical_element(idx)
+            if historical:
+                LOGGER.info(
+                    "Attempting self-healing recovery for stale index [%d] (%s '%s')",
+                    idx,
+                    historical.role,
+                    historical.title,
+                )
+                # Refresh snapshot and re-render
+                snap, win_title = self._get_app_snapshot(app_name)
+                tracker.render_state(snap, win_title)
+                healed = tracker.find_matching_element(historical.role, historical.title)
+                if healed:
+                    LOGGER.info(
+                        "Self-healed stale index [%d] -> new index [%d] at (%d, %d)",
+                        idx,
+                        healed.index,
+                        healed.centre_x,
+                        healed.centre_y,
+                    )
+                    return healed.centre_x, healed.centre_y, healed.title or healed.role
+
+            raise ValueError(
+                f"Element index [{idx}] was not found or has become stale in '{app_name}'. "
+                f"Call `await app.getAXState()` to inspect current layout."
             )
-        return x, y
+
+        return x, y, None
+
+    def _check_security(
+        self, action: Action, app_name: str, target_label: str | None = None
+    ) -> None:
+        """Enforce constitutional autonomy levels and capability grants."""
+        turn = AgentTurn(
+            thought="CUA REPL execution",
+            sub_goal=f"CUA REPL execute in {app_name}",
+            action=action,
+        )
+        risk = classify_risk(turn, target_label=target_label)
+        decision = decide_permission(self.autonomy_level, risk)
+
+        if decision == PermissionDecision.ALLOW:
+            return
+
+        # Attempt to authorize via active capability grants
+        if self.grant_store is not None:
+            now = self.now_provider() if self.now_provider else datetime.now(UTC)
+            all_grants = self.grant_store.grants()
+            verdict = authorize(
+                action,
+                sub_goal=turn.sub_goal,
+                target_label=target_label,
+                app=app_name,
+                grants=all_grants,
+                now=now,
+            )
+            if verdict.is_granted and verdict.grant_id:
+                self.grant_store.consume(verdict.grant_id)
+                LOGGER.info(
+                    "CUA REPL action covered by grant %s (%s)",
+                    verdict.grant_id,
+                    verdict.reason,
+                )
+                return
+            raise PermissionDeniedError(
+                f"CUA REPL Security Refusal: Action risk '{risk.value.upper()}' on "
+                f"{target_label or 'control'!r} in {app_name} refused: {verdict.reason}"
+            )
+
+        raise PermissionDeniedError(
+            f"CUA REPL Security Refusal: Action risk '{risk.value.upper()}' on "
+            f"{target_label or 'control'!r} in {app_name} blocked under autonomy level {self.autonomy_level.name}"
+        )
 
     def _dispatch_js_call(self, method: str, params: dict[str, Any]) -> Any:
         """Route calls from the JS runtime to the appropriate host driver handler."""
         if method == "getApp":
             app_name = params["app"]
+            self._ensure_app_active(app_name)
             tracker = self._get_tracker(app_name)
             if not tracker.last_nodes:
                 snap, win_title = self._get_app_snapshot(app_name)
                 state_text = tracker.render_state(snap, win_title)
             else:
-                # Re-use current rendered state if already present
-                state_text = tracker.render_state(
-                    AXElement(
-                        role="Window",
-                        title=tracker.last_window_title or app_name,
-                        width=800,
-                        height=600,
-                    ),
-                    tracker.last_window_title or app_name,
-                    disable_diffing=True,
-                )
+                lines = [
+                    "## Computer Use",
+                    f'Window: "{tracker.last_window_title or app_name}", App: {app_name}.',
+                    "",
+                    "Accessibility Tree:",
+                ]
+                for n in tracker.last_nodes:
+                    lines.append(n.summary_line())
+                state_text = "\n".join(lines)
+
             self._last_content = state_text
             return {
                 "id": f"com.apple.{app_name}",
@@ -352,6 +461,7 @@ class CuaReplEngine:
 
         if method == "getAXState":
             app_name = params["app"]
+            self._ensure_app_active(app_name)
             disable_diff = params.get("disableDiffing", False)
             tracker = self._get_tracker(app_name)
             snap, win_title = self._get_app_snapshot(app_name)
@@ -363,38 +473,42 @@ class CuaReplEngine:
 
         if method == "click":
             app_name = params["app"]
-            target_x, target_y = self._resolve_target_point(
+            self._ensure_app_active(app_name)
+            target_x, target_y, target_label = self._resolve_target_point(
                 app_name,
                 params.get("elementIndex"),
                 params.get("x"),
                 params.get("y"),
             )
 
-            if target_x is not None and target_y is not None and self.driver_client:
-                self.driver_client.send(
-                    MouseMove(type="mouse_move", x=int(target_x), y=int(target_y))
+            if target_x is not None and target_y is not None:
+                click_action = MouseClick(
+                    type="mouse_click",
+                    x=int(target_x),
+                    y=int(target_y),
+                    button=params.get("mouseButton", "left"),
+                    click_count=params.get("clickCount", 1),
                 )
-                self.driver_client.send(
-                    MouseClick(
-                        type="mouse_click",
-                        x=int(target_x),
-                        y=int(target_y),
-                        button=params.get("mouseButton", "left"),
-                        click_count=params.get("clickCount", 1),
+                self._check_security(click_action, app_name, target_label)
+
+                if self.driver_client:
+                    self.driver_client.send(
+                        MouseMove(type="mouse_move", x=int(target_x), y=int(target_y))
                     )
-                )
+                    self.driver_client.send(click_action)
 
             return None
 
         if method == "drag":
             app_name = params["app"]
-            start_x, start_y = self._resolve_target_point(
+            self._ensure_app_active(app_name)
+            start_x, start_y, start_label = self._resolve_target_point(
                 app_name,
                 params.get("startElementIndex"),
                 params.get("startX"),
                 params.get("startY"),
             )
-            end_x, end_y = self._resolve_target_point(
+            end_x, end_y, _ = self._resolve_target_point(
                 app_name,
                 params.get("endElementIndex"),
                 params.get("endX"),
@@ -406,23 +520,25 @@ class CuaReplEngine:
                 and start_y is not None
                 and end_x is not None
                 and end_y is not None
-                and self.driver_client
             ):
-                self.driver_client.send(
-                    MouseDrag(
-                        type="mouse_drag",
-                        start_x=int(start_x),
-                        start_y=int(start_y),
-                        end_x=int(end_x),
-                        end_y=int(end_y),
-                        duration_ms=params.get("durationMs", 250),
-                    )
+                drag_action = MouseDrag(
+                    type="mouse_drag",
+                    start_x=int(start_x),
+                    start_y=int(start_y),
+                    end_x=int(end_x),
+                    end_y=int(end_y),
+                    duration_ms=params.get("durationMs", 250),
                 )
+                self._check_security(drag_action, app_name, start_label)
+
+                if self.driver_client:
+                    self.driver_client.send(drag_action)
             return None
 
         if method == "scroll":
             app_name = params["app"]
-            target_x, target_y = self._resolve_target_point(
+            self._ensure_app_active(app_name)
+            target_x, target_y, _ = self._resolve_target_point(
                 app_name,
                 params.get("elementIndex"),
                 params.get("x"),
@@ -449,13 +565,16 @@ class CuaReplEngine:
             elif direction == "left":
                 dx = -unit
 
+            scroll_action = MouseScroll(type="mouse_scroll", dx=dx, dy=dy)
+            self._check_security(scroll_action, app_name, None)
+
             if self.driver_client:
-                self.driver_client.send(
-                    MouseScroll(type="mouse_scroll", dx=dx, dy=dy)
-                )
+                self.driver_client.send(scroll_action)
             return None
 
         if method == "pressKey":
+            app_name = params.get("app", "System")
+            self._ensure_app_active(app_name)
             raw_key = str(params["key"])
             raw_mods = params.get("modifiers")
             mod_list: list[str] = (
@@ -464,26 +583,37 @@ class CuaReplEngine:
                 else []
             )
             hotkey_action = parse_hotkey_action(raw_key, mod_list)
+            self._check_security(hotkey_action, app_name, None)
+
             if self.driver_client:
                 self.driver_client.send(hotkey_action)
             return None
 
         if method == "typeText":
+            app_name = params.get("app", "System")
+            self._ensure_app_active(app_name)
             text = params["text"]
+            type_action = TypeText(type="type_text", text=text)
+            self._check_security(type_action, app_name, None)
+
             if self.driver_client:
-                self.driver_client.send(TypeText(type="type_text", text=text))
+                self.driver_client.send(type_action)
             return None
 
         if method == "paste":
+            app_name = params.get("app", "System")
+            self._ensure_app_active(app_name)
             text = params["text"]
+            paste_action = ClipboardPaste(type="clipboard_paste", text=text)
+            self._check_security(paste_action, app_name, None)
+
             if self.driver_client:
-                self.driver_client.send(
-                    ClipboardPaste(type="clipboard_paste", text=text)
-                )
+                self.driver_client.send(paste_action)
             return None
 
         if method == "setValue":
             app_name = params["app"]
+            self._ensure_app_active(app_name)
             elem_index = params["elementIndex"]
             value = params["value"]
             # Click to focus, select all, then type
@@ -494,13 +624,18 @@ class CuaReplEngine:
                 self.driver_client.send(
                     PressHotkey(type="press_hotkey", modifiers=["command"], key="a")
                 )
-                self.driver_client.send(TypeText(type="type_text", text=value))
+                type_action = TypeText(type="type_text", text=value)
+                self._check_security(type_action, app_name, None)
+                self.driver_client.send(type_action)
             return None
 
         if method == "getScreenshot":
             if self.driver_client:
                 try:
-                    cap = self.driver_client.screenshot()
+                    if hasattr(self.driver_client, "capture"):
+                        cap = self.driver_client.capture()
+                    else:
+                        cap = self.driver_client.screenshot()
                     b64 = base64.b64encode(cap.data).decode("ascii")
                     return f"data:image/png;base64,{b64}"
                 except Exception as exc:  # noqa: BLE001

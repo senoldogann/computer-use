@@ -352,7 +352,12 @@ class AutonomyPolicy:
         if target_label:
             subject = f"{subject} {target_label}".lower()
         if isinstance(turn.action, PressHotkey):
-            subject = f"{subject} {turn.action.key}".lower()
+            is_bare_deletion_key = (
+                turn.action.key in {"delete", "backspace"}
+                and not any(m in turn.action.modifiers for m in ("command", "control"))
+            )
+            if not is_bare_deletion_key:
+                subject = f"{subject} {turn.action.key}".lower()
         if isinstance(turn.action, CallTool):
             # The tool's name is a short identifier the server chose
             # (``delete_file``, ``send_message``), never prose — token matching
