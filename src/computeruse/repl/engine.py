@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from computeruse.orchestrator.evidence import Evidence, app_evidence
 from computeruse.orchestrator.schemas import (
     Action,
     AgentTurn,
@@ -51,6 +52,38 @@ from computeruse.vision.ax_diff import AXStateTracker
 LOGGER = logging.getLogger(__name__)
 
 BRIDGE_SCRIPT_PATH = Path(__file__).parent / "cua_bridge.js"
+
+#: How long to wait for a newly activated application to actually come
+#: forward. macOS answers ``activate_app`` before the switch has happened, so
+#: the confirming read has to be given a moment — but only a moment: an app
+#: that has not surfaced in half a second is not going to.
+FOCUS_SETTLE_POLLS: int = 10
+FOCUS_SETTLE_INTERVAL_S: float = 0.05
+
+
+class ScreenCaptureUnavailableError(RuntimeError):
+    """The screen could not be photographed.
+
+    Raised rather than answered with an empty image. A failed capture used to
+    return the bare data-URI prefix ``data:image/png;base64,`` — well-formed,
+    zero pixels — so every caller's "did I get a screenshot?" test passed and
+    the model was handed a blank frame described as the screen. Measured
+    against the live backend with Screen Recording consent absent: the driver
+    refused display 0, the engine logged a warning, and the audit's own
+    ``"data:image/png;base64," in content`` assertion passed anyway.
+
+    Visual confirmation that cannot fail confirms nothing, so this says so.
+    """
+
+
+class FocusNotAcquiredError(RuntimeError):
+    """The target application could not be confirmed frontmost.
+
+    Raised instead of actuating, because a keystroke is delivered to whatever
+    holds focus at the moment it is posted — not to the application the script
+    named. Continuing after a failed activation does not degrade the action, it
+    redirects it.
+    """
 
 ModifierType = Literal["command", "control", "alt", "shift"]
 
@@ -164,7 +197,6 @@ class CuaReplEngine:
         self.trackers: dict[str, AXStateTracker] = {}
         self._proc: subprocess.Popen[str] | None = None
         self._last_content: str = ""
-        self._active_app: str | None = None
 
     def start(self) -> None:
         """Spawn the background Node.js bridge process."""
@@ -350,15 +382,80 @@ class CuaReplEngine:
             LOGGER.warning("AppleScript selectMenuItem failed for %s (%s): %s", app_name, path, exc)
             return False
 
+    def _frontmost_is(self, app_name: str) -> bool:
+        """Is ``app_name`` the application that owns the front window right now?
+
+        Asks the host rather than a cached belief, and judges the answer with
+        :func:`app_evidence` — the same matcher the verification layer uses, so
+        the engine and the OODA loop agree about when two names mean one app.
+        That matters here: LaunchServices says "Google Chrome" where the
+        accessibility API says "Chrome", and on a localized desktop neither
+        matches the English name the script wrote, which is why the bundle id
+        is passed alongside.
+        """
+        name, bundle_id = self._frontmost_identity()
+        return app_evidence(app_name, name, bundle_id) is Evidence.CONFIRMED
+
+    def _frontmost_identity(self) -> tuple[str | None, str]:
+        """The frontmost application's name and bundle id, in either shape.
+
+        ``ActuationClient.focused_window`` answers with a validated
+        :class:`FocusedWindow`; a mapping is accepted for the same reason
+        :meth:`_get_app_snapshot` accepts one — the engine is handed whatever
+        driver-like object its caller has. Both identities travel together
+        because either alone can be wrong about which app is in front: the name
+        is localized per desktop, the bundle id is empty for hosts without one.
+        """
+        focused: Any = self.driver_client.focused_window()
+        if isinstance(focused, dict):
+            entry = cast(dict[str, object], focused)
+            raw_name = entry.get("app_name") or entry.get("app")
+            raw_bundle = entry.get("bundle_id")
+            return (
+                str(raw_name) if raw_name is not None else None,
+                str(raw_bundle) if raw_bundle is not None else "",
+            )
+        return focused.app_name, focused.bundle_id
+
     def _ensure_app_active(self, app_name: str) -> None:
-        """Ensure targeted application is frontmost before actuation."""
-        if self._active_app != app_name and self.driver_client:
-            try:
-                self.driver_client.activate_app(app_name)
-                self._active_app = app_name
-                time.sleep(0.05)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("activate_app failed for %s: %s", app_name, exc)
+        """Put the target application in front, and confirm that it got there.
+
+        This used to trust a cache: an app activated once was assumed frontmost
+        for the rest of the engine's life, and a failed activation was logged
+        at warning level while the caller actuated anyway. Both halves are
+        unsafe on a physical host, because a keystroke goes to whoever holds
+        focus when it is posted, not to the application the script named.
+
+        Measured live on macOS (real backend): activate TextEdit, let another
+        application take the front, then call this again — it returned having
+        done nothing, with Notes frontmost. The very next line of the audit
+        script is ``pressKey("Cmd+A")`` followed by ``pressKey("Delete")``,
+        which would have selected and deleted the contents of the user's Notes.
+        None of this is observable against the simulated backend, where the
+        frontmost window is a fixture and every activation succeeds.
+
+        So: observe, act, then observe again — and raise rather than actuate
+        when the target cannot be confirmed in front.
+        """
+        if self.driver_client is None:
+            return
+        if self._frontmost_is(app_name):
+            return
+        try:
+            self.driver_client.activate_app(app_name)
+        except Exception as exc:
+            raise FocusNotAcquiredError(
+                f"cannot actuate in {app_name!r}: activating it failed ({exc})"
+            ) from exc
+        for _ in range(FOCUS_SETTLE_POLLS):
+            time.sleep(FOCUS_SETTLE_INTERVAL_S)
+            if self._frontmost_is(app_name):
+                return
+        raise FocusNotAcquiredError(
+            f"cannot actuate in {app_name!r}: it did not come to the front "
+            f"within {FOCUS_SETTLE_POLLS * FOCUS_SETTLE_INTERVAL_S:.2f}s; "
+            "the keystroke would have gone to whatever is in front instead"
+        )
 
     def _get_app_snapshot(self, app_name: str) -> tuple[AXElement, str]:
         """Fetch accessibility snapshot and window title for an app."""
@@ -366,10 +463,15 @@ class CuaReplEngine:
             return self.snapshot_provider(app_name)
 
         if self.driver_client:
-            # Native driver call
+            # Best-effort, and deliberately *not* routed through
+            # ``_ensure_app_active``. Reading an accessibility tree is
+            # perception, not actuation: the pid lookup below reaches the app
+            # wherever it is, so an app that stays behind another window is
+            # still readable — and background mode depends on exactly that.
+            # A keystroke is the opposite case, which is why only the actuating
+            # callers insist on confirmed focus.
             try:
                 self.driver_client.activate_app(app_name)
-                self._active_app = app_name
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("activate_app failed for %s: %s", app_name, exc)
 
@@ -847,17 +949,26 @@ class CuaReplEngine:
             return None
 
         if method == "getScreenshot":
-            if self.driver_client:
-                try:
-                    if hasattr(self.driver_client, "capture"):
-                        cap = self.driver_client.capture()
-                    else:
-                        cap = self.driver_client.screenshot()
-                    b64 = base64.b64encode(cap.data).decode("ascii")
-                    return f"data:image/png;base64,{b64}"
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.warning("screenshot failed: %s", exc)
-            return "data:image/png;base64,"
+            if self.driver_client is None:
+                raise ScreenCaptureUnavailableError(
+                    "cannot capture the screen: the engine has no driver client"
+                )
+            try:
+                if hasattr(self.driver_client, "capture"):
+                    cap = self.driver_client.capture()
+                else:
+                    cap = self.driver_client.screenshot()
+            except Exception as exc:
+                raise ScreenCaptureUnavailableError(
+                    f"cannot capture the screen: {exc}"
+                ) from exc
+            data: bytes = cap.data
+            if not data:
+                raise ScreenCaptureUnavailableError(
+                    "cannot capture the screen: the driver returned no image data"
+                )
+            b64 = base64.b64encode(data).decode("ascii")
+            return f"data:image/png;base64,{b64}"
 
         if method == "listApps":
             if self.driver_client:

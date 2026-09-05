@@ -19,12 +19,19 @@ class MockDriverClient:
     def __init__(self) -> None:
         self.sent_actions: list[Action] = []
         self.activated_apps: list[str] = []
+        # See the note in test_cua_repl's fake: focus is modelled because the
+        # engine refuses to actuate into an application it cannot confirm.
+        self.frontmost: str = "TextEdit"
 
     def send(self, action: Action) -> None:
         self.sent_actions.append(action)
 
     def activate_app(self, app_name: str) -> None:
         self.activated_apps.append(app_name)
+        self.frontmost = app_name
+
+    def focused_window(self) -> dict[str, Any]:
+        return {"app_name": self.frontmost, "app": self.frontmost, "bundle_id": ""}
 
     def list_apps(self) -> list[str]:
         return ["TextEdit", "Finder"]
