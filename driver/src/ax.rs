@@ -23,7 +23,7 @@
 
 use core::ffi::c_void;
 
-use core_foundation::array::{CFArray, CFArrayRef};
+use core_foundation::array::{CFArray, CFArrayGetTypeID, CFArrayRef};
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
@@ -194,7 +194,14 @@ fn build_tree(
 
     let mut children = Vec::new();
     if depth < max_depth {
-        if let Some(children_attr) = copy_attribute(element, "AXChildren") {
+        // AXChildren is documented as an array, but the attribute comes from
+        // whatever the application chose to implement: a custom control can
+        // hand back a proxy of another type. Casting that to CFArrayRef and
+        // asking for its count reads a foreign layout — a crash inside the
+        // agent's own perception. Check the type before trusting the cast.
+        let children_attr = copy_attribute(element, "AXChildren")
+            .filter(|attr| attr.type_of() == unsafe { CFArrayGetTypeID() });
+        if let Some(children_attr) = children_attr {
             // CFArray does not implement ConcreteCFType, so downcast via the
             // raw ref: wrap the array we already own a reference to.
             let array = unsafe {
@@ -433,20 +440,46 @@ pub fn window_for_pid(pid: i32) -> Option<(u32, CGRect)> {
             CFDictionary::<CFString, CFType>::wrap_under_get_rule(*window as CFDictionaryRef)
         };
         // Layer 0 is an ordinary application window; menus and the Dock are not.
-        if window.find(&layer_key)?.downcast::<CFNumber>()?.to_i32()? != 0 {
+        //
+        // Every lookup below skips the entry rather than returning: `?` here
+        // left the whole function, so a single window missing a key hid every
+        // window behind it in the front-to-back list — including the one the
+        // caller was looking for.
+        let Some(layer) = window.find(&layer_key) else {
+            continue;
+        };
+        let Some(layer) = layer.downcast::<CFNumber>().and_then(|n| n.to_i32()) else {
+            continue;
+        };
+        if layer != 0 {
             continue;
         }
-        if window.find(&pid_key)?.downcast::<CFNumber>()?.to_i32()? != pid {
+        let Some(owner) = window.find(&pid_key) else {
+            continue;
+        };
+        let Some(owner) = owner.downcast::<CFNumber>().and_then(|n| n.to_i32()) else {
+            continue;
+        };
+        if owner != pid {
             continue;
         }
-        let number = window.find(&number_key)?.downcast::<CFNumber>()?.to_i32()? as u32;
-        let bounds_dict = window.find(&bounds_key)?;
-        let bounds = unsafe {
+        let Some(number) = window.find(&number_key) else {
+            continue;
+        };
+        let Some(number) = number.downcast::<CFNumber>().and_then(|n| n.to_i32()) else {
+            continue;
+        };
+        let Some(bounds_dict) = window.find(&bounds_key) else {
+            continue;
+        };
+        let Some(bounds) = (unsafe {
             CGRect::from_dict_representation(&CFDictionary::wrap_under_get_rule(
                 bounds_dict.as_CFTypeRef() as CFDictionaryRef,
             ))
-        }?;
-        return Some((number, bounds));
+        }) else {
+            continue;
+        };
+        return Some((number as u32, bounds));
     }
     None
 }
@@ -480,15 +513,30 @@ fn frontmost_window_owner() -> Option<(i32, String)> {
             CFDictionary::<CFString, CFType>::wrap_under_get_rule(*window as CFDictionaryRef)
         };
         // Layer 0 = normal application windows; skip the menu bar, Dock, etc.
-        let layer = window.find(&layer_key)?;
-        if layer.downcast::<CFNumber>()?.to_i32()? != 0 {
+        // Skip on a missing key rather than returning: one malformed entry
+        // must not hide the frontmost window sitting behind it.
+        let Some(layer) = window.find(&layer_key) else {
+            continue;
+        };
+        let Some(layer) = layer.downcast::<CFNumber>().and_then(|n| n.to_i32()) else {
+            continue;
+        };
+        if layer != 0 {
             continue;
         }
-        let pid = window.find(&pid_key)?;
-        let pid = pid.downcast::<CFNumber>()?.to_i32()?;
-        let name = window.find(&name_key)?;
-        let name = name.downcast::<CFString>()?.to_string();
-        return Some((pid, name));
+        let Some(pid) = window.find(&pid_key) else {
+            continue;
+        };
+        let Some(pid) = pid.downcast::<CFNumber>().and_then(|n| n.to_i32()) else {
+            continue;
+        };
+        let Some(name) = window.find(&name_key) else {
+            continue;
+        };
+        let Some(name) = name.downcast::<CFString>() else {
+            continue;
+        };
+        return Some((pid, name.to_string()));
     }
     None
 }
