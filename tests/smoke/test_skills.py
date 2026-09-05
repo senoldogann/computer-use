@@ -104,9 +104,22 @@ def test_distill_signature_abstracts_dynamic_operands() -> None:
             step_descriptions=(f"compute {text}", "submit with Return"),
         )
 
+    def calc_escape() -> Trajectory:
+        steps = (
+            TypeText(type="type_text", text="47x23"),
+            PressHotkey(type="press_hotkey", key="escape", modifiers=[]),
+        )
+        return Trajectory(
+            app="Calculator",
+            description="cancel",
+            steps=steps,
+        )
+
     assert signature_of(calc("47x23")) == signature_of(calc("12x8"))
-    # Words still distinguish: different verbs are different workflows.
-    assert signature_of(calc("47x23")) != signature_of(calc("hello"))
+    # Typed text is operand: typing different text shares the workflow signature.
+    assert signature_of(calc("47x23")) == signature_of(calc("hello"))
+    # Action sequence parameters (like hotkey) still distinguish different workflows.
+    assert signature_of(calc("47x23")) != signature_of(calc_escape())
     # ...and the recorded body keeps the literal operands, not the template.
     result = distill(calc("47x23"), known_signatures=set())
     assert result.kind == "skill" and result.definition is not None
@@ -117,8 +130,7 @@ def test_distilled_tags_name_every_visited_application() -> None:
     """A Calculator-then-Notes chain must answer to both names.
 
     The run's primary app is only where it started; retrieval by the second
-    app's name is how a later Notes search finds the chain.
-    """
+    app's name is how a later Notes search finds the chain."""
     steps = (
         ActivateApp(type="activate_app", app="Notes"),
         TypeText(type="type_text", text="memo"),
@@ -150,14 +162,14 @@ def test_distill_deduplicates_identical_flow() -> None:
     assert second.kind == "duplicate"
 
 
-def test_distill_distinguishes_clicks_with_different_intents() -> None:
+def test_distill_distinguishes_clicks_with_different_semantic_params() -> None:
     steps_a = (
-        MouseClick(type="mouse_click", x=10, y=20),
-        MouseClick(type="mouse_click", x=30, y=40),
+        MouseClick(type="mouse_click", x=10, y=20, button="left"),
+        MouseClick(type="mouse_click", x=30, y=40, button="left"),
     )
     steps_b = (
-        MouseClick(type="mouse_click", x=100, y=200),
-        MouseClick(type="mouse_click", x=300, y=400),
+        MouseClick(type="mouse_click", x=100, y=200, button="right"),
+        MouseClick(type="mouse_click", x=300, y=400, button="right"),
     )
     traj_a = Trajectory(
         app="Chrome",
@@ -169,7 +181,7 @@ def test_distill_distinguishes_clicks_with_different_intents() -> None:
         app="Chrome",
         description="flow b",
         steps=steps_b,
-        step_descriptions=("click download", "click confirm"),
+        step_descriptions=("context menu", "context menu"),
     )
 
     first = distill(traj_a, known_signatures=set())
@@ -177,6 +189,118 @@ def test_distill_distinguishes_clicks_with_different_intents() -> None:
     second = distill(traj_b, known_signatures={first.signature or ""})
     assert second.kind == "skill"
     assert second.signature != first.signature
+
+
+# --- skill signature deduplication & distinctness (fix/skill-signature-forking)
+
+
+def test_distill_notes_same_flow_different_text_and_intent_shares_signature() -> None:
+    """1. Same Notes flow with different pasted text and different intent produces the same signature."""
+    flow_btc = Trajectory(
+        app="Notes",
+        description="Find Bitcoin price on web, write to note",
+        steps=(
+            MouseClick(type="mouse_click", x=100, y=50),
+            MouseClick(type="mouse_click", x=200, y=200),
+            PressHotkey(type="press_hotkey", key="a", modifiers=["command"]),
+            TypeText(type="type_text", text="Bitcoin price: $65,769.67 USD"),
+        ),
+        step_descriptions=(
+            "Click new note button",
+            "Focus editor",
+            "Select all text",
+            "Enter the retrieved Bitcoin price into note",
+        ),
+    )
+    flow_tokyo = Trajectory(
+        app="Notes",
+        description="Find Tokyo time on web, write to note",
+        steps=(
+            MouseClick(type="mouse_click", x=100, y=50),
+            MouseClick(type="mouse_click", x=200, y=200),
+            PressHotkey(type="press_hotkey", key="a", modifiers=["command"]),
+            TypeText(type="type_text", text="Tokyo time: 09:50:58 AM JST"),
+        ),
+        step_descriptions=(
+            "Open a new note",
+            "Click inside text area",
+            "Cmd-A existing content",
+            "Enter the retrieved current Tokyo time into note",
+        ),
+    )
+    assert signature_of(flow_btc) == signature_of(flow_tokyo)
+
+
+def test_distill_notes_new_vs_delete_produces_distinct_signatures() -> None:
+    """2. Notes "new note" flow vs "delete note" flow produces different signatures."""
+    flow_new = Trajectory(
+        app="Notes",
+        description="new note flow",
+        steps=(
+            MouseClick(type="mouse_click", x=100, y=50),
+            MouseClick(type="mouse_click", x=200, y=200),
+            PressHotkey(type="press_hotkey", key="a", modifiers=["command"]),
+            TypeText(type="type_text", text="memo"),
+        ),
+        step_descriptions=("new note", "focus editor", "select all", "type memo"),
+    )
+    flow_delete = Trajectory(
+        app="Notes",
+        description="delete note flow",
+        steps=(
+            MouseClick(type="mouse_click", x=100, y=50),
+            PressHotkey(type="press_hotkey", key="delete", modifiers=["command"]),
+        ),
+        step_descriptions=("select note", "delete note with Cmd+Delete"),
+    )
+    assert signature_of(flow_new) != signature_of(flow_delete)
+
+
+def test_distill_same_flow_different_app_produces_distinct_signatures() -> None:
+    """3. Same flow in a different app produces different signatures."""
+    steps = (
+        MouseClick(type="mouse_click", x=100, y=50),
+        MouseClick(type="mouse_click", x=200, y=200),
+        PressHotkey(type="press_hotkey", key="a", modifiers=["command"]),
+        TypeText(type="type_text", text="sample text"),
+    )
+    traj_notes = Trajectory(app="Notes", description="paste in Notes", steps=steps)
+    traj_textedit = Trajectory(app="TextEdit", description="paste in TextEdit", steps=steps)
+    assert signature_of(traj_notes) != signature_of(traj_textedit)
+
+
+def test_distill_second_call_same_flow_yields_duplicate() -> None:
+    """4. distill() called a second time with the same flow yields kind == "duplicate"."""
+    flow_first = Trajectory(
+        app="Notes",
+        description="Find Bitcoin price on web, write to note",
+        steps=(
+            MouseClick(type="mouse_click", x=100, y=50),
+            MouseClick(type="mouse_click", x=200, y=200),
+            PressHotkey(type="press_hotkey", key="a", modifiers=["command"]),
+            TypeText(type="type_text", text="Bitcoin price: $65,769.67 USD"),
+        ),
+        step_descriptions=("new note", "focus editor", "select all", "paste btc"),
+    )
+    flow_second = Trajectory(
+        app="Notes",
+        description="Find Tokyo time on web, write to note",
+        steps=(
+            MouseClick(type="mouse_click", x=100, y=50),
+            MouseClick(type="mouse_click", x=200, y=200),
+            PressHotkey(type="press_hotkey", key="a", modifiers=["command"]),
+            TypeText(type="type_text", text="Tokyo time: 09:50:58 AM JST"),
+        ),
+        step_descriptions=("open note", "click editor", "cmd-a", "paste tokyo"),
+    )
+    first_result = distill(flow_first, known_signatures=set())
+    assert first_result.kind == "skill"
+    assert first_result.definition is not None
+    assert first_result.signature is not None
+
+    second_result = distill(flow_second, known_signatures={first_result.signature})
+    assert second_result.kind == "duplicate"
+    assert second_result.signature == first_result.signature
 
 
 def test_registry_round_trip_on_disk(tmp_path: Path) -> None:
