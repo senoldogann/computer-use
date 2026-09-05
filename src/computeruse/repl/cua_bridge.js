@@ -56,17 +56,26 @@ function parseTargetCoord(target) {
   let elementIndex = null;
   let x = null;
   let y = null;
+  let query = null;
+  let role = null;
+  let title = null;
 
   if (typeof target === "number") {
     elementIndex = target;
+  } else if (typeof target === "string") {
+    query = target;
+    title = target;
   } else if (Array.isArray(target) && target.length === 2) {
     [x, y] = target;
   } else if (target && typeof target === "object") {
-    elementIndex = target.elementIndex ?? null;
+    elementIndex = target.elementIndex ?? target.index ?? null;
     x = target.x ?? null;
     y = target.y ?? null;
+    query = target.query ?? null;
+    role = target.role ?? null;
+    title = target.title ?? target.text ?? target.label ?? null;
   }
-  return { elementIndex, x, y };
+  return { elementIndex, x, y, query, role, title };
 }
 
 class AppTarget {
@@ -85,14 +94,54 @@ class AppTarget {
     return res;
   }
 
+  async find(target) {
+    const parsed = parseTargetCoord(target);
+    return await sendRpc("findElement", {
+      app: this.name,
+      ...parsed,
+    });
+  }
+
+  async findAll(target) {
+    const parsed = parseTargetCoord(target);
+    return await sendRpc("findAllElements", {
+      app: this.name,
+      ...parsed,
+    });
+  }
+
+  async hasElement(target) {
+    try {
+      const el = await this.find(target);
+      return !!el;
+    } catch {
+      return false;
+    }
+  }
+
+  async waitForElement(target, options = {}) {
+    const timeoutMs = options.timeoutMs ?? 5000;
+    const intervalMs = options.intervalMs ?? 150;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const el = await this.find(target);
+        if (el) return el;
+      } catch {}
+      await cua.sleep(intervalMs);
+    }
+    throw new Error(
+      `Timed out waiting for element matching ${JSON.stringify(target)} in undefined after ${timeoutMs}ms`
+    );
+  }
+
   async click(target, options = {}) {
-    const { elementIndex, x, y } = parseTargetCoord(target);
+    const parsed = parseTargetCoord(target);
 
     return await sendRpc("click", {
       app: this.name,
-      elementIndex,
-      x,
-      y,
+      ...parsed,
       mouseButton: options.mouseButton || "left",
       clickCount: options.clickCount || 1,
     });
@@ -203,32 +252,54 @@ globalThis.getApp = globalThis.cua.getApp;
 globalThis.sleep = globalThis.cua.sleep;
 globalThis.wait = globalThis.cua.wait;
 
-function transformCodeForRepl(rawCode) {
-  let trimmed = rawCode.trim();
+function prepareCode(code) {
+  const trimmed = code.trim();
   if (!trimmed) return trimmed;
 
-  // Split on semicolons or newlines to isolate statements
-  const stmts = trimmed.split(/;|\n/).map((s) => s.trim()).filter(Boolean);
-  if (stmts.length === 0) return trimmed;
-
-  const lastStmt = stmts[stmts.length - 1];
-  const isDeclOrControl = /^(var|let|const|return|if|for|while|try|catch|throw|switch)\b/.test(lastStmt);
-
-  if (!isDeclOrControl) {
-    const idx = trimmed.lastIndexOf(lastStmt);
-    if (idx !== -1) {
-      trimmed = trimmed.substring(0, idx) + "return (" + lastStmt + ");";
-    }
+  // If code already contains an explicit return, leave it untouched
+  if (/\breturn\b/.test(trimmed)) {
+    return trimmed;
   }
 
-  return trimmed;
+  // Strip trailing semicolons
+  let clean = trimmed.replace(/;+\s*$/, "");
+
+  // Find last semicolon or line break
+  const lastSemi = clean.lastIndexOf(";");
+  const lastNewline = clean.lastIndexOf("\n");
+  const cutIdx = Math.max(lastSemi, lastNewline);
+
+  const declRegex = /^(const|let|var|if|for|while|try|catch|throw|switch|class|function)\b/;
+
+  if (cutIdx === -1) {
+    if (!declRegex.test(clean)) {
+      return `return (${clean});`;
+    }
+    return clean;
+  }
+
+  const head = clean.slice(0, cutIdx + 1);
+  const tail = clean.slice(cutIdx + 1).trim();
+
+  if (tail && !declRegex.test(tail)) {
+    return `${head}\nreturn (${tail});`;
+  }
+
+  return clean;
 }
 
 async function runEval(callId, code) {
   try {
-    const preparedCode = transformCodeForRepl(code);
+    const preparedCode = prepareCode(code);
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    const fn = new AsyncFunction("cua", preparedCode);
+    let fn;
+
+    try {
+      fn = new AsyncFunction("cua", preparedCode);
+    } catch {
+      fn = new AsyncFunction("cua", code);
+    }
+
     const evalResult = await fn(globalThis.cua);
 
     let content = "";

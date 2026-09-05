@@ -369,14 +369,18 @@ class CuaReplEngine:
     def _resolve_target_point(
         self,
         app_name: str,
-        elem_index: int | None,
-        x: int | None,
-        y: int | None,
+        elem_index: int | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        query: str | None = None,
+        role: str | None = None,
+        title: str | None = None,
     ) -> tuple[int | None, int | None, str | None]:
-        """Resolve element coordinates and target label with self-healing stale locator recovery."""
+        """Resolve element coordinates and target label with self-healing and smart locators."""
+        tracker = self._get_tracker(app_name)
+
         if elem_index is not None:
             idx = int(elem_index)
-            tracker = self._get_tracker(app_name)
             elem = tracker.get_element_by_index(idx)
             if elem:
                 label = elem.title or elem.role
@@ -391,7 +395,6 @@ class CuaReplEngine:
                     historical.role,
                     historical.title,
                 )
-                # Refresh snapshot and re-render
                 snap, win_title = self._get_app_snapshot(app_name)
                 tracker.render_state(snap, win_title)
                 healed = tracker.find_matching_element(historical.role, historical.title)
@@ -408,6 +411,29 @@ class CuaReplEngine:
             raise ValueError(
                 f"Element index [{idx}] was not found or has become stale in '{app_name}'. "
                 f"Call `await app.getAXState()` to inspect current layout."
+            )
+
+        # Smart semantic locator: Match by query, title, or role
+        if query is not None or title is not None or role is not None:
+            matched = tracker.find_element(role=role, title=title, query=query)
+            if not matched:
+                snap, win_title = self._get_app_snapshot(app_name)
+                tracker.render_state(snap, win_title)
+                matched = tracker.find_element(role=role, title=title, query=query)
+
+            if matched:
+                LOGGER.info(
+                    "Smart locator matched element [%d] ('%s' %s) at (%d, %d)",
+                    matched.index,
+                    matched.title,
+                    matched.role,
+                    matched.centre_x,
+                    matched.centre_y,
+                )
+                return matched.centre_x, matched.centre_y, matched.title or matched.role
+
+            raise ValueError(
+                f"Could not find element matching query={query!r}, title={title!r}, role={role!r} in '{app_name}'."
             )
 
         return x, y, None
@@ -496,14 +522,53 @@ class CuaReplEngine:
             self._last_content = state_text
             return state_text
 
+        if method == "findElement":
+            app_name = str(params["app"])
+            tracker = self._get_tracker(app_name)
+            elem = tracker.find_element(
+                role=cast(str | None, params.get("role")),
+                title=cast(str | None, params.get("title")),
+                query=cast(str | None, params.get("query")),
+            )
+            if not elem:
+                snap, win_title = self._get_app_snapshot(app_name)
+                tracker.render_state(snap, win_title)
+                elem = tracker.find_element(
+                    role=cast(str | None, params.get("role")),
+                    title=cast(str | None, params.get("title")),
+                    query=cast(str | None, params.get("query")),
+                )
+            return elem.to_dict() if elem else None
+
+        if method == "findAllElements":
+            app_name = str(params["app"])
+            tracker = self._get_tracker(app_name)
+            elems = tracker.find_elements(
+                role=cast(str | None, params.get("role")),
+                title=cast(str | None, params.get("title")),
+                query=cast(str | None, params.get("query")),
+            )
+            if not elems:
+                snap, win_title = self._get_app_snapshot(app_name)
+                tracker.render_state(snap, win_title)
+                elems = tracker.find_elements(
+                    role=cast(str | None, params.get("role")),
+                    title=cast(str | None, params.get("title")),
+                    query=cast(str | None, params.get("query")),
+                )
+            return [e.to_dict() for e in elems]
+
         if method == "click":
-            app_name = params["app"]
+            app_name = str(params["app"])
             self._ensure_app_active(app_name)
             target_x, target_y, target_label = self._resolve_target_point(
                 app_name,
-                params.get("elementIndex"),
-                params.get("x"),
-                params.get("y"),
+                elem_index=cast(int | None, params.get("elementIndex")),
+                x=cast(int | None, params.get("x")),
+                y=cast(int | None, params.get("y")),
+                query=cast(str | None, params.get("query")),
+                role=cast(str | None, params.get("role")),
+                title=cast(str | None, params.get("title")),
             )
 
             if target_x is not None and target_y is not None:
@@ -561,13 +626,16 @@ class CuaReplEngine:
             return None
 
         if method == "scroll":
-            app_name = params["app"]
+            app_name = str(params["app"])
             self._ensure_app_active(app_name)
             target_x, target_y, _ = self._resolve_target_point(
                 app_name,
-                params.get("elementIndex"),
-                params.get("x"),
-                params.get("y"),
+                elem_index=cast(int | None, params.get("elementIndex")),
+                x=cast(int | None, params.get("x")),
+                y=cast(int | None, params.get("y")),
+                query=cast(str | None, params.get("query")),
+                role=cast(str | None, params.get("role")),
+                title=cast(str | None, params.get("title")),
             )
 
             if target_x is not None and target_y is not None and self.driver_client:

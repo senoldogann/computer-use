@@ -59,6 +59,21 @@ class IndexedNode:
         """Centre Y point in logical screen coordinates."""
         return self.y + self.height // 2
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "index": self.index,
+            "role": self.role,
+            "title": self.title,
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "centre_x": self.centre_x,
+            "centre_y": self.centre_y,
+            "value": self.value,
+            "focused": self.focused,
+        }
+
     @property
     def signature(self) -> str:
         """Structural signature used to match elements across state updates."""
@@ -151,9 +166,77 @@ class AXStateTracker:
         clean_title = title.strip().casefold()
         clean_role = role.strip().casefold()
         for elem in self.current_index_map.values():
-            if elem.role.strip().casefold() == clean_role and elem.title.strip().casefold() == clean_title:
+            norm_role = elem.role.removeprefix("AX").casefold()
+            elem_role = elem.role.strip().casefold()
+            if (elem_role == clean_role or norm_role == clean_role) and elem.title.strip().casefold() == clean_title:
                 return elem
         return None
+
+    def find_elements(
+        self,
+        *,
+        role: str | None = None,
+        title: str | None = None,
+        query: str | None = None,
+    ) -> list[IndexedNode]:
+        """Find live elements matching criteria with fuzzy ranking."""
+        scored: list[tuple[int, IndexedNode]] = []
+        clean_role = role.strip().removeprefix("AX").casefold() if role else None
+        clean_title = title.strip().casefold() if title else None
+        clean_query = query.strip().casefold() if query else None
+
+        for elem in self.current_index_map.values():
+            score = 0
+            elem_norm_role = elem.role.strip().removeprefix("AX").casefold()
+            elem_title = elem.title.strip().casefold()
+            elem_val = (elem.value or "").strip().casefold()
+
+            # Role filter
+            if clean_role is not None:
+                if elem_norm_role == clean_role:
+                    score += 30
+                else:
+                    continue  # Role did not match
+
+            # Title filter
+            if clean_title is not None:
+                if elem_title == clean_title:
+                    score += 70
+                elif clean_title in elem_title:
+                    score += 40
+                else:
+                    continue  # Title did not match
+
+            # Query filter (matches either title or value or role)
+            if clean_query is not None:
+                if elem_title == clean_query:
+                    score += 100
+                elif clean_query in elem_title:
+                    score += 60
+                elif elem_val and clean_query in elem_val:
+                    score += 40
+                elif clean_query in elem_norm_role:
+                    score += 20
+                else:
+                    continue  # Query did not match
+
+            if score > 0 or (role is None and title is None and query is None):
+                scored.append((score, elem))
+
+        # Sort descending by score, ascending by index for stability
+        scored.sort(key=lambda s: (-s[0], s[1].index))
+        return [elem for _, elem in scored]
+
+    def find_element(
+        self,
+        *,
+        role: str | None = None,
+        title: str | None = None,
+        query: str | None = None,
+    ) -> IndexedNode | None:
+        """Find top-ranked element matching search criteria."""
+        matches = self.find_elements(role=role, title=title, query=query)
+        return matches[0] if matches else None
 
     def render_state(
         self,
