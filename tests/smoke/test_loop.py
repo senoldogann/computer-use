@@ -756,3 +756,25 @@ def test_auditor_accepts_opened_search_result_without_visible_serp() -> None:
 
     verdict = completion_auditor(model, app="Google Chrome")(state, "opened the top result")
     assert verdict.satisfied is True
+
+
+def test_decide_step_preserves_the_navigation_trail() -> None:
+    """The trail must survive DECIDE, or it can never grow past one entry.
+
+    OBSERVE reads ``state.observed_trail`` back in and extends it, so a DECIDE
+    that rebuilt the state without it reset the trail every cycle. The
+    completion auditor reads that trail to accept a search result and the page
+    it opened as one piece of evidence (PR #17); with a one-entry trail it asks
+    to see both on a screen that can only show one, rejects a finished job, and
+    the agent repeats the physical work.
+    """
+    state = WorkingState(
+        goal="find the story and open it",
+        observed_trail=("Safari — SERP: results for X", "Safari — Article: the opened story"),
+    )
+    turn = AgentTurn(
+        thought="t",
+        sub_goal="s",
+        action=MouseClick(type="mouse_click", x=10, y=10, button="left", click_count=1),
+    )
+    assert decide_step(state, turn).state.observed_trail == state.observed_trail
