@@ -202,6 +202,9 @@ class AgentConfig:
     # started as subprocesses, and turning them on should be a decision rather
     # than a surprise.
     enable_mcp: bool = False
+    # Whether the CUA REPL execution engine is enabled inside the OODA loop
+    # for direct JavaScript Code-as-Action evaluation.
+    enable_cua_repl: bool = True
     # Whether the OBSERVE screenshot is annotated with the AX element boxes
     # (Set-of-Marks). ``click_mark`` itself does not depend on this — it reads
     # the element list, which exists with vision off entirely.
@@ -928,7 +931,19 @@ class Agent:
                     LOGGER.info("action authorised by %s", verdict.reason)
                 return verdict
 
+            cua_repl_engine = None
+            if self._config.enable_cua_repl:
+                from computeruse.repl.engine import CuaReplEngine
+
+                cua_repl_engine = CuaReplEngine(
+                    driver_client=client,
+                    autonomy_level=self._config.autonomy_level,
+                    grant_store=grant_store,
+                )
+                cua_repl_engine.start()
+
             runner = OodaRunner(
+                cua_repl=cua_repl_engine,
                 provider=self._config.provider,
                 execute_physical=client.send,
                 kill_switch=kill_switch,
@@ -986,6 +1001,8 @@ class Agent:
             try:
                 state = runner.run(self._config.goal)
             finally:
+                if cua_repl_engine is not None:
+                    cua_repl_engine.stop()
                 # MCP servers are other people's programs, started as our
                 # subprocesses. Nothing closed them: a run that ended any way
                 # other than cleanly — kill switch, budget stop, a raise from

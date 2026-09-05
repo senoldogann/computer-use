@@ -85,7 +85,13 @@ def index_accessible_elements(root: AXElement, start_index: int = 0) -> list[Ind
 
     def _traverse(node: AXElement) -> None:
         nonlocal current_idx
-        is_interactive = node.role in INTERACTIVE_ROLES or node.role in {"Window", "Sheet", "Dialog"}
+        norm_role = node.role.removeprefix("AX") if node.role else ""
+        is_interactive = (
+            node.role in INTERACTIVE_ROLES
+            or norm_role in INTERACTIVE_ROLES
+            or node.role in {"Window", "Sheet", "Dialog"}
+            or norm_role in {"Window", "Sheet", "Dialog"}
+        )
         if is_interactive and (node.width > 0 or node.height > 0):
             indexed.append(
                 IndexedNode(

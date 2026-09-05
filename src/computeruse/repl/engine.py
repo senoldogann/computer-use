@@ -111,6 +111,10 @@ class CuaReplResult:
     content: str
     error: str | None = None
 
+    @property
+    def is_error(self) -> bool:
+        return self.status == "failed" or bool(self.error)
+
     def to_mcp_tool_call(
         self,
         call_id: str,
@@ -328,9 +332,30 @@ class CuaReplEngine:
 
             if pid is not None:
                 try:
-                    snap = self.driver_client.ax_snapshot(pid=pid)
-                    win = self.driver_client.focused_window()
-                    title = (win.window_title or win.app_name) if win else app_name
+                    snap_raw: Any = self.driver_client.ax_snapshot(pid=pid)
+                    if isinstance(snap_raw, (tuple, list)) and len(cast(tuple[object, ...], snap_raw)) == 2:
+                        raw_snap, raw_title = cast(tuple[object, object], snap_raw)
+                        return cast(AXElement, raw_snap), str(raw_title or app_name)
+                    snap: AXElement = cast(AXElement, snap_raw)
+                    win: Any = self.driver_client.focused_window()
+                    if isinstance(win, dict):
+                        win_dict = cast(dict[str, object], win)
+                        title = str(
+                            win_dict.get("title")
+                            or win_dict.get("window_title")
+                            or win_dict.get("app")
+                            or win_dict.get("app_name")
+                            or app_name
+                        )
+                    elif win is not None:
+                        title = str(
+                            getattr(win, "window_title", None)
+                            or getattr(win, "title", None)
+                            or getattr(win, "app_name", None)
+                            or app_name
+                        )
+                    else:
+                        title = app_name
                     return snap, title
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("ax_snapshot failed for pid %s: %s", pid, exc)

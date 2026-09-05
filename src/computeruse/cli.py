@@ -176,6 +176,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Start the CUA REPL MCP server (serving standard cua_repl / js tool over stdio).",
     )
     parser.add_argument(
+        "--no-cua-repl",
+        action="store_true",
+        help="Disable CUA REPL Code-as-Action execution inside the OODA loop.",
+    )
+    parser.add_argument(
         "--goal",
         default=None,
         help="The task to accomplish. Required unless --autonomous is given, in "
@@ -865,6 +870,7 @@ def build_config(
         display_id=getattr(args, "display", 0),
         background_actuation=getattr(args, "background", False),
         enable_mcp=getattr(args, "mcp", False),
+        enable_cua_repl=not getattr(args, "no_cua_repl", False),
         # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
         # on a *real* backend is activated (the simulated backend never touches
         # the host — Law 1). An auto-discovered app is never activated:

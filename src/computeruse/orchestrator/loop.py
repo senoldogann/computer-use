@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     # package __init__ eagerly imports this module — importing it at runtime
     # here would create a cycle (loop -> memory -> orchestrator -> loop).
     from computeruse.memory.schemas import EpisodeOutcome
+    from computeruse.repl.engine import CuaReplEngine
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -1172,6 +1173,8 @@ class OodaRunner:
     #: the capability is absent, which the model is told rather than left to
     #: discover by calling something that cannot work.
     mcp: McpRegistry | None = None
+    #: CUA REPL execution engine for direct Code-as-Action JavaScript evaluation.
+    cua_repl: CuaReplEngine | None = None
     #: Optional quiet text path: put a value into the target app's focused
     #: element, returning whether it was accepted. Without it, background mode
     #: covers clicks only — typing falls back to the global event stream, the
@@ -3061,6 +3064,12 @@ class OodaRunner:
                 text = fetch_page(action.url)
                 return f"web_fetch {action.url}:\n{text}"
             if isinstance(action, CallTool):
+                if action.tool in ("js", "cua_repl.js", "cua_repl", "eval_js") and self.cua_repl is not None:
+                    code = str(action.arguments.get("code", ""))
+                    res = self.cua_repl.execute(code)
+                    self._consecutive_search_misses = 0
+                    status = "failed" if res.is_error else "returned"
+                    return f"call_tool {action.tool} {status}:\n{res.content}"
                 if self.mcp is None:
                     return (
                         "call_tool is unavailable: no MCP servers are configured. "
