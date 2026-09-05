@@ -78,6 +78,42 @@ function parseTargetCoord(target) {
   return { elementIndex, x, y, query, role, title };
 }
 
+/**
+ * One found element, plus the ability to photograph itself.
+ *
+ * `find()` used to answer with a bare record, so a model that wanted to *look*
+ * at what it had found had to read the bounds back out, do rectangle
+ * arithmetic in JavaScript and call `cropScreenshot` — or, far more often,
+ * call `getScreenshot()` and pay for the whole display. `crop()` closes that
+ * gap: the element already knows where it is.
+ */
+class ElementHandle {
+  constructor(appName, record) {
+    Object.assign(this, record);
+    Object.defineProperty(this, "_appName", { value: appName, enumerable: false });
+  }
+
+  /**
+   * A base64 PNG data URI of just this element.
+   *
+   * `padding` (logical points, default 8) widens the crop so the element is
+   * shown with enough of its surroundings to be recognisable — a checkbox
+   * cropped to its own bounds is a square with no label.
+   */
+  async crop(options = {}) {
+    return await sendRpc("cropScreenshot", {
+      app: this._appName,
+      bounds: { x: this.x, y: this.y, width: this.width, height: this.height },
+      padding: options.padding ?? 8,
+    });
+  }
+
+  toJSON() {
+    const { x, y, width, height, role, title, value, index, focused } = this;
+    return { x, y, width, height, role, title, value, index, focused };
+  }
+}
+
 class AppTarget {
   constructor(appId, appName, initialAXState) {
     this.id = appId;
@@ -96,18 +132,20 @@ class AppTarget {
 
   async find(target) {
     const parsed = parseTargetCoord(target);
-    return await sendRpc("findElement", {
+    const record = await sendRpc("findElement", {
       app: this.name,
       ...parsed,
     });
+    return record ? new ElementHandle(this.name, record) : null;
   }
 
   async findAll(target) {
     const parsed = parseTargetCoord(target);
-    return await sendRpc("findAllElements", {
+    const records = await sendRpc("findAllElements", {
       app: this.name,
       ...parsed,
     });
+    return (records || []).map((record) => new ElementHandle(this.name, record));
   }
 
   async hasElement(target) {
@@ -160,10 +198,11 @@ class AppTarget {
     });
   }
 
-  async cropScreenshot(bounds) {
+  async cropScreenshot(bounds, options = {}) {
     return await sendRpc("cropScreenshot", {
       app: this.name,
       bounds,
+      padding: options.padding ?? 0,
     });
   }
 

@@ -229,7 +229,29 @@ def test_real_life_cua_repl_textedit_e2e(tmp_path: Path) -> None:
             "so a grant to another build does not carry over)."
         )
 
-        # Call 5: clear the scratch document. Safe only because the window is
+        # Call 5: photograph one element instead of the display. This is the
+        # saving the visual-confirmation path exists for, measured rather than
+        # asserted in the abstract.
+        content5 = _run_script(
+            engine,
+            'var a = await cua.getApp("TextEdit");\n'
+            "await a.getAXState({disableDiffing: true});\n"
+            'var el = await a.find({role: "AXTextArea"});\n'
+            "if (!el) return JSON.stringify({found: false});\n"
+            "var uri = await el.crop();\n"
+            "return JSON.stringify({found: true, uriLength: uri.length, "
+            'prefix: uri.slice(0, 22)});',
+            "Crop one element",
+        )
+        crop_report = json.loads(content5.strip())
+        assert crop_report["found"], "no text area in the live TextEdit window"
+        assert crop_report["prefix"] == "data:image/png;base64,"
+        assert crop_report["uriLength"] < int(content4.strip()) / 10, (
+            f"element crop is {crop_report['uriLength']} chars against a "
+            f"{content4.strip()}-char frame; the saving is not there"
+        )
+
+        # Call 6: clear the scratch document. Safe only because the window is
         # the one this test opened — and because the engine now refuses to post
         # a keystroke into an application it cannot confirm is frontmost.
         _run_script(
@@ -240,13 +262,13 @@ def test_real_life_cua_repl_textedit_e2e(tmp_path: Path) -> None:
             "await a.getAXState();",
             "Clear the scratch document",
         )
-        content5 = _run_script(
+        content6 = _run_script(
             engine,
             'var a = await cua.getApp("TextEdit");\n'
             "await a.getAXState({disableDiffing: true});",
             "Confirm the document is empty",
         )
-        assert typed not in content5, "the text survived select-all + delete"
+        assert typed not in content6, "the text survived select-all + delete"
     finally:
         if client is not None:
             # Put the desktop back, using the driver rather than AppleScript.

@@ -6,11 +6,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from smoke.cua_fakes import fake_capture
+
 from computeruse.orchestrator.schemas import Action, MouseClick
 from computeruse.repl.engine import CuaReplEngine
 from computeruse.security.autonomy import AutonomyLevel
 from computeruse.security.grants import CapabilityGrant, GrantStore
 from computeruse.vision.ax import AXElement
+from computeruse.vision.capture import ScreenCapture
 
 
 class MockDriverClient:
@@ -36,11 +39,8 @@ class MockDriverClient:
     def list_apps(self) -> list[str]:
         return ["TextEdit", "Finder"]
 
-    def screenshot(self) -> Any:
-        class FakeCap:
-            data = b"fake_png_data"
-
-        return FakeCap()
+    def capture(self) -> ScreenCapture:
+        return fake_capture()
 
 
 def test_cua_repl_security_blocks_destructive_click_without_grant() -> None:

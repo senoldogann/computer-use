@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from smoke.cua_fakes import fake_capture
+
 from computeruse.orchestrator.schemas import (
     Action,
     ClipboardPaste,
@@ -20,6 +22,7 @@ from computeruse.repl.engine import (
     parse_hotkey_action,
 )
 from computeruse.vision.ax import AXElement
+from computeruse.vision.capture import ScreenCapture
 
 
 class MockDriverClient:
@@ -46,11 +49,8 @@ class MockDriverClient:
     def list_apps(self) -> list[str]:
         return ["TextEdit", "Safari", "Finder"]
 
-    def screenshot(self) -> Any:
-        class FakeCap:
-            data = b"fake_png_data"
-
-        return FakeCap()
+    def capture(self) -> ScreenCapture:
+        return fake_capture()
 
 
 def test_cua_repl_result_mcp_json_contract() -> None:

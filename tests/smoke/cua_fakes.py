@@ -16,6 +16,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+from computeruse.vision.capture import ScreenCapture
+
 
 def model_focus(mock_client: MagicMock) -> None:
     """Make ``activate_app`` move the mock's frontmost window (in place).
@@ -31,3 +33,23 @@ def model_focus(mock_client: MagicMock) -> None:
         window["app"] = app_name
 
     mock_client.activate_app.side_effect = _activate
+
+
+def fake_capture(width: int = 8, height: int = 4) -> ScreenCapture:
+    """A small but *real* BGRA frame.
+
+    The fakes used to answer ``capture()`` with an object carrying only
+    ``.data``, which was enough while the engine base64'd those bytes straight
+    into a ``data:image/png;base64,`` URI — a URI that never held a PNG. Now
+    that the bytes are actually encoded, a capture has to be a capture:
+    correct geometry, correct scale, and ``width * height * 4`` bytes.
+    """
+    return ScreenCapture(
+        display_id=0,
+        width=width,
+        height=height,
+        scale=2.0,
+        origin_x=0.0,
+        origin_y=0.0,
+        data=bytes([32, 64, 96, 255]) * (width * height),
+    )

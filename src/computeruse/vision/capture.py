@@ -208,6 +208,30 @@ def crop_capture(capture: ScreenCapture, rect: Rect) -> ScreenCapture:
     )
 
 
+def logical_region_to_pixels(capture: ScreenCapture, region: Rect) -> Rect:
+    """Rewrite a global logical-point region into a capture's pixel grid (pure).
+
+    Actions are actuated in *global logical points*, and that is the space AX
+    element bounds are reported in too. A capture's pixel grid starts at its
+    own display's corner and counts physical pixels, so a region has to be
+    localised before it is scaled — otherwise a region on a secondary display
+    crops somewhere else entirely, and on a Retina display every crop is half
+    the size it should be and in the wrong place.
+
+    Shared by the ORIENT diff and by the visual-confirmation crops, so the
+    region a witness measures and the region a model is shown are the same
+    rectangle rather than two implementations of one idea.
+    """
+    scale = capture.scale
+    return Rect(
+        origin=Point(
+            (region.origin.x - capture.origin_x) * scale,
+            (region.origin.y - capture.origin_y) * scale,
+        ),
+        size=Size(region.size.width * scale, region.size.height * scale),
+    )
+
+
 def verify_capture_region(
     before: ScreenCapture,
     after: ScreenCapture,
@@ -230,17 +254,7 @@ def verify_capture_region(
         )
     if (before.width, before.height, before.scale) != (after.width, after.height, after.scale):
         raise ValueError("cannot verify captures with different geometry or scale")
-    # ``region`` is in GLOBAL logical points (that is the space actions are
-    # actuated in), while the frame's pixel grid starts at the display's own
-    # corner. Subtract the display origin before scaling, or a region on a
-    # secondary display crops somewhere else entirely.
-    scale = before.scale
-    local_x = region.origin.x - before.origin_x
-    local_y = region.origin.y - before.origin_y
-    scaled_region = Rect(
-        origin=Point(local_x * scale, local_y * scale),
-        size=Size(region.size.width * scale, region.size.height * scale),
-    )
+    scaled_region = logical_region_to_pixels(before, region)
     # Crop the raw BGRA bytes *first* so the luminance decode only ever sees
     # the diffed region (M4): full-frame decode + crop on every verified
     # action was the dominant per-step cost in the vision path.
