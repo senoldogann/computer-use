@@ -17,6 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from pydantic import ValidationError
+
+from computeruse.atomic import write_atomic
 from computeruse.skills.schemas import (
     SKILL_ID_PATTERN,
     UNINFORMATIVE_WORDS,
@@ -209,11 +212,23 @@ class SkillRegistry:
         self._index_cache: tuple[SkillSummary, ...] | None = None
 
     def index(self) -> list[SkillSummary]:
-        """Stage 1: return the summary index (cached per session)."""
+        """Stage 1: return the summary index (cached per session).
+
+        One unreadable file is skipped with a warning rather than raised, the
+        way ``EpisodicStore`` already treats its own store: this scan runs
+        before every retrieval, so a single corrupt skill raising here left the
+        agent unable to start at all — the store that exists to make runs
+        cheaper became the thing that stopped them. ``load`` stays loud,
+        because there the caller asked for that specific skill by name.
+        """
         if self._index_cache is None:
             summaries: list[SkillSummary] = []
             for path in sorted(self._store_dir.glob("*.json")):
-                summaries.append(summary_of(_read_definition(path)))
+                try:
+                    summaries.append(summary_of(_read_definition(path)))
+                except (OSError, json.JSONDecodeError, ValidationError) as exc:
+                    LOGGER.warning("skipping unreadable skill %s: %s", path.name, exc)
+                    continue
             self._index_cache = tuple(summaries)
         return list(self._index_cache)
 
@@ -276,9 +291,7 @@ class SkillRegistry:
         """
         self._store_dir.mkdir(parents=True, exist_ok=True)
         path = self._store_dir / f"{definition.skill_id}.json"
-        path.write_text(
-            definition.model_dump_json(indent=2) + "\n", encoding="utf-8"
-        )
+        write_atomic(path, definition.model_dump_json(indent=2) + "\n")
         self._index_cache = None
 
 

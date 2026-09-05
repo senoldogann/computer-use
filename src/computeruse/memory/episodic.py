@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
+from computeruse.atomic import write_atomic
+
 LOGGER: Final = logging.getLogger(__name__)
 
 from computeruse.memory.schemas import Episode, EpisodeOutcome
@@ -127,7 +129,7 @@ class EpisodicStore:
             raise FileExistsError(
                 f"episode {episode.episode_id!r} already exists; refuse to clobber"
             )
-        path.write_text(episode.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        write_atomic(path, episode.model_dump_json(indent=2) + "\n")
 
     def episodes(self) -> list[Episode]:
         """All episodes, oldest-first by id (ids sort lexically = insertion)."""
