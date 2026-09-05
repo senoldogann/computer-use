@@ -41,6 +41,11 @@ DEFAULT_MAX_RESTARTS: Final[int] = 3
 #: and respawning into the middle of it repeats the crash.
 RESTART_BACKOFF_BASE_SECONDS: Final[float] = 0.5
 
+#: How long a wedged driver is given to exit on SIGTERM before SIGKILL. Long
+#: enough for a healthy process to unwind its socket and release the event
+#: tap, short enough that a run is not held hostage by one that will not.
+TERMINATE_GRACE_SECONDS: Final[float] = 3.0
+
 
 @dataclass(frozen=True)
 class RestartVerdict:
@@ -174,6 +179,39 @@ class DriverSupervisor:
         self._process = self._spawn()
         self._restarts_used += 1
         LOGGER.info("actuation driver restarted (pid %s)", self._process.pid)
+
+    def restart_unresponsive(self) -> None:
+        """End a driver that is running but not answering, then respawn it.
+
+        ``ensure_alive`` returns early for a process that is still running,
+        which is exactly right when the driver merely exited. A driver whose
+        event tap or accessibility call has wedged looks identical from the
+        outside — alive to ``poll()``, silent on the socket — and returning
+        early there leaves the run retrying an RPC that will never be
+        answered, until the step budget runs out.
+
+        This is the client's recovery hook, and the client calls it only after
+        its own retries are spent. "Still running" at that point means "not
+        answering", so the process is ended before the respawn: SIGTERM first,
+        so a driver that can still unwind releases its socket and event tap,
+        then SIGKILL for one that cannot.
+        """
+        process = self._process
+        if process is not None and process.poll() is None:
+            LOGGER.warning(
+                "actuation driver is alive but not answering; terminating pid %s",
+                process.pid,
+            )
+            process.terminate()
+            try:
+                process.wait(timeout=TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                LOGGER.warning(
+                    "actuation driver ignored SIGTERM; killing pid %s", process.pid
+                )
+                process.kill()
+                process.wait()
+        self.ensure_alive()
 
 
 def supervisor_for(

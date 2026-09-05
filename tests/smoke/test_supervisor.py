@@ -148,3 +148,36 @@ def test_a_driver_that_keeps_dying_stops_being_restarted() -> None:
 
     with pytest.raises(DriverSupervisorExhaustedError, match="cannot be restarted"):
         supervisor.ensure_alive()
+
+
+def test_an_unresponsive_driver_is_ended_before_the_respawn() -> None:
+    """A driver that is running but silent must be terminated, not left alone.
+
+    ``ensure_alive`` returns early for a live process, which is right for one
+    that merely exited. A wedged driver is alive to poll() and silent on the
+    socket, so returning early there left the run retrying an RPC that would
+    never answer. Real processes here, not stand-ins: the point is that the
+    old one is actually gone afterwards.
+    """
+    hung = subprocess.Popen(["sleep", "30"])
+    spawned: list[subprocess.Popen[bytes]] = []
+
+    def spawn() -> subprocess.Popen[bytes]:
+        process = subprocess.Popen(["sleep", "30"])
+        spawned.append(process)
+        return process
+
+    supervisor = DriverSupervisor(
+        spawn, max_restarts=2, backoff_base_seconds=0.0, sleep=lambda _: None
+    )
+    supervisor.adopt(hung)
+    try:
+        supervisor.restart_unresponsive()
+        assert hung.poll() is not None, "the wedged driver must be gone"
+        assert len(spawned) == 1, "a replacement must have been started"
+        assert spawned[0].poll() is None, "the replacement must be running"
+    finally:
+        for process in (hung, *spawned):
+            if process.poll() is None:
+                process.kill()
+            process.wait()
