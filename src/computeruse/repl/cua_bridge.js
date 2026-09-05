@@ -52,6 +52,23 @@ function handleIncomingLine(line) {
 
 rl.on("line", handleIncomingLine);
 
+function parseTargetCoord(target) {
+  let elementIndex = null;
+  let x = null;
+  let y = null;
+
+  if (typeof target === "number") {
+    elementIndex = target;
+  } else if (Array.isArray(target) && target.length === 2) {
+    [x, y] = target;
+  } else if (target && typeof target === "object") {
+    elementIndex = target.elementIndex ?? null;
+    x = target.x ?? null;
+    y = target.y ?? null;
+  }
+  return { elementIndex, x, y };
+}
+
 class AppTarget {
   constructor(appId, appName, initialAXState) {
     this.id = appId;
@@ -69,19 +86,7 @@ class AppTarget {
   }
 
   async click(target, options = {}) {
-    let elementIndex = null;
-    let x = null;
-    let y = null;
-
-    if (typeof target === "number") {
-      elementIndex = target;
-    } else if (Array.isArray(target) && target.length === 2) {
-      [x, y] = target;
-    } else if (target && typeof target === "object") {
-      elementIndex = target.elementIndex ?? null;
-      x = target.x ?? null;
-      y = target.y ?? null;
-    }
+    const { elementIndex, x, y } = parseTargetCoord(target);
 
     return await sendRpc("click", {
       app: this.name,
@@ -93,11 +98,39 @@ class AppTarget {
     });
   }
 
-  async pressKey(key) {
+  async doubleClick(target, options = {}) {
+    return await this.click(target, { ...options, clickCount: 2 });
+  }
+
+  async rightClick(target, options = {}) {
+    return await this.click(target, { ...options, mouseButton: "right" });
+  }
+
+  async drag(startTarget, endTarget, options = {}) {
+    const start = parseTargetCoord(startTarget);
+    const end = parseTargetCoord(endTarget);
+    return await sendRpc("drag", {
+      app: this.name,
+      startElementIndex: start.elementIndex,
+      startX: start.x,
+      startY: start.y,
+      endElementIndex: end.elementIndex,
+      endX: end.x,
+      endY: end.y,
+      durationMs: options.durationMs || 250,
+    });
+  }
+
+  async pressKey(key, modifiers = []) {
     return await sendRpc("pressKey", {
       app: this.name,
       key,
+      modifiers,
     });
+  }
+
+  async pressHotkey(modifiers, key) {
+    return await this.pressKey(key, modifiers);
   }
 
   async typeText(text) {
@@ -124,14 +157,7 @@ class AppTarget {
   }
 
   async scroll(target, direction = "down", pages = 1) {
-    let elementIndex = null;
-    let x = null;
-    let y = null;
-    if (typeof target === "number") {
-      elementIndex = target;
-    } else if (Array.isArray(target) && target.length === 2) {
-      [x, y] = target;
-    }
+    const { elementIndex, x, y } = parseTargetCoord(target);
     return await sendRpc("scroll", {
       app: this.name,
       elementIndex,
@@ -162,17 +188,26 @@ globalThis.cua = {
   async getState() {
     return await sendRpc("getState", {});
   },
+
+  sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  },
+
+  wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  },
 };
 
 // Global shorthand aliases matching prompt examples
 globalThis.getApp = globalThis.cua.getApp;
+globalThis.sleep = globalThis.cua.sleep;
+globalThis.wait = globalThis.cua.wait;
 
 function transformCodeForRepl(rawCode) {
   let trimmed = rawCode.trim();
   if (!trimmed) return trimmed;
 
   // Split on semicolons or newlines to isolate statements
-  // If the last non-empty statement doesn't have return/var/let/const/if etc., wrap it in return
   const stmts = trimmed.split(/;|\n/).map((s) => s.trim()).filter(Boolean);
   if (stmts.length === 0) return trimmed;
 
@@ -180,7 +215,6 @@ function transformCodeForRepl(rawCode) {
   const isDeclOrControl = /^(var|let|const|return|if|for|while|try|catch|throw|switch)\b/.test(lastStmt);
 
   if (!isDeclOrControl) {
-    // Find the position of lastStmt in trimmed
     const idx = trimmed.lastIndexOf(lastStmt);
     if (idx !== -1) {
       trimmed = trimmed.substring(0, idx) + "return (" + lastStmt + ");";
@@ -223,5 +257,5 @@ async function runEval(callId, code) {
   }
 }
 
-// Ready signal
+// Signal readiness
 process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "ready" }) + "\n");

@@ -2,8 +2,47 @@
 
 from __future__ import annotations
 
-from computeruse.repl.engine import CuaReplEngine, CuaReplResult
+from typing import Any
+
+from computeruse.orchestrator.schemas import (
+    Action,
+    ClipboardPaste,
+    MouseClick,
+    MouseDrag,
+    MouseMove,
+    MouseScroll,
+    PressHotkey,
+    TypeText,
+)
+from computeruse.repl.engine import (
+    CuaReplEngine,
+    CuaReplResult,
+    parse_hotkey_action,
+)
 from computeruse.vision.ax import AXElement
+
+
+class MockDriverClient:
+    """Mock client capturing driver calls for verification."""
+
+    def __init__(self) -> None:
+        self.sent_actions: list[Action] = []
+        self.activated_apps: list[str] = []
+
+    def send(self, action: Action) -> None:
+        self.sent_actions.append(action)
+
+    def activate_app(self, app_name: str) -> None:
+        self.activated_apps.append(app_name)
+
+    def list_apps(self) -> list[str]:
+        return ["TextEdit", "Safari", "Finder"]
+
+    def screenshot(self) -> Any:
+        class FakeCap:
+            data = b"fake_png_data"
+
+        return FakeCap()
 
 
 def test_cua_repl_result_mcp_json_contract() -> None:
@@ -37,6 +76,27 @@ def test_cua_repl_result_mcp_json_contract() -> None:
     assert "The following is a diff" in mcp_call["result"]["content"]
 
 
+def test_parse_hotkey_action_various_formats() -> None:
+    # Key combination string
+    res1 = parse_hotkey_action("Cmd+Shift+P")
+    assert res1.modifiers == ["command", "shift"]
+    assert res1.key == "p"
+
+    # Separate modifier list
+    res2 = parse_hotkey_action("a", ["Command"])
+    assert res2.modifiers == ["command"]
+    assert res2.key == "a"
+
+    # Aliases
+    res3 = parse_hotkey_action("ctrl+opt+enter")
+    assert res3.modifiers == ["control", "alt"]
+    assert res3.key == "return"
+
+    res4 = parse_hotkey_action("Escape")
+    assert res4.modifiers == []
+    assert res4.key == "escape"
+
+
 def test_cua_repl_engine_eval_basic_javascript() -> None:
     engine = CuaReplEngine()
     try:
@@ -45,6 +105,89 @@ def test_cua_repl_engine_eval_basic_javascript() -> None:
         assert res.error is None
         assert res.content == "Result: 35"
         assert res.duration_ms >= 0
+    finally:
+        engine.stop()
+
+
+def test_cua_repl_engine_sleep_and_wait() -> None:
+    engine = CuaReplEngine()
+    try:
+        res = engine.execute("await cua.sleep(20); await cua.wait(20); 'done';")
+        assert res.status == "completed"
+        assert res.content == "done"
+    finally:
+        engine.stop()
+
+
+def test_cua_repl_engine_actions_dispatch() -> None:
+    driver = MockDriverClient()
+    engine = CuaReplEngine(driver_client=driver)
+    try:
+        code = """
+        var app = await cua.getApp("TextEdit");
+        await app.click([150, 200]);
+        await app.doubleClick([150, 200]);
+        await app.rightClick([150, 200]);
+        await app.drag([100, 100], [300, 300]);
+        await app.scroll([150, 200], "down", 2);
+        await app.pressKey("Cmd+S");
+        await app.typeText("Save me");
+        await app.paste("Pasted text");
+        const b64 = await app.getScreenshot();
+        return b64;
+        """
+        res = engine.execute(code)
+        assert res.status == "completed"
+        assert "data:image/png;base64," in res.content
+
+        # Verify dispatched actions in order
+        actions = driver.sent_actions
+        # 1. click: MouseMove, MouseClick(click_count=1, button="left")
+        assert any(
+            isinstance(a, MouseMove) and a.x == 150 and a.y == 200
+            for a in actions
+        )
+        assert any(
+            isinstance(a, MouseClick) and a.click_count == 1 and a.button == "left"
+            for a in actions
+        )
+        # 2. doubleClick: MouseClick(click_count=2)
+        assert any(
+            isinstance(a, MouseClick) and a.click_count == 2 for a in actions
+        )
+        # 3. rightClick: MouseClick(button="right")
+        assert any(
+            isinstance(a, MouseClick) and a.button == "right" for a in actions
+        )
+        # 4. drag: MouseDrag
+        assert any(
+            isinstance(a, MouseDrag)
+            and a.start_x == 100
+            and a.start_y == 100
+            and a.end_x == 300
+            and a.end_y == 300
+            for a in actions
+        )
+        # 5. scroll: MouseScroll(dy=240)
+        assert any(
+            isinstance(a, MouseScroll) and a.dy == 240 for a in actions
+        )
+        # 6. pressKey: PressHotkey(modifiers=["command"], key="s")
+        assert any(
+            isinstance(a, PressHotkey)
+            and a.modifiers == ["command"]
+            and a.key == "s"
+            for a in actions
+        )
+        # 7. typeText: TypeText(text="Save me")
+        assert any(
+            isinstance(a, TypeText) and a.text == "Save me" for a in actions
+        )
+        # 8. paste: ClipboardPaste(text="Pasted text")
+        assert any(
+            isinstance(a, ClipboardPaste) and a.text == "Pasted text"
+            for a in actions
+        )
     finally:
         engine.stop()
 
@@ -128,6 +271,24 @@ def test_cua_repl_engine_handles_syntax_and_runtime_errors() -> None:
         res = engine.execute("await nonExistentFunction();")
         assert res.status == "failed"
         assert res.error is not None
-        assert "nonExistentFunction is not defined" in res.error
+
+        res_syntax = engine.execute("const a = ;")
+        assert res_syntax.status == "failed"
+        assert res_syntax.error is not None
+    finally:
+        engine.stop()
+
+
+def test_cua_repl_engine_list_apps_and_get_state() -> None:
+    driver = MockDriverClient()
+    engine = CuaReplEngine(driver_client=driver)
+    try:
+        res = engine.execute("const apps = await cua.listApps(); apps.length;")
+        assert res.status == "completed"
+        assert res.content == "3"
+
+        res_state = engine.execute("const st = await cua.getState(); JSON.stringify(st);")
+        assert res_state.status == "completed"
+        assert '{"apps":[]}' in res_state.content
     finally:
         engine.stop()

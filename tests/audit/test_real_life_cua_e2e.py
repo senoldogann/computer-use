@@ -124,6 +124,28 @@ def test_real_life_cua_repl_textedit_e2e(tmp_path: Path) -> None:
         assert res4.duration_ms >= 0
         assert "Merhaba CUA REPL" in res4.content
 
+        # Call 5: Scroll, sleep, and capture screenshot
+        call5_code = """
+        var textEditApp = await cua.getApp("TextEdit");
+        await textEditApp.scroll([200, 200], "down", 1);
+        await cua.sleep(20);
+        const screenshotUri = await textEditApp.getScreenshot();
+        return screenshotUri.slice(0, 30);
+        """
+        res5 = engine.execute(call5_code, title="Sayfayı kaydır ve ekran görüntüsü al")
+        assert res5.status == "completed"
+        assert "data:image/png;base64," in res5.content
+
+        # Call 6: Hotkey select-all (Cmd+A) and cleanup
+        call6_code = """
+        var textEditApp = await cua.getApp("TextEdit");
+        await textEditApp.pressKey("Cmd+A");
+        await textEditApp.pressKey("Delete");
+        await textEditApp.getAXState();
+        """
+        res6 = engine.execute(call6_code, title="Metni seç ve temizle")
+        assert res6.status == "completed"
+
     finally:
         if client:
             try:

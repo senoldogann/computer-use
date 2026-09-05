@@ -7,6 +7,7 @@ for fast accessibility-guided actions and token-efficient AX diffing.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import subprocess
@@ -14,12 +15,14 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from computeruse.orchestrator.schemas import (
     ClipboardPaste,
     MouseClick,
+    MouseDrag,
     MouseMove,
+    MouseScroll,
     PressHotkey,
     TypeText,
 )
@@ -29,6 +32,56 @@ from computeruse.vision.ax_diff import AXStateTracker
 LOGGER = logging.getLogger(__name__)
 
 BRIDGE_SCRIPT_PATH = Path(__file__).parent / "cua_bridge.js"
+
+ModifierType = Literal["command", "control", "alt", "shift"]
+
+
+def parse_hotkey_action(
+    raw_key: str, raw_modifiers: list[str] | None = None
+) -> PressHotkey:
+    """Parse hotkey combinations (e.g. 'Cmd+Shift+P' or modifiers=['command'], key='a')."""
+    normalized_mods: list[ModifierType] = []
+    alias_map: dict[str, ModifierType] = {
+        "cmd": "command",
+        "command": "command",
+        "ctrl": "control",
+        "control": "control",
+        "alt": "alt",
+        "opt": "alt",
+        "option": "alt",
+        "shift": "shift",
+    }
+
+    if raw_modifiers:
+        for m in raw_modifiers:
+            clean_m = alias_map.get(m.lower().strip())
+            if clean_m and clean_m not in normalized_mods:
+                normalized_mods.append(clean_m)
+
+    key_parts = [p.strip().lower() for p in raw_key.split("+") if p.strip()]
+    if len(key_parts) > 1:
+        primary = key_parts[-1]
+        for part in key_parts[:-1]:
+            mod = alias_map.get(part)
+            if mod and mod not in normalized_mods:
+                normalized_mods.append(mod)
+    else:
+        primary = key_parts[0] if key_parts else raw_key.lower().strip()
+
+    # Normalize special key names
+    key_aliases: dict[str, str] = {
+        "enter": "return",
+        "esc": "escape",
+        "spacebar": "space",
+        " ": "space",
+    }
+    canonical_key = key_aliases.get(primary, primary)
+
+    return PressHotkey(
+        type="press_hotkey",
+        modifiers=normalized_mods,
+        key=canonical_key,
+    )
 
 
 @dataclass
@@ -252,6 +305,24 @@ class CuaReplEngine:
             app_name,
         )
 
+    def _resolve_target_point(
+        self,
+        app_name: str,
+        elem_index: int | None,
+        x: int | None,
+        y: int | None,
+    ) -> tuple[int | None, int | None]:
+        """Resolve either element center coordinates or explicit (x, y) point."""
+        if elem_index is not None:
+            tracker = self._get_tracker(app_name)
+            elem = tracker.get_element_by_index(int(elem_index))
+            if elem:
+                return elem.centre_x, elem.centre_y
+            LOGGER.warning(
+                "Element index %d not found in %s tracker", elem_index, app_name
+            )
+        return x, y
+
     def _dispatch_js_call(self, method: str, params: dict[str, Any]) -> Any:
         """Route calls from the JS runtime to the appropriate host driver handler."""
         if method == "getApp":
@@ -292,22 +363,12 @@ class CuaReplEngine:
 
         if method == "click":
             app_name = params["app"]
-            tracker = self._get_tracker(app_name)
-            elem_index = params.get("elementIndex")
-            x = params.get("x")
-            y = params.get("y")
-
-            target_x = x
-            target_y = y
-            if elem_index is not None:
-                elem = tracker.get_element_by_index(int(elem_index))
-                if elem:
-                    target_x = elem.centre_x
-                    target_y = elem.centre_y
-                else:
-                    LOGGER.warning(
-                        "Element index %d not found in %s tracker", elem_index, app_name
-                    )
+            target_x, target_y = self._resolve_target_point(
+                app_name,
+                params.get("elementIndex"),
+                params.get("x"),
+                params.get("y"),
+            )
 
             if target_x is not None and target_y is not None and self.driver_client:
                 self.driver_client.send(
@@ -325,10 +386,86 @@ class CuaReplEngine:
 
             return None
 
-        if method == "pressKey":
-            key = params["key"]
+        if method == "drag":
+            app_name = params["app"]
+            start_x, start_y = self._resolve_target_point(
+                app_name,
+                params.get("startElementIndex"),
+                params.get("startX"),
+                params.get("startY"),
+            )
+            end_x, end_y = self._resolve_target_point(
+                app_name,
+                params.get("endElementIndex"),
+                params.get("endX"),
+                params.get("endY"),
+            )
+
+            if (
+                start_x is not None
+                and start_y is not None
+                and end_x is not None
+                and end_y is not None
+                and self.driver_client
+            ):
+                self.driver_client.send(
+                    MouseDrag(
+                        type="mouse_drag",
+                        start_x=int(start_x),
+                        start_y=int(start_y),
+                        end_x=int(end_x),
+                        end_y=int(end_y),
+                        duration_ms=params.get("durationMs", 250),
+                    )
+                )
+            return None
+
+        if method == "scroll":
+            app_name = params["app"]
+            target_x, target_y = self._resolve_target_point(
+                app_name,
+                params.get("elementIndex"),
+                params.get("x"),
+                params.get("y"),
+            )
+
+            if target_x is not None and target_y is not None and self.driver_client:
+                self.driver_client.send(
+                    MouseMove(type="mouse_move", x=int(target_x), y=int(target_y))
+                )
+
+            direction = str(params.get("direction", "down")).lower()
+            pages = int(params.get("pages", 1))
+            unit = 120 * pages
+
+            dx = 0
+            dy = 0
+            if direction == "down":
+                dy = unit
+            elif direction == "up":
+                dy = -unit
+            elif direction == "right":
+                dx = unit
+            elif direction == "left":
+                dx = -unit
+
             if self.driver_client:
-                self.driver_client.send(PressHotkey(type="press_hotkey", key=key))
+                self.driver_client.send(
+                    MouseScroll(type="mouse_scroll", dx=dx, dy=dy)
+                )
+            return None
+
+        if method == "pressKey":
+            raw_key = str(params["key"])
+            raw_mods = params.get("modifiers")
+            mod_list: list[str] = (
+                [str(m) for m in cast(list[object], raw_mods)]
+                if isinstance(raw_mods, list)
+                else []
+            )
+            hotkey_action = parse_hotkey_action(raw_key, mod_list)
+            if self.driver_client:
+                self.driver_client.send(hotkey_action)
             return None
 
         if method == "typeText":
@@ -359,6 +496,16 @@ class CuaReplEngine:
                 )
                 self.driver_client.send(TypeText(type="type_text", text=value))
             return None
+
+        if method == "getScreenshot":
+            if self.driver_client:
+                try:
+                    cap = self.driver_client.screenshot()
+                    b64 = base64.b64encode(cap.data).decode("ascii")
+                    return f"data:image/png;base64,{b64}"
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("screenshot failed: %s", exc)
+            return "data:image/png;base64,"
 
         if method == "listApps":
             if self.driver_client:
