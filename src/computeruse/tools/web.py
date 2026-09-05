@@ -21,6 +21,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import socket
 import ssl
 import time
 import urllib.error
@@ -65,7 +66,11 @@ def fetch_page(url: str, *, max_chars: int = MAX_PAGE_CHARS) -> str:
     if not _is_http_url(url):
         raise WebError(f"refusing to fetch a non-HTTP(S) URL: {url!r}")
     if not _is_fetchable_url(url):
-        raise WebError(f"refusing to fetch an internal-only URL: {url!r}")
+        raise WebError(
+            f"refusing to fetch an internal-only URL: {url!r} (the guard reads "
+            "the address the connection would actually reach, in every spelling "
+            "the kernel accepts)"
+        )
     html = _get(url)
     text = html_to_text(html)
     if len(text) < MIN_PAGE_CHARS:
@@ -128,16 +133,8 @@ def _get(url: str) -> str:
     raise WebError(f"could not reach {url}: {last_error}") from last_error
 
 
-def _is_blocked_host(host: str) -> bool:
-    """True when a hostname must never be fetched (SSRF guard, pure)."""
-
-    lowered = host.lower().strip().rstrip(".")
-    if lowered in ("localhost", "metadata.google.internal"):
-        return True
-    try:
-        addr = ipaddress.ip_address(lowered)
-    except ValueError:
-        return False
+def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True when an address is internal and must never be fetched (pure)."""
     return (
         addr.is_private
         or addr.is_loopback
@@ -145,6 +142,60 @@ def _is_blocked_host(host: str) -> bool:
         or addr.is_reserved
         or addr.is_multicast
     )
+
+
+def _literal_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address a host names *literally*, without asking a resolver (pure).
+
+    ``ipaddress`` only accepts the canonical dotted quad, but the connect path
+    does not: ``127.1``, ``2130706433``, ``0x7f.0.0.1`` and ``017700000001``
+    all reach 127.0.0.1. The old guard parsed with ``ipaddress``, saw a
+    ValueError, concluded "not an address" and allowed it — measured against a
+    local server: ``127.0.0.1`` refused, ``127.1`` fetched and read. ``inet_aton``
+    understands the same shorthands the kernel does, which is the comparison
+    that matters.
+    """
+    try:
+        return ipaddress.ip_address(socket.inet_aton(host))
+    except OSError:
+        pass
+    try:
+        return ipaddress.ip_address(socket.inet_pton(socket.AF_INET6, host.strip("[]")))
+    except OSError:
+        return None
+
+
+def _is_blocked_host(host: str) -> bool:
+    """True when a hostname must never be fetched (SSRF guard, I/O shell).
+
+    Two questions, in order. A literal address — in any spelling the kernel
+    accepts — is judged directly, with no resolver involved. A *name* is looked
+    up, because ``internal.corp`` pointing at 10.0.0.5 is the same attack with
+    a different spelling.
+
+    A name that does not resolve is allowed through to the fetch, which will
+    fail on its own. Refusing it here would trade a truthful "could not reach"
+    for a misleading "internal-only", and would make every page read depend on
+    a working resolver.
+    """
+    lowered = host.lower().strip().rstrip(".")
+    if lowered in ("localhost", "metadata.google.internal"):
+        return True
+    literal = _literal_address(lowered)
+    if literal is not None:
+        return _is_blocked_address(literal)
+    try:
+        infos = socket.getaddrinfo(lowered, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError):
+        return False
+    for info in infos:
+        try:
+            resolved = ipaddress.ip_address(str(info[4][0]))
+        except ValueError:
+            continue
+        if _is_blocked_address(resolved):
+            return True
+    return False
 
 
 def _is_http_url(url: str) -> bool:

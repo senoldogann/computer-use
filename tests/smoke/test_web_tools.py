@@ -24,7 +24,13 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.prompts import ACTION_CONTRACT, decision_prompt
 from computeruse.orchestrator.schemas import AgentTurn, WebFetch, WebSearch
-from computeruse.tools.web import MIN_PAGE_CHARS, WebError, _is_http_url, html_to_text
+from computeruse.tools.web import (
+    MIN_PAGE_CHARS,
+    WebError,
+    _is_fetchable_url,
+    _is_http_url,
+    html_to_text,
+)
 
 
 def _turn(action: object) -> AgentTurn:
@@ -279,3 +285,28 @@ def test_prompt_no_longer_calls_browser_search_fragile() -> None:
     prompt = decision_prompt(WorkingState(goal="x"), app="Google Chrome")
     assert "If an MCP search tool (Tavily, Exa, Brave) is available" in prompt
     assert "open Google Chrome, use Cmd+L" in prompt
+
+
+def test_the_ssrf_guard_reads_every_spelling_the_kernel_accepts() -> None:
+    """A shorthand for 127.0.0.1 must not walk past the guard that blocks it.
+
+    ``ipaddress`` only parses the canonical dotted quad, so the guard used to
+    see ``127.1`` raise ValueError, conclude "not an address", and allow it —
+    while the kernel resolved it to loopback and the fetch read a local server.
+    Measured that way against a real server: ``127.0.0.1`` refused, ``127.1``
+    fetched. Every spelling below reaches the same host.
+    """
+    for spelling in ("127.0.0.1", "127.1", "2130706433", "0x7f.0.0.1", "017700000001"):
+        assert not _is_fetchable_url(f"http://{spelling}:8080/"), spelling
+    assert not _is_fetchable_url("http://[::1]:8080/")
+    assert not _is_fetchable_url("http://169.254.169.254/")
+    assert not _is_fetchable_url("http://10.0.0.5/")
+
+
+def test_a_name_that_does_not_resolve_is_left_to_the_fetch() -> None:
+    """Refusing an unresolvable name would make every read need a resolver.
+
+    The fetch fails on its own with a truthful "could not reach"; refusing here
+    would report "internal-only" about a host that is nothing of the kind.
+    """
+    assert _is_fetchable_url("https://not-a-real-host.invalid/page")
