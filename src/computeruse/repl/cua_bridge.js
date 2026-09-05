@@ -136,6 +136,37 @@ class AppTarget {
     );
   }
 
+  async selectMenuItem(menuPath) {
+    const path = Array.isArray(menuPath)
+      ? menuPath
+      : String(menuPath).split(">").map((s) => s.trim()).filter(Boolean);
+
+    return await sendRpc("selectMenuItem", {
+      app: this.name,
+      path,
+    });
+  }
+
+  async findVisual(query) {
+    return await sendRpc("findVisualElement", {
+      app: this.name,
+      query: typeof query === "string" ? query : (query.query || query.text || ""),
+    });
+  }
+
+  async getWindowBounds() {
+    return await sendRpc("getWindowBounds", {
+      app: this.name,
+    });
+  }
+
+  async cropScreenshot(bounds) {
+    return await sendRpc("cropScreenshot", {
+      app: this.name,
+      bounds,
+    });
+  }
+
   async click(target, options = {}) {
     const parsed = parseTargetCoord(target);
 
@@ -244,6 +275,27 @@ globalThis.cua = {
 
   wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  },
+
+  async transaction(actionFn, options = {}) {
+    const maxRetries = options.retries ?? 2;
+    const backoffMs = options.backoffMs ?? 150;
+    let attempt = 0;
+
+    while (attempt <= maxRetries) {
+      try {
+        return await actionFn();
+      } catch (err) {
+        attempt++;
+        if (attempt > maxRetries) {
+          if (options.rollbackAction === "escape") {
+            try { await sendRpc("pressKey", { key: "Escape" }); } catch {}
+          }
+          throw err;
+        }
+        await cua.sleep(backoffMs * attempt);
+      }
+    }
   },
 };
 
