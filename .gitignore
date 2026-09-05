@@ -11,6 +11,10 @@ build/
 # Rust
 driver/target/
 
+# Test-run artefacts: the audit probe suite writes its session logs and
+# throwaway sockets under the repo root, and none of that is source.
+/target/
+
 # Runtime sockets
 *.sock
 
