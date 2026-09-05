@@ -307,6 +307,13 @@ def test_cli_runs_with_scaffolded_model(tmp_path) -> None:
         "_calls = 0\n"
         "def model(_prompt: str) -> str:\n"
         "    global _calls\n"
+        # The same transport answers the completion auditor, which asks a
+        # different question and parses a different shape. Answering it with a
+        # turn kept the auditor permanently unavailable, and the run's finish
+        # was then distilled as if it had been verified — the exact hole the
+        # forced-finish flag closes, which is why this test now has to reply.
+        "    if 'verification checker' in _prompt:\n"
+        "        return '{\"satisfied\": true, \"evidence\": \"the menu is open\"}'\n"
         "    _calls += 1\n"
         "    if _calls == 1:\n"
         "        return '{\"thought\": \"one\", \"sub_goal\": \"click one\", "

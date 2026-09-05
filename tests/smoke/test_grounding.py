@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
+import pytest
+
 from computeruse.agent import Agent, AgentConfig
 from computeruse.orchestrator.client import ActuationClient
 from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState
@@ -490,3 +492,42 @@ def test_ax_probe_result_carries_open_tabs() -> None:
     default = AxProbeResult()
     assert default.summaries == ()
     assert default.open_tabs == ()
+
+
+def test_the_bounds_gate_runs_before_the_quiet_path_actuates() -> None:
+    """"Rejected before any physical effect" has to hold on the quiet path too.
+
+    ``_pressed_quietly``/``_typed_quietly`` actuate as they answer, so a bounds
+    check placed after them honoured the promise only in foreground mode.
+    Measured before the fix: the press landed at (200, 20) on a 100x100 display
+    and *then* raised. The effect list must stay empty.
+    """
+    from computeruse.orchestrator.loop import OodaRunner
+    from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
+    from computeruse.vision.capture import ScreenCapture
+    from computeruse.vision.coordinates import CoordinateOutOfBoundsError, Point
+
+    effects: list[tuple[float, float]] = []
+    frame = ScreenCapture(
+        display_id=1, width=100, height=100, scale=1.0, data=bytes((0, 0, 0, 255)) * 10000
+    )
+
+    def quiet_press(point: Point) -> bool:
+        effects.append((point.x, point.y))
+        return True
+
+    runner = OodaRunner(
+        provider=lambda state: AgentTurn(
+            thought="t",
+            sub_goal="s",
+            action=Finish(type="finish", status="success", summary="s"),
+        ),
+        execute_physical=lambda _action: None,
+        sensor=lambda: frame,
+        quiet_press=quiet_press,
+    )
+
+    with pytest.raises(CoordinateOutOfBoundsError):
+        runner._act_and_verify(MouseClick(type="mouse_click", x=200, y=20))
+
+    assert effects == [], "the host must not be touched before the gate rejects"

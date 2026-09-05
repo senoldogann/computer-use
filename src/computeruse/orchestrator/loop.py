@@ -1844,15 +1844,20 @@ class OodaRunner:
         # keyboard, which changes how the text arrives and nothing about
         # whether it should.
         self._refuse_credential_entry(action)
+        # Fail-closed coordinate gate: a point outside the observed display is
+        # rejected BEFORE any physical effect (never clamped) — which is why it
+        # runs above the quiet path rather than below it. ``_pressed_quietly``
+        # and ``_typed_quietly`` actuate as they answer, so validating after
+        # them honoured the promise only on the loud path. Measured on the
+        # quiet one: the click landed at (200, 20) and *then* raised
+        # CoordinateOutOfBoundsError.
+        before = self._pre_action_frame(expectation)
+        if before is not None:
+            self._validate_bounds(action, before)
         quiet = self._pressed_quietly(action) or self._typed_quietly(action)
         if not quiet:
             self._warn_if_leaving_the_background(action)
             self._guard_positional(action)
-        before = self._pre_action_frame(expectation)
-        if before is not None:
-            # Fail-closed coordinate gate: a point outside the observed
-            # display is rejected BEFORE any physical effect (never clamped).
-            self._validate_bounds(action, before)
         before_ui = self._observation.raw_ui_elements
         before_content = self._observation.content
         before_window = self._observation.window
@@ -2701,6 +2706,14 @@ class OodaRunner:
         try:
             verdict = self.completion_check(state, finish.summary)
         except Exception as exc:  # noqa: BLE001 - the auditor must never kill a run
+            # The run continues — an unreachable auditor must not fail work that
+            # may well be finished. But it was *not* verified, and saying so is
+            # the whole point: the distill gate reads this flag, so leaving it
+            # unset let a provider outage turn every claimed success into a
+            # distilled skill. Measured: forced_finish=false with the auditor
+            # raising on every call. That is the memory poisoning P0-1 closed,
+            # reached by a second door.
+            self._forced_finish = True
             LOGGER.warning("completion audit unavailable: %s", exc)
             return None
         if verdict.satisfied:
