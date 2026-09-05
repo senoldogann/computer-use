@@ -956,6 +956,13 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
         open_tabs=state.open_tabs,
         skill=state.skill,
         screenshot_b64=state.screenshot_b64,
+        # The navigation trail accumulates across the whole run: OBSERVE reads
+        # it back in and extends it, so dropping it here means every cycle
+        # starts from empty and the trail never grows past one entry. That is
+        # the exact blindness PR #17 fixed — the auditor asking to see a search
+        # result and the page it opened at the same time, on a screen that can
+        # only show one.
+        observed_trail=state.observed_trail,
         # The tool transcript is run-accumulated evidence, not per-observation
         # perception: dropping it here would blind the completion auditor to
         # every tool answer older than one turn.
