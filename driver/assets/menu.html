@@ -1924,6 +1924,274 @@
     background: #1B1A19 !important;
     color: #F5F4F2 !important;
   }
+
+  /* ========================================================================
+     ELITE VISUAL SUITE: 3D Neural Canvas, Spring Tabs, Shimmer & Popover
+     ======================================================================== */
+
+  /* Tab Spring Indicator */
+  .tab-bar {
+    position: relative !important;
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    border-radius: var(--radius-pill) !important;
+    margin: 8px 12px 6px 12px !important;
+    padding: 3px !important;
+    display: flex !important;
+    align-items: center !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+  }
+
+  .tab-indicator {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    left: 0;
+    border-radius: var(--radius-pill);
+    background: #252422;
+    border: 0.5px solid #383632;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), width 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .tab-btn {
+    position: relative !important;
+    z-index: 2 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #AAA8A3 !important;
+    transition: color 0.18s ease !important;
+    cursor: pointer;
+  }
+
+  .tab-btn:hover {
+    color: #F5F4F2 !important;
+  }
+
+  .tab-btn.active {
+    color: #F5F4F2 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+
+  .tab-btn.active svg {
+    color: #FFB17F !important;
+  }
+
+  /* Tab Pane Smooth Entrance */
+  .tab-pane {
+    display: none;
+  }
+  .tab-pane.active {
+    display: flex;
+    animation: tabPaneFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @keyframes tabPaneFadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* 3D Neural Canvas Hero Visual */
+  .empty-hero-visual {
+    position: relative;
+    width: 100px;
+    height: 100px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 2px;
+  }
+
+  .neural-canvas-glow {
+    position: absolute;
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 177, 127, 0.25) 0%, rgba(255, 177, 127, 0.05) 55%, transparent 70%);
+    filter: blur(12px);
+    pointer-events: none;
+    animation: auraBreathe 4s ease-in-out infinite;
+  }
+
+  @keyframes auraBreathe {
+    0%, 100% { transform: scale(0.9); opacity: 0.6; }
+    50% { transform: scale(1.15); opacity: 1; }
+  }
+
+  #neuralCanvas {
+    position: relative;
+    z-index: 2;
+    cursor: grab;
+    transition: transform 0.1s ease-out;
+  }
+  #neuralCanvas:active {
+    cursor: grabbing;
+  }
+
+  /* Linear Slow-Motion Shimmer Beam */
+  @keyframes shimmerBeam {
+    0% { transform: translateX(-100%) skewX(-20deg); }
+    100% { transform: translateX(250%) skewX(-20deg); }
+  }
+
+  @keyframes textSlowShimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+
+  .running-shimmer-card {
+    position: relative !important;
+    overflow: hidden !important;
+    border-color: #FFB17F !important;
+    box-shadow: 0 0 16px rgba(255, 177, 127, 0.22) !important;
+  }
+
+  .running-shimmer-card::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 50%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent 0%, rgba(255, 177, 127, 0.15) 40%, rgba(255, 255, 255, 0.35) 70%, transparent 100%);
+    animation: shimmerBeam 2.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    pointer-events: none;
+  }
+
+  .live-shimmer-text {
+    background: linear-gradient(90deg, #F5F4F2 0%, #FFB17F 35%, #FFFFFF 65%, #F5F4F2 100%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: textSlowShimmer 3s ease-in-out infinite;
+  }
+
+  /* Custom Floating Glass Popover Menu */
+  .model-picker-pill {
+    position: relative;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s ease;
+  }
+  .model-picker-pill:hover {
+    background: #252422 !important;
+    border-color: #383632 !important;
+  }
+  .model-pill-chev {
+    transition: transform 0.2s ease;
+  }
+  .model-picker-pill.open .model-pill-chev {
+    transform: rotate(180deg);
+  }
+
+  .custom-glass-popover {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 14px;
+    width: 290px;
+    background: rgba(27, 26, 25, 0.96);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    border: 0.5px solid #383632;
+    border-radius: 14px;
+    padding: 6px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.75), 0 0 1px 1px rgba(255, 177, 127, 0.15);
+    z-index: 600;
+    animation: popoverFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @keyframes popoverFadeIn {
+    from { opacity: 0; transform: translateY(6px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .popover-header {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: #AAA8A3;
+    padding: 6px 8px 4px 8px;
+  }
+
+  .popover-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    border: 0.5px solid transparent;
+  }
+  .popover-item:hover {
+    background: #252422;
+    border-color: #383632;
+  }
+  .popover-item.selected {
+    background: rgba(255, 177, 127, 0.12);
+    border-color: rgba(255, 177, 127, 0.3);
+  }
+  .popover-item-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .popover-item-icon {
+    font-size: 13px;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: #1B1A19;
+    border: 0.5px solid #252422;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+  }
+  .popover-item-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #F5F4F2;
+    line-height: 1.2;
+  }
+  .popover-item-desc {
+    font-size: 9.5px;
+    color: #AAA8A3;
+    line-height: 1.2;
+  }
+  .popover-badge {
+    font-size: 8.5px;
+    font-weight: 700;
+    padding: 1.5px 5px;
+    border-radius: 999px;
+    background: rgba(255, 177, 127, 0.18);
+    color: #FFB17F;
+    border: 0.5px solid rgba(255, 177, 127, 0.3);
+  }
+  .popover-check {
+    font-size: 11px;
+    font-weight: 700;
+    color: #FFB17F;
+    opacity: 0;
+    margin-left: 4px;
+  }
+  .popover-item.selected .popover-check {
+    opacity: 1;
+  }
+
 </style>
 </head>
 <body>
@@ -1992,6 +2260,7 @@
 
   <!-- Segmented Navigation Tabs -->
   <nav class="tab-bar">
+    <div class="tab-indicator" id="tabIndicator"></div>
     <button class="tab-btn active" id="tabBtnLive" onclick="switchTab('live')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       <span>Live Agent</span>
@@ -2043,10 +2312,9 @@
 
     <div id="log" role="log" aria-live="polite">
       <div class="empty-state" id="emptyHero">
-        <div class="empty-icon">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2C12.4 7.2 16.8 11.6 22 12C16.8 12.4 12.4 16.8 12 22C11.6 16.8 7.2 12.4 2 12C7.2 11.6 11.6 7.2 12 2Z"/>
-          </svg>
+        <div class="empty-hero-visual">
+          <div class="neural-canvas-glow"></div>
+          <canvas id="neuralCanvas" width="100" height="100"></canvas>
         </div>
         <div class="empty-title">Ready for Your Next Task</div>
         <div class="empty-desc">Instruct the agent to perform multi-step physical computer use tasks on your Mac:</div>
@@ -2231,12 +2499,61 @@
 
   <!-- Footer Compose -->
   <footer>
+    <!-- Custom Floating Glass Model Popover -->
+    <div class="custom-glass-popover" id="modelPopover" style="display:none;">
+      <div class="popover-header">AI AKIL YÜRÜTME MODELİ</div>
+      <div class="popover-item selected" data-model="openai:gpt-5.6-terra" onclick="selectModelOption('openai:gpt-5.6-terra', 'Terra', event)">
+        <div class="popover-item-left">
+          <div class="popover-item-icon">⚡</div>
+          <div>
+            <div class="popover-item-title">GPT-5.6 Terra</div>
+            <div class="popover-item-desc">Dengeli & Hızlı (Önerilen)</div>
+          </div>
+        </div>
+        <span class="popover-badge">Standart</span>
+        <span class="popover-check">✓</span>
+      </div>
+      <div class="popover-item" data-model="openai:gpt-5.6-luna" onclick="selectModelOption('openai:gpt-5.6-luna', 'Luna', event)">
+        <div class="popover-item-left">
+          <div class="popover-item-icon">🌙</div>
+          <div>
+            <div class="popover-item-title">GPT-5.6 Luna</div>
+            <div class="popover-item-desc">Ultra Düşük Gecikme</div>
+          </div>
+        </div>
+        <span class="popover-badge">Hızlı</span>
+        <span class="popover-check">✓</span>
+      </div>
+      <div class="popover-item" data-model="openai:gpt-5.6-sol" onclick="selectModelOption('openai:gpt-5.6-sol', 'Sol', event)">
+        <div class="popover-item-left">
+          <div class="popover-item-icon">☀️</div>
+          <div>
+            <div class="popover-item-title">GPT-5.6 Sol</div>
+            <div class="popover-item-desc">Amiral Akıl Yürütme Katmanı</div>
+          </div>
+        </div>
+        <span class="popover-badge">Akılcı</span>
+        <span class="popover-check">✓</span>
+      </div>
+      <div class="popover-item" data-model="openai" onclick="selectModelOption('openai', 'Auto', event)">
+        <div class="popover-item-left">
+          <div class="popover-item-icon">✨</div>
+          <div>
+            <div class="popover-item-title">Auto Model</div>
+            <div class="popover-item-desc">Dinamik otomatik yönlendirme</div>
+          </div>
+        </div>
+        <span class="popover-check">✓</span>
+      </div>
+    </div>
     <div class="input-wrapper">
       <div class="input-header">
         <div class="input-header-actions">
-          <div class="model-picker-pill" title="Yapay Zeka Modeli & Akıl Yürütme Katmanı">
+          <div class="model-picker-pill" id="modelPickerPill" title="Yapay Zeka Modeli & Akıl Yürütme Katmanı" onclick="toggleModelPopover(event)">
             <span class="model-pill-icon">⚡</span>
-            <select id="modelSelect" class="model-select" onchange="onModelSelected(this.value)">
+            <span id="modelCurrentName" style="font-size:9.5px;font-weight:600;color:#F5F4F2;">Terra</span>
+            <svg class="model-pill-chev" id="modelChev" width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+            <select id="modelSelect" class="model-select" style="display:none;" onchange="onModelSelected(this.value)">
               <option value="openai:gpt-5.6-terra" selected>Terra</option>
               <option value="openai:gpt-5.6-luna">Luna</option>
               <option value="openai:gpt-5.6-sol">Sol</option>
@@ -2491,40 +2808,45 @@
     document.querySelectorAll(".tab-btn").forEach(function(b){ b.classList.remove("active"); });
     document.querySelectorAll(".tab-pane").forEach(function(p){ p.classList.remove("active"); });
 
+    var activeBtn = null;
     if(tabName === "live"){
-      var btn = document.getElementById("tabBtnLive");
+      activeBtn = document.getElementById("tabBtnLive");
       var pane = document.getElementById("tabLive");
-      if (btn) btn.classList.add("active");
+      if (activeBtn) activeBtn.classList.add("active");
       if (pane) pane.classList.add("active");
     } else if(tabName === "mcp"){
-      var btn = document.getElementById("tabBtnMcp");
+      activeBtn = document.getElementById("tabBtnMcp");
       var pane = document.getElementById("tabMcp");
-      if (btn) btn.classList.add("active");
+      if (activeBtn) activeBtn.classList.add("active");
       if (pane) pane.classList.add("active");
       if (typeof renderMcpStoreView === "function") renderMcpStoreView();
       else if (window.renderMcpStoreView) window.renderMcpStoreView();
     } else if(tabName === "history"){
-      var btn = document.getElementById("tabBtnHistory");
+      activeBtn = document.getElementById("tabBtnHistory");
       var pane = document.getElementById("tabHistory");
-      if (btn) btn.classList.add("active");
+      if (activeBtn) activeBtn.classList.add("active");
       if (pane) pane.classList.add("active");
       if (window.refreshMemory) window.refreshMemory();
       if (typeof renderHistoryView === "function") renderHistoryView();
       else if (window.renderHistoryView) window.renderHistoryView();
     } else if(tabName === "control"){
-      var btn = document.getElementById("tabBtnControl");
+      activeBtn = document.getElementById("tabBtnControl");
       var pane = document.getElementById("tabControl");
-      if (btn) btn.classList.add("active");
+      if (activeBtn) activeBtn.classList.add("active");
       if (pane) pane.classList.add("active");
       if (window.refreshControlView) window.refreshControlView();
     } else if(tabName === "analytics"){
-      var btn = document.getElementById("tabBtnAnalytics");
+      activeBtn = document.getElementById("tabBtnAnalytics");
       var pane = document.getElementById("tabAnalytics");
-      if (btn) btn.classList.add("active");
+      if (activeBtn) activeBtn.classList.add("active");
       if (pane) pane.classList.add("active");
       if (window.refreshMemory) window.refreshMemory();
       if (typeof renderAnalyticsView === "function") renderAnalyticsView();
       else if (window.renderAnalyticsView) window.renderAnalyticsView();
+    }
+
+    if (activeBtn && typeof updateTabIndicator === "function") {
+      updateTabIndicator(activeBtn);
     }
   }
   window.switchTab = switchTab;
@@ -3658,12 +3980,19 @@
     }
   };
   function setRunning(r){
+    window.isAgentRunning = !!r;
     runBtn.disabled = r;
     stopBtn.style.display = r ? "inline-flex" : "none";
     var panicBtn = document.getElementById("panicBtn");
     if (panicBtn) panicBtn.style.display = r ? "inline-flex" : "none";
     dot.className = "status-dot " + (r ? "busy" : (window._lastErr ? "err" : "ok"));
-    setStatus(r ? "Running" : (window._lastErr ? "Error" : "Idle"), r ? "w" : (window._lastErr ? "e" : ""));
+    var st = r ? "Running..." : (window._lastErr ? "Error" : "Idle");
+    setStatus(st, r ? "w" : (window._lastErr ? "e" : ""));
+
+    if (stLabel) {
+      if (r) stLabel.classList.add("live-shimmer-text");
+      else stLabel.classList.remove("live-shimmer-text");
+    }
   }
 
   var trustToggleBtn = document.getElementById("trustToggleBtn");
@@ -4197,6 +4526,188 @@
     }
   };
 
+  
+  /* ----- 3D Neural Orb Visual (Pure 3D Math on Canvas) ------------------- */
+  var neuralAnimId = null;
+  var neuralCanvas = document.getElementById("neuralCanvas");
+  var neuralCtx = neuralCanvas ? neuralCanvas.getContext("2d") : null;
+  var neuralPoints = [];
+  var neuralRotX = 0.2;
+  var neuralRotY = 0;
+  var targetRotX = 0.2;
+  var targetRotY = 0;
+
+  function initNeuralMesh() {
+    if (!neuralCanvas || !neuralCtx) return;
+    neuralPoints = [];
+    var N = 36;
+    var phi = Math.PI * (3 - Math.sqrt(5));
+    var radius = 36;
+
+    for (var i = 0; i < N; i++) {
+      var y = 1 - (i / (N - 1)) * 2;
+      var r = Math.sqrt(1 - y * y);
+      var theta = phi * i;
+      var x = Math.cos(theta) * r;
+      var z = Math.sin(theta) * r;
+      neuralPoints.push({
+        origX: x * radius,
+        origY: y * radius,
+        origZ: z * radius
+      });
+    }
+
+    document.addEventListener("mousemove", function(e) {
+      var cx = window.innerWidth / 2;
+      var cy = 200;
+      targetRotY = (e.clientX - cx) * 0.0015;
+      targetRotX = 0.2 + (e.clientY - cy) * 0.001;
+    });
+
+    renderNeuralFrame();
+  }
+
+  function renderNeuralFrame() {
+    if (!neuralCtx) return;
+    neuralAnimId = requestAnimationFrame(renderNeuralFrame);
+
+    var w = neuralCanvas.width;
+    var h = neuralCanvas.height;
+    neuralCtx.clearRect(0, 0, w, h);
+
+    var speed = (window.isAgentRunning ? 0.035 : 0.008);
+    neuralRotY += (targetRotY - neuralRotY) * 0.05 + speed;
+    neuralRotX += (targetRotX - neuralRotX) * 0.05;
+
+    var cosY = Math.cos(neuralRotY);
+    var sinY = Math.sin(neuralRotY);
+    var cosX = Math.cos(neuralRotX);
+    var sinX = Math.sin(neuralRotX);
+
+    var projected = [];
+    var fov = 110;
+    var cx = w / 2;
+    var cy = h / 2;
+
+    for (var i = 0; i < neuralPoints.length; i++) {
+      var p = neuralPoints[i];
+      // Rotate around Y
+      var x1 = p.origX * cosY - p.origZ * sinY;
+      var z1 = p.origZ * cosY + p.origX * sinY;
+      // Rotate around X
+      var y2 = p.origY * cosX - z1 * sinX;
+      var z2 = z1 * cosX + p.origY * sinX;
+
+      // Perspective project
+      var scale = fov / (fov + z2 + 50);
+      var px = cx + x1 * scale;
+      var py = cy + y2 * scale;
+      projected.push({ x: px, y: py, z: z2, scale: scale });
+    }
+
+    // Draw neural connections
+    neuralCtx.lineWidth = 0.6;
+    for (var i = 0; i < projected.length; i++) {
+      for (var j = i + 1; j < projected.length; j++) {
+        var dx = projected[i].x - projected[j].x;
+        var dy = projected[i].y - projected[j].y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 26) {
+          var alpha = (1 - dist / 26) * 0.45;
+          neuralCtx.strokeStyle = "rgba(255, 177, 127, " + alpha + ")";
+          neuralCtx.beginPath();
+          neuralCtx.moveTo(projected[i].x, projected[i].y);
+          neuralCtx.lineTo(projected[j].x, projected[j].y);
+          neuralCtx.stroke();
+        }
+      }
+    }
+
+    // Draw particle nodes
+    for (var i = 0; i < projected.length; i++) {
+      var pt = projected[i];
+      var depthAlpha = Math.max(0.2, (pt.z + 40) / 80);
+      var r = Math.max(1.2, pt.scale * 2.2);
+
+      neuralCtx.fillStyle = "rgba(255, 177, 127, " + (depthAlpha * 0.9) + ")";
+      neuralCtx.beginPath();
+      neuralCtx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+      neuralCtx.fill();
+
+      // Bright white core
+      neuralCtx.fillStyle = "rgba(245, 244, 242, " + depthAlpha + ")";
+      neuralCtx.beginPath();
+      neuralCtx.arc(pt.x, pt.y, r * 0.5, 0, Math.PI * 2);
+      neuralCtx.fill();
+    }
+  }
+
+  /* ----- Spring Tab Indicator -------------------------------------------- */
+  function updateTabIndicator(activeBtn) {
+    var ind = document.getElementById("tabIndicator");
+    if (!ind || !activeBtn) return;
+    var bar = activeBtn.parentElement;
+    if (!bar) return;
+    var barRect = bar.getBoundingClientRect();
+    var btnRect = activeBtn.getBoundingClientRect();
+    var left = btnRect.left - barRect.left;
+    var width = btnRect.width;
+    ind.style.transform = "translateX(" + left + "px)";
+    ind.style.width = width + "px";
+  }
+  window.updateTabIndicator = updateTabIndicator;
+
+  /* ----- Custom Glass Model Popover -------------------------------------- */
+  function toggleModelPopover(e) {
+    if (e) e.stopPropagation();
+    var pop = document.getElementById("modelPopover");
+    var pill = document.getElementById("modelPickerPill");
+    if (!pop) return;
+    var isHidden = pop.style.display === "none" || !pop.style.display;
+    pop.style.display = isHidden ? "block" : "none";
+    if (pill) {
+      if (isHidden) pill.classList.add("open");
+      else pill.classList.remove("open");
+    }
+  }
+  window.toggleModelPopover = toggleModelPopover;
+
+  function selectModelOption(val, label, e) {
+    if (e) e.stopPropagation();
+    var mSel = document.getElementById("modelSelect");
+    if (mSel) {
+      mSel.value = val;
+      if (window.onModelSelected) window.onModelSelected(val);
+    }
+    var curName = document.getElementById("modelCurrentName");
+    if (curName) curName.textContent = label;
+
+    var items = document.querySelectorAll(".popover-item");
+    items.forEach(function(el) {
+      if (el.getAttribute("data-model") === val) el.classList.add("selected");
+      else el.classList.remove("selected");
+    });
+
+    var pop = document.getElementById("modelPopover");
+    var pill = document.getElementById("modelPickerPill");
+    if (pop) pop.style.display = "none";
+    if (pill) pill.classList.remove("open");
+  }
+  window.selectModelOption = selectModelOption;
+
+  // Close popover on document click
+  document.addEventListener("click", function(e) {
+    var pop = document.getElementById("modelPopover");
+    var pill = document.getElementById("modelPickerPill");
+    if (pop && pop.style.display !== "none") {
+      if (!pop.contains(e.target) && (!pill || !pill.contains(e.target))) {
+        pop.style.display = "none";
+        if (pill) pill.classList.remove("open");
+      }
+    }
+  });
+
+  setTimeout(function(){ var activeBtn = document.querySelector('.tab-btn.active'); if (activeBtn) updateTabIndicator(activeBtn); initNeuralMesh(); }, 60);
   post({cmd:"ready"});
   post({cmd:"get_mcp"});
 })();
