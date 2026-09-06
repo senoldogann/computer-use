@@ -270,36 +270,43 @@ def test_real_life_cua_repl_textedit_e2e(tmp_path: Path) -> None:
         )
         assert typed not in content6, "the text survived select-all + delete"
     finally:
-        if client is not None:
-            # Put the desktop back, using the driver rather than AppleScript.
-            # ``osascript`` needs its own Automation consent, and without it
-            # the call blocks on a TCC prompt nobody is there to answer —
-            # measured: the cleanup hung for the full 30s timeout and failed a
-            # run whose assertions had all passed. The driver already holds
-            # Accessibility consent, so saving and closing through it costs no
-            # extra permission and cannot block.
-            try:
-                client.send(
-                    PressHotkey(type="press_hotkey", modifiers=["command"], key="s")
-                )
-                time.sleep(0.4)
-                client.send(
-                    PressHotkey(type="press_hotkey", modifiers=["command"], key="w")
-                )
-                time.sleep(0.4)
-            except (OSError, RuntimeError) as exc:
-                print(f"scratch document left open: {exc}", file=sys.stderr)
-            try:
-                client.close()
-            except OSError:
-                pass
-        driver_proc.terminate()
+        # Nested so that *nothing* in the desktop cleanup can skip the
+        # termination below. Measured the hard way: an earlier version called
+        # ``osascript`` here, it blocked on a TCC prompt and raised
+        # TimeoutExpired straight out of this block — leaving a driver running
+        # with ``--real`` on the user's machine for hours, holding live
+        # actuation capability nobody was watching. Tidying the desktop is
+        # best effort; putting the actuator down is not.
         try:
-            driver_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            driver_proc.kill()
-        if TEST_SOCKET.exists():
-            TEST_SOCKET.unlink()
+            if client is not None:
+                # Close the scratch window through the driver rather than
+                # AppleScript: ``osascript`` needs its own Automation consent,
+                # and without it the call blocks on a prompt nobody answers.
+                # The driver already holds Accessibility consent, so this costs
+                # no extra permission and cannot block.
+                try:
+                    client.send(
+                        PressHotkey(type="press_hotkey", modifiers=["command"], key="s")
+                    )
+                    time.sleep(0.4)
+                    client.send(
+                        PressHotkey(type="press_hotkey", modifiers=["command"], key="w")
+                    )
+                    time.sleep(0.4)
+                except (OSError, RuntimeError) as exc:
+                    print(f"scratch document left open: {exc}", file=sys.stderr)
+                try:
+                    client.close()
+                except OSError:
+                    pass
+        finally:
+            driver_proc.terminate()
+            try:
+                driver_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                driver_proc.kill()
+            if TEST_SOCKET.exists():
+                TEST_SOCKET.unlink()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS-only audit")
