@@ -131,7 +131,11 @@ pub fn owns_focused_modal(pid: u32) -> Result<bool, BackendError> {
     for _ in 0..32 {
         let role = string_attribute(current.as_CFTypeRef(), "AXRole").unwrap_or_default();
         let subrole = string_attribute(current.as_CFTypeRef(), "AXSubrole").unwrap_or_default();
-        modal |= role == "AXSheet" || role == "AXDialog" || subrole == "AXDialog";
+        let modal_attribute = copy_attribute(current.as_CFTypeRef(), "AXModal")
+            .and_then(|value| value.downcast::<CFBoolean>())
+            .is_some_and(|flag| flag == CFBoolean::true_value());
+        modal |= role == "AXSheet" || role == "AXDialog"
+            || subrole == "AXDialog" || subrole == "AXSystemDialog" || modal_attribute;
         let mut owner: i32 = 0;
         let status = unsafe { AXUIElementGetPid(current.as_CFTypeRef(), &mut owner) };
         if modal && status == AX_ERROR_SUCCESS && owner > 0 && owner as u32 == pid {
