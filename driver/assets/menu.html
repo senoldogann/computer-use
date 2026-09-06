@@ -2926,6 +2926,7 @@
 
   /* Shared Luxury Popover Shell */
   .luxury-floating-popover {
+    display: none !important;
     position: absolute !important;
     bottom: 42px !important;
     background: #1B1A19 !important;
@@ -2938,6 +2939,20 @@
     animation: popoverFadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) !important;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif !important;
     user-select: none !important;
+  }
+  .luxury-floating-popover.open {
+    display: block !important;
+  }
+  .reasoning-popover.open {
+    display: block !important;
+  }
+  .autonomy-popover.open {
+    display: flex !important;
+    flex-direction: column !important;
+  }
+  .model-palette-popover.open {
+    display: flex !important;
+    flex-direction: row !important;
   }
 
   @keyframes popoverFadeIn {
@@ -3015,8 +3030,6 @@
     left: 60px !important;
     width: 290px !important;
     padding: 6px !important;
-    display: flex !important;
-    flex-direction: column !important;
     gap: 3px !important;
   }
   .autonomy-card {
@@ -3065,8 +3078,6 @@
     left: 10px !important;
     width: 360px !important;
     height: 380px !important;
-    display: flex !important;
-    flex-direction: row !important;
     overflow: hidden !important;
     padding: 0 !important;
   }
@@ -3664,7 +3675,7 @@
         <div class="palette-search-wrapper">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#AAA8A3" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <input class="palette-search-input" id="paletteSearchInput" placeholder="OpenAI modellerinde ara..." oninput="filterPaletteModels(this.value)">
-          <button class="palette-close-btn" onclick="closeAllLuxuryPopovers()" title="Kapat (Esc)">✕</button>
+          <button class="palette-close-btn" onclick="event.preventDefault(); event.stopPropagation(); window.closeAllLuxuryPopovers();" title="Kapat (Esc)">✕</button>
         </div>
 
         <div id="unconfiguredProviderNotice" style="display:none;padding:16px;font-size:11px;color:#AAA8A3;line-height:1.45;text-align:center;">
@@ -6038,92 +6049,96 @@
   window.selectedModelId = "openai:gpt-4o";
   window.selectedModelName = "gpt-4o";
 
-  function closeAllLuxuryPopovers() {
+  window.closeAllLuxuryPopovers = function() {
     var r = document.getElementById("reasoningTierPopover");
     var a = document.getElementById("autonomyTierPopover");
     var m = document.getElementById("modelPaletteModal");
-    if (r) r.style.display = "none";
-    if (a) a.style.display = "none";
-    if (m) m.style.display = "none";
-    var btns = document.querySelectorAll(".ide-popover-trigger");
-    btns.forEach(function(b) { b.classList.remove("active"); });
-  }
+    var bd = document.getElementById("popoverBackdrop");
+    if (r) r.classList.remove("open");
+    if (a) a.classList.remove("open");
+    if (m) m.classList.remove("open");
+    if (bd) bd.style.setProperty("display", "none", "important");
+    document.querySelectorAll(".ide-popover-trigger").forEach(function(b) {
+      b.classList.remove("active");
+    });
+  };
 
   window.toggleReasoningPopover = function(e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     var p = document.getElementById("reasoningTierPopover");
+    var bd = document.getElementById("popoverBackdrop");
     if (!p) return;
-    var isOpen = p.style.display === "block";
-    closeAllLuxuryPopovers();
+    var isOpen = p.classList.contains("open");
+    window.closeAllLuxuryPopovers();
     if (!isOpen) {
-      p.style.display = "block";
+      p.classList.add("open");
+      if (bd) bd.style.setProperty("display", "block", "important");
       var btn = document.getElementById("reasoningTriggerBtn");
       if (btn) btn.classList.add("active");
     }
   };
 
   window.toggleAutonomyPopover = function(e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     var p = document.getElementById("autonomyTierPopover");
+    var bd = document.getElementById("popoverBackdrop");
     if (!p) return;
-    var isOpen = p.style.display === "block";
-    closeAllLuxuryPopovers();
+    var isOpen = p.classList.contains("open");
+    window.closeAllLuxuryPopovers();
     if (!isOpen) {
-      p.style.display = "block";
+      p.classList.add("open");
+      if (bd) bd.style.setProperty("display", "block", "important");
       var btn = document.getElementById("autonomyTriggerBtn");
       if (btn) btn.classList.add("active");
     }
   };
 
   window.toggleModelPalette = function(e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     var p = document.getElementById("modelPaletteModal");
+    var bd = document.getElementById("popoverBackdrop");
     if (!p) return;
-    var isOpen = p.style.display === "flex";
-    closeAllLuxuryPopovers();
+    var isOpen = p.classList.contains("open");
+    window.closeAllLuxuryPopovers();
     if (!isOpen) {
-      p.style.display = "flex";
+      p.classList.add("open");
+      if (bd) bd.style.setProperty("display", "block", "important");
       var btn = document.getElementById("modelTriggerBtn");
       if (btn) btn.classList.add("active");
       var searchInput = document.getElementById("paletteSearchInput");
       if (searchInput) {
         setTimeout(function() { searchInput.focus(); }, 50);
       }
+      post({ cmd: "get_models" });
     }
   };
 
   // PHOTO 2 Handlers
   window.selectReasoningOption = function(val, label, defaultTag, e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     window.selectedReasoning = val;
     var lbl = document.getElementById("reasoningTriggerLabel");
     if (lbl) lbl.textContent = label;
     document.querySelectorAll("#reasoningTierPopover .tier-item[data-reasoning]").forEach(function(el) {
-      if (el.getAttribute("data-reasoning") === val) {
-        el.classList.add("selected");
-      } else {
-        el.classList.remove("selected");
-      }
+      if (el.getAttribute("data-reasoning") === val) el.classList.add("selected");
+      else el.classList.remove("selected");
     });
-    closeAllLuxuryPopovers();
+    window.closeAllLuxuryPopovers();
   };
 
   window.selectServiceTier = function(tier, label, desc, e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     window.selectedServiceTier = tier;
     document.querySelectorAll("#reasoningTierPopover .tier-item[data-tier]").forEach(function(el) {
-      if (el.getAttribute("data-tier") === tier) {
-        el.classList.add("selected");
-      } else {
-        el.classList.remove("selected");
-      }
+      if (el.getAttribute("data-tier") === tier) el.classList.add("selected");
+      else el.classList.remove("selected");
     });
-    closeAllLuxuryPopovers();
+    window.closeAllLuxuryPopovers();
   };
 
   // PHOTO 3 Handlers
   window.selectAutonomyTier = function(mode, level, trust, label, e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     window.selectedAutonomyMode = mode;
     currentLevel = level;
     window.trustModeActive = trust;
@@ -6144,51 +6159,53 @@
     }
 
     document.querySelectorAll("#autonomyTierPopover .autonomy-card").forEach(function(el) {
-      if (el.getAttribute("data-mode") === mode) {
-        el.classList.add("selected");
-      } else {
-        el.classList.remove("selected");
-      }
+      if (el.getAttribute("data-mode") === mode) el.classList.add("selected");
+      else el.classList.remove("selected");
     });
 
     post({ cmd: "set_level", level: level });
-    closeAllLuxuryPopovers();
+    window.closeAllLuxuryPopovers();
   };
 
-  // PHOTO 1 Handlers
+  // PHOTO 1 Handlers (Models)
   window.selectPaletteModel = function(modelId, name, prov, e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     window.selectedModelId = modelId;
     window.selectedModelName = name;
     var lbl = document.getElementById("modelTriggerLabel");
     if (lbl) lbl.textContent = name;
 
     document.querySelectorAll("#paletteModelList .palette-model-item").forEach(function(el) {
-      if (el.getAttribute("data-model") === modelId) {
-        el.classList.add("selected");
-      } else {
-        el.classList.remove("selected");
-      }
+      if (el.getAttribute("data-model") === modelId) el.classList.add("selected");
+      else el.classList.remove("selected");
     });
 
-    closeAllLuxuryPopovers();
+    window.closeAllLuxuryPopovers();
   };
 
   window.filterByProvider = function(prov, e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     document.querySelectorAll(".palette-sidebar .palette-provider-btn").forEach(function(b) {
       if (b.getAttribute("data-prov") === prov) b.classList.add("active");
       else b.classList.remove("active");
     });
 
-    document.querySelectorAll("#paletteModelList .palette-model-item").forEach(function(item) {
-      if (prov === "all") {
-        item.style.display = "flex";
-      } else {
-        var itemProv = item.getAttribute("data-prov");
-        item.style.display = (itemProv === prov) ? "flex" : "none";
+    var notice = document.getElementById("unconfiguredProviderNotice");
+    var list = document.getElementById("paletteModelList");
+
+    if (prov !== "openai") {
+      if (notice) {
+        notice.style.display = "block";
+        var titles = { anthropic: "Anthropic / Claude", google: "Google / Gemini", local: "Local / Ollama" };
+        var envKeys = { anthropic: "ANTHROPIC_API_KEY", google: "GEMINI_API_KEY", local: "OLLAMA_HOST" };
+        document.getElementById("unconfiguredProviderTitle").textContent = (titles[prov] || prov) + " Yapılandırılmadı";
+        document.getElementById("unconfiguredProviderDesc").textContent = "Bu sağlayıcıyı kullanmak için ~/.computeruse/env dosyasına " + (envKeys[prov] || "API anahtarını") + " ekleyin.";
       }
-    });
+      if (list) list.style.display = "none";
+    } else {
+      if (notice) notice.style.display = "none";
+      if (list) list.style.display = "flex";
+    }
   };
 
   window.filterPaletteModels = function(query) {
@@ -6204,37 +6221,6 @@
     });
   };
 
-  // Global click outside to dismiss luxury popovers
-  document.addEventListener("click", function(e) {
-    var target = e.target;
-    if (!target.closest(".luxury-floating-popover") && !target.closest(".ide-popover-trigger")) {
-      closeAllLuxuryPopovers();
-    }
-  });
-
-  // Global keyboard shortcuts for Photo 1 (Cmd+1..4)
-  document.addEventListener("keydown", function(e) {
-    if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
-      if (e.key === "1") {
-        selectPaletteModel("openai:gpt-6-astra", "GPT-6-Astra", "Codex");
-        e.preventDefault();
-      } else if (e.key === "2") {
-        selectPaletteModel("openai:gpt-5.6-terra", "GPT-5.6-Terra", "Codex");
-        e.preventDefault();
-      } else if (e.key === "3") {
-        selectPaletteModel("openai:gpt-5.6-luna", "GPT-5.6-Luna", "Codex");
-        e.preventDefault();
-      } else if (e.key === "4") {
-        selectPaletteModel("openai:gpt-5.6-sol", "GPT-5.6-Sol", "Codex");
-        e.preventDefault();
-      } else if (e.key === "5") {
-        selectPaletteModel("anthropic:claude-3-7-sonnet", "Claude 3.7 Sonnet", "Anthropic");
-        e.preventDefault();
-      }
-    }
-  });
-
-
   // Dynamic Model Loader from Rust / OpenAI API
   window.onModelsLoaded = function(data) {
     if (!data) return;
@@ -6243,7 +6229,6 @@
     if (!container) return;
     container.innerHTML = "";
     
-    // Filter out models already in curated list
     var curatedIds = ["gpt-4o", "gpt-4o-mini", "o3-mini", "o1", "gpt-4-turbo"];
     var extraModels = list.filter(function(m) {
       var id = m.name || m.id.replace("openai:", "");
@@ -6257,7 +6242,7 @@
       item.setAttribute("data-model", "openai:" + id);
       item.setAttribute("data-prov", "openai");
       item.onclick = function(e) {
-        selectPaletteModel("openai:" + id, id, "OpenAI", e);
+        window.selectPaletteModel("openai:" + id, id, "OpenAI", e);
       };
       item.innerHTML = 
         '<div>' +
@@ -6277,131 +6262,39 @@
   };
 
   window.requestRefreshModels = function(e) {
-    if (e) e.stopPropagation();
+    if (e) { e.preventDefault(); e.stopPropagation(); }
     post({ cmd: "get_models" });
   };
 
-  // Override filterByProvider for configured vs unconfigured
-  var origFilterByProvider = window.filterByProvider;
-  window.filterByProvider = function(prov, e) {
-    if (e) e.stopPropagation();
-    document.querySelectorAll(".palette-sidebar .palette-provider-btn").forEach(function(b) {
-      if (b.getAttribute("data-prov") === prov) b.classList.add("active");
-      else b.classList.remove("active");
-    });
-
-    var notice = document.getElementById("unconfiguredProviderNotice");
-    var list = document.getElementById("paletteModelList");
-    var search = document.querySelector(".palette-search-wrapper");
-
-    if (prov !== "openai") {
-      if (notice) {
-        notice.style.display = "block";
-        var titles = {
-          anthropic: "Anthropic / Claude",
-          google: "Google / Gemini",
-          local: "Local / Ollama"
-        };
-        var envKeys = {
-          anthropic: "ANTHROPIC_API_KEY",
-          google: "GEMINI_API_KEY",
-          local: "OLLAMA_HOST"
-        };
-        document.getElementById("unconfiguredProviderTitle").textContent = (titles[prov] || prov) + " Yapılandırılmadı";
-        document.getElementById("unconfiguredProviderDesc").textContent = "Bu sağlayıcıyı kullanmak için ~/.computeruse/env dosyasına " + (envKeys[prov] || "API anahtarını") + " ekleyin.";
-      }
-      if (list) list.style.display = "none";
-    } else {
-      if (notice) notice.style.display = "none";
-      if (list) list.style.display = "flex";
+  // Global click outside to dismiss luxury popovers
+  document.addEventListener("click", function(e) {
+    var target = e.target;
+    if (!target.closest(".luxury-floating-popover") && !target.closest(".ide-popover-trigger")) {
+      window.closeAllLuxuryPopovers();
     }
-  };
+  });
 
-  // Close Popover Handler (Reliable Backdrop & Escape)
-  window.closeAllLuxuryPopovers = function() {
-    var r = document.getElementById("reasoningTierPopover");
-    var a = document.getElementById("autonomyTierPopover");
-    var m = document.getElementById("modelPaletteModal");
-    var bd = document.getElementById("popoverBackdrop");
-    if (r) r.style.display = "none";
-    if (a) a.style.display = "none";
-    if (m) m.style.display = "none";
-    if (bd) bd.style.display = "none";
-    var btns = document.querySelectorAll(".ide-popover-trigger");
-    btns.forEach(function(b) { b.classList.remove("active"); });
-  };
-
-  window.toggleReasoningPopover = function(e) {
-    if (e) e.stopPropagation();
-    var p = document.getElementById("reasoningTierPopover");
-    var bd = document.getElementById("popoverBackdrop");
-    if (!p) return;
-    var isOpen = p.style.display === "block";
-    closeAllLuxuryPopovers();
-    if (!isOpen) {
-      p.style.display = "block";
-      if (bd) bd.style.display = "block";
-      var btn = document.getElementById("reasoningTriggerBtn");
-      if (btn) btn.classList.add("active");
-    }
-  };
-
-  window.toggleAutonomyPopover = function(e) {
-    if (e) e.stopPropagation();
-    var p = document.getElementById("autonomyTierPopover");
-    var bd = document.getElementById("popoverBackdrop");
-    if (!p) return;
-    var isOpen = p.style.display === "block";
-    closeAllLuxuryPopovers();
-    if (!isOpen) {
-      p.style.display = "block";
-      if (bd) bd.style.display = "block";
-      var btn = document.getElementById("autonomyTriggerBtn");
-      if (btn) btn.classList.add("active");
-    }
-  };
-
-  window.toggleModelPalette = function(e) {
-    if (e) e.stopPropagation();
-    var p = document.getElementById("modelPaletteModal");
-    var bd = document.getElementById("popoverBackdrop");
-    if (!p) return;
-    var isOpen = p.style.display === "flex";
-    closeAllLuxuryPopovers();
-    if (!isOpen) {
-      p.style.display = "flex";
-      if (bd) bd.style.display = "block";
-      var btn = document.getElementById("modelTriggerBtn");
-      if (btn) btn.classList.add("active");
-      var searchInput = document.getElementById("paletteSearchInput");
-      if (searchInput) {
-        setTimeout(function() { searchInput.focus(); }, 50);
-      }
-      post({ cmd: "get_models" });
-    }
-  };
-
-  // Keyboard shortcut updates for real OpenAI models
+  // Global keyboard shortcuts (Escape and Cmd+1..5)
   document.addEventListener("keydown", function(e) {
     if (e.key === "Escape") {
-      closeAllLuxuryPopovers();
+      window.closeAllLuxuryPopovers();
       return;
     }
     if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
       if (e.key === "1") {
-        selectPaletteModel("openai:gpt-4o", "gpt-4o", "OpenAI");
+        window.selectPaletteModel("openai:gpt-4o", "gpt-4o", "OpenAI");
         e.preventDefault();
       } else if (e.key === "2") {
-        selectPaletteModel("openai:gpt-4o-mini", "gpt-4o-mini", "OpenAI");
+        window.selectPaletteModel("openai:gpt-4o-mini", "gpt-4o-mini", "OpenAI");
         e.preventDefault();
       } else if (e.key === "3") {
-        selectPaletteModel("openai:o3-mini", "o3-mini", "OpenAI");
+        window.selectPaletteModel("openai:o3-mini", "o3-mini", "OpenAI");
         e.preventDefault();
       } else if (e.key === "4") {
-        selectPaletteModel("openai:o1", "o1", "OpenAI");
+        window.selectPaletteModel("openai:o1", "o1", "OpenAI");
         e.preventDefault();
       } else if (e.key === "5") {
-        selectPaletteModel("openai:gpt-4-turbo", "gpt-4-turbo", "OpenAI");
+        window.selectPaletteModel("openai:gpt-4-turbo", "gpt-4-turbo", "OpenAI");
         e.preventDefault();
       }
     }
@@ -6412,7 +6305,7 @@
     post({ cmd: "get_models" });
   });
 
-</script>
+  </script>
 
   <!-- MCP Configuration Modal -->
   <div class="mcp-modal-backdrop" id="mcpModalBackdrop">
