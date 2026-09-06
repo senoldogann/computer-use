@@ -374,8 +374,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Trust mode: auto-approve every CONFIRM without prompting, so "
         "the agent runs uninterrupted like a human operator. BLOCK still "
-        "blocks, and the kill-switch (Cmd+Shift+Escape or Ctrl-C — shaking "
-        "the mouse is NOT wired up), "
+        "blocks, and the kill-switch (Cmd+Shift+Escape, shaking the mouse, "
+        "or Ctrl-C), "
         "budgets, verification and stuck-guard keep running. Every "
         "auto-approval is logged. This is delegation in advance — use it "
         "only on a machine you own.",

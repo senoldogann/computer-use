@@ -33,7 +33,12 @@ from computeruse.skills.registry import (
     search,
     track_record_bonus,
 )
-from computeruse.skills.schemas import SkillDefinition, SkillSummary, summary_of
+from computeruse.skills.schemas import (
+    SUMMARY_DESCRIPTION_MAX,
+    SkillDefinition,
+    SkillSummary,
+    summary_of,
+)
 
 
 def _definition(**overrides: object) -> SkillDefinition:
@@ -513,3 +518,55 @@ def test_recording_against_a_missing_skill_is_survivable(tmp_path) -> None:
     """The run has already finished; failing its bookkeeping would turn a
     completed task into an error."""
     SkillRegistry(tmp_path).record_outcome("nope.gone", succeeded=True)
+
+
+def test_a_long_goal_still_produces_a_readable_skill(tmp_path: Path) -> None:
+    """Distilling a long goal must not write a skill nobody can read back.
+
+    Field pathology, measured on a live two-application run: the distiller
+    puts the goal into the definition's description, real goals for real
+    multi-step work run past 200 characters, and ``summary_of`` copied that
+    straight into a summary field capped at 200. The registry then rejected
+    its own output — ``skipping unreadable skill textedit.abae...: 1
+    validation error`` — on every subsequent read.
+
+    The damage was invisible from the outside: the run printed
+    ``distill: skill (textedit.abae...)`` as a success and the file was on
+    disk, so Law 3 looked alive while every skill the session learned was
+    already unreachable. Both skills that session distilled measured 265 and
+    320 characters.
+
+    Two-stage retrieval is what makes the fix obvious: the *definition* is
+    allowed to be long — it is loaded on demand — and only the *summary*
+    carries a context budget, so the summary is the thing that condenses.
+    """
+    goal = (
+        "TextEdit'te acik olan rapor.txt belgesine su uc bolumu yaz. Her bolum "
+        "basligi kendi satirinda olsun: BOLUM 1: DURUM / Sistem kararli "
+        "calisiyor. BOLUM 2: RISK / Coklu ekran dogrulanmadi. BOLUM 3: KARAR / "
+        "Sinirli onay verildi. Yazma bittiginde belgeyi Command+S ile kaydet."
+    )
+    assert len(goal) > SUMMARY_DESCRIPTION_MAX, "the fixture must exercise the limit"
+
+    definition = _definition(
+        skill_id="textedit.long-goal",
+        description=goal,
+        app="TextEdit",
+        steps=("press_hotkey command+a", "clipboard_paste", "press_hotkey command+s"),
+    )
+    registry = SkillRegistry(tmp_path)
+    registry.save(definition)
+
+    # The whole point: the index must contain it, not skip it.
+    index = registry.index()
+    assert [s.skill_id for s in index] == ["textedit.long-goal"], (
+        "a skill distilled from a long goal vanished from the Stage-1 index"
+    )
+    summary = index[0]
+    assert len(summary.description) <= SUMMARY_DESCRIPTION_MAX
+    # Condensed, not emptied — the summary is what a model reads to decide
+    # whether the skill is worth loading.
+    assert summary.description.startswith("TextEdit'te acik olan rapor.txt")
+    assert summary.description.endswith("…")
+    # Stage 2 keeps the whole thing; only the context-budgeted view shrinks.
+    assert registry.load("textedit.long-goal").description == goal

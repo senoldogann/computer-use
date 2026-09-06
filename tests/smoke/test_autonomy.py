@@ -23,6 +23,7 @@ from computeruse.orchestrator.schemas import (
     LoadSkill,
     MouseClick,
     PressHotkey,
+    TypeText,
     Wait,
     WebFetch,
     WebSearch,
@@ -559,3 +560,62 @@ def test_calculator_clear_is_not_destructive() -> None:
         action=CallTool(type="call_tool", tool="files.delete", arguments={}),
     )
     assert classify_risk(tool, target_label="Tümünü Sil") is Risk.DESTRUCTIVE
+
+
+def test_text_formatting_is_not_disk_formatting() -> None:
+    """"format" as a noun must not park a run asking to move a cursor.
+
+    Field pathology, measured on a live run: the sub-goal "Append the three
+    observed Hacker News items in the requested format and save rapor.txt"
+    put "format" in the subject, "format" lives in the *overwrite* family for
+    "format the drive", and a ``command+end`` keypress — move the cursor to
+    the end of the document — came back DESTRUCTIVE. At Level 3 the run
+    stopped and asked a human; unattended it would have parked the mission.
+
+    The same reasoning that removed "drop" from the delete family (it split
+    "Drop-down") applies here: a marker that fires on ordinary document
+    vocabulary trains its user to click through the guard. Qualifying it is
+    the fix, not deleting it — formatting a disk is still destructive.
+    """
+    cursor_to_end = AgentTurn(
+        thought="",
+        sub_goal="Append the three observed items in the requested format and save",
+        action=PressHotkey(type="press_hotkey", modifiers=["command"], key="end"),
+    )
+    assert classify_risk(cursor_to_end) is Risk.ROUTINE
+    assert decide_permission(AutonomyLevel.FULL, Risk.ROUTINE) is PermissionDecision.ALLOW
+
+    # The dangerous sense is untouched: an object makes it real again.
+    wipe = AgentTurn(
+        thought="",
+        sub_goal="format the USB drive before writing the image",
+        action=TypeText(type="type_text", text="ok"),
+    )
+    assert classify_risk(wipe) is Risk.DESTRUCTIVE
+
+
+def test_command_backspace_is_move_to_trash_like_command_delete() -> None:
+    """One physical key, one verdict.
+
+    macOS draws Backspace and Delete as the same key, and Command+it is "Move
+    to Trash" whichever name the caller uses. The classifier appended the raw
+    key name to the subject, so ``command+delete`` was DESTRUCTIVE (the word
+    is a marker) while ``command+backspace`` was Risk.NONE — the same gesture
+    waved through because of spelling. The readiness audit raised this; the
+    test that claimed to cover it actually measured the *grant* verb, which
+    came from the word "remove" in a sub-goal rather than from the key.
+    """
+    def hotkey(key: str, *modifiers: str) -> AgentTurn:
+        return AgentTurn(
+            thought="",
+            sub_goal="move the selection",
+            action=PressHotkey(
+                type="press_hotkey", modifiers=list(modifiers), key=key
+            ),
+        )
+
+    assert classify_risk(hotkey("delete", "command")) is Risk.DESTRUCTIVE
+    assert classify_risk(hotkey("backspace", "command")) is Risk.DESTRUCTIVE
+    # Bare, they are ordinary text editing and must stay free.
+    assert classify_risk(hotkey("backspace")) is Risk.NONE
+    assert classify_risk(hotkey("delete")) is Risk.NONE

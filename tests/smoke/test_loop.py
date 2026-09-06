@@ -366,6 +366,51 @@ def test_stuck_loop_injects_corrective_hint_after_two() -> None:
     assert executed == [(42, 42), (42, 42), (42, 42)]
 
 
+def test_an_alternating_two_action_cycle_is_caught_like_a_repeat() -> None:
+    """A model ping-ponging between two actions must be stopped, not indulged.
+
+    Field pathology, measured on a live two-application run: the model
+    alternated ``activate_app TextEdit`` and ``activate_app Google Chrome``
+    for 54 of 62 steps — roughly 490k tokens and six minutes of real machine
+    time — and the stuck guard never fired once. It compared each action with
+    only the immediately preceding one, and in an A/B/A/B cycle no two
+    *consecutive* actions are ever equal, so the streak reset on every step.
+    ``max_steps`` ended the run, which is the backstop, not the guard.
+
+    Law 2.2 promises a run can never click forever. This pins the promise
+    against a cycle rather than only against a stutter.
+    """
+    seen: list[str | None] = []
+    executed: list[str] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        seen.append(state.last_error)
+        if state.step_index >= 8:
+            return _turn(Finish(type="finish", status="success", summary="ok"))
+        # Nothing about the screen changes, so neither action ever progresses.
+        return _turn(_click(10, 10) if state.step_index % 2 == 0 else _click(90, 90))
+
+    def execute_physical(action: object) -> None:
+        if isinstance(action, MouseClick):
+            executed.append(f"{action.x},{action.y}")
+
+    runner = OodaRunner(
+        provider=provider, execute_physical=execute_physical, max_steps=12
+    )
+    runner.run(goal="oscillate between two dead targets")
+
+    # The refusal reaches the model as a failure it must answer, exactly like
+    # the streak guard's does. On the live run this fired zero times in 54
+    # oscillating steps.
+    refusals = [e for e in seen if e is not None and "stuck loop" in e]
+    assert refusals, "an A/B/A/B cycle went unnoticed by the stuck guard"
+    # Refused *before* the host: at least one turn produced no actuation.
+    assert len(executed) < len(seen) - 1, (
+        f"{len(executed)} actuations for {len(seen)} turns — nothing was "
+        "refused before it reached the host"
+    )
+
+
 def test_stuck_loop_refuses_the_fourth_identical_click_and_then_ends() -> None:
     """A model that never varies is stopped, and the run still terminates.
 
@@ -394,9 +439,33 @@ def test_stuck_loop_refuses_the_fourth_identical_click_and_then_ends() -> None:
     assert len(executed) == 3
 
 
-def test_stuck_guard_ignores_distinct_actions() -> None:
-    """Alternating genuinely distinct targets never trip the guard."""
+def test_distinct_targets_run_freely_while_the_screen_advances() -> None:
+    """Alternating genuinely distinct targets never trip the guard.
+
+    This used to be asserted against a screen that never changed at all,
+    which conflated two different things: *distinct targets* (fine) and
+    *going nowhere* (not fine). A live two-application run showed what the
+    conflation costs — 54 of 62 steps alternating between two actions, each
+    of which succeeded, ended only by ``max_steps`` — so the no-progress half
+    is now caught by the cycle guard
+    (``test_an_alternating_two_action_cycle_is_caught_like_a_repeat``).
+
+    What this test protects is the half that was always legitimate, and it
+    now says so explicitly: the screen advances between steps, so the run is
+    getting somewhere and the guard must stay out of its way.
+    """
     executed: list[tuple[int, int]] = []
+    reading = 0
+
+    def ax_probe() -> AxProbeResult:
+        nonlocal reading
+        reading += 1
+        # A screen that is actually moving: every step observes a new state,
+        # so no state is ever revisited.
+        return AxProbeResult(
+            summaries=(f'Button "step {reading}" at (10,10) 20x20',),
+            content=(f"page {reading}",),
+        )
 
     def provider(state: WorkingState) -> AgentTurn:
         if state.step_index >= 6:
@@ -410,7 +479,12 @@ def test_stuck_guard_ignores_distinct_actions() -> None:
         if isinstance(action, MouseClick):
             executed.append((action.x, action.y))
 
-    runner = OodaRunner(provider=provider, execute_physical=execute_physical, max_steps=10)
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=execute_physical,
+        ax_probe=ax_probe,
+        max_steps=10,
+    )
     final = runner.run(goal="alternate")
     assert final.step_index == 7
     assert len(executed) == 6

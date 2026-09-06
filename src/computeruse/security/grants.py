@@ -61,6 +61,7 @@ from computeruse.security.autonomy import (
     AutonomyLevel,
     Risk,
     decide_permission,
+    destructive_hits,
     intent_words,
     is_command_payload,
 )
@@ -228,7 +229,9 @@ def action_verbs(action: Action, *, sub_goal: str, target_label: str | None) -> 
             subject = f"{subject} {action.tool}".lower()
         words = intent_words(subject)
         for family, markers in DESTRUCTIVE_FAMILIES.items():
-            if words & markers:
+            # Same qualified test the classifier applies, so a grant can never
+            # cover a family the guard would not have flagged.
+            if destructive_hits(words, markers):
                 found.add(family)
     if isinstance(action, (TypeText, ClipboardPaste, CallTool)):
         # The payload is inspected for command words the same way the guard
@@ -246,7 +249,7 @@ def action_verbs(action: Action, *, sub_goal: str, target_label: str | None) -> 
             nested = " ".join(_grant_argument_strings(action.arguments, depth=0)).lower()
             nested_words = intent_words(nested)
             for family, markers in DESTRUCTIVE_FAMILIES.items():
-                if nested_words & markers:
+                if destructive_hits(nested_words, markers):
                     found.add(family)
     return frozenset(found)
 

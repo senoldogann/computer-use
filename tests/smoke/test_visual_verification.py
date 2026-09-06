@@ -796,6 +796,65 @@ def test_focus_drift_reactivates_the_target_app() -> None:
     assert "mouse_click" in dispatched
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        TypeText(type="type_text", text="BOLUM 3: KARAR"),
+        ClipboardPaste(type="clipboard_paste", text="BOLUM 3: KARAR"),
+        PressHotkey(type="press_hotkey", modifiers=["command"], key="s"),
+    ],
+    ids=["type_text", "clipboard_paste", "press_hotkey"],
+)
+def test_focus_guard_covers_the_keyboard_not_just_the_pointer(action: object) -> None:
+    """Keystrokes must not be delivered to whatever app happens to be in front.
+
+    Field pathology, measured on a live host: with ``--app TextEdit`` pinned,
+    focus drifted to Chrome mid-run and the loop typed the document body into
+    Chrome's address bar. The window title it left behind interleaves the two
+    strings character by character —
+    ``IhStKtpCso:k/l/ut re.kwriakni pdeodgirau...`` splits into
+    ``https://tr.wikipedia.org/wiki/Yapay_zek\u00e2`` and
+    ``Coklu ekran dogrulanmadi....BOLUM 3: KAR`` — so the user's content went
+    somewhere they never chose.
+
+    The guard existed and refused exactly this for clicks. It returned on its
+    first line for anything without coordinates, on the reasoning that focus
+    drift invalidates *coordinates*. A keystroke carries none: it goes to
+    whoever holds focus, which makes drift worse for the keyboard, not
+    milder. All three keyboard actions are covered, because they reach the
+    same wrong window by three different routes.
+    """
+    dispatched: list[str] = []
+    frontmost = {"app": "Chrome"}
+
+    def execute(dispatched_action: object) -> None:
+        dispatched.append(getattr(dispatched_action, "type", "?"))
+        if isinstance(dispatched_action, ActivateApp):
+            frontmost["app"] = dispatched_action.app
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(action)
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=execute,
+        window_probe=lambda: FocusedWindow(
+            pid=1, app_name=frontmost["app"], window_title=""
+        ),
+        app="TextEdit",
+        app_is_pinned=True,
+        max_steps=5,
+    )
+    runner.run(goal="write the report into TextEdit")
+    assert dispatched[0] == "activate_app", (
+        f"{getattr(action, 'type', '?')} was delivered while Chrome owned the "
+        "screen; the target app must be re-asserted first"
+    )
+    assert getattr(action, "type", "?") in dispatched
+
+
 def test_focus_guard_is_inert_for_an_unpinned_run() -> None:
     """A run that merely discovered the frontmost app has no drift to guard."""
     dispatched: list[str] = []
