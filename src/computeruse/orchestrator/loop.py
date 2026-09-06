@@ -1246,6 +1246,11 @@ class OodaRunner:
         self._last_tool: Action | None = None
         self._tool_streak: int = 0
         self._last_verdict: Evidence | None = None
+        # A post-action AX probe that still describes the current screen, kept
+        # so the next OBSERVE does not pay for the same reading twice. Set by
+        # verification, consumed by the next observation, dropped by anything
+        # that could invalidate it (see ``_carry_ax_probe``).
+        self._fresh_ax: AxProbeResult | None = None
         # The action awaiting a progress verdict, and the observation
         # signature captured just before it ran.
         self._pending_action: Action | None = None
@@ -1279,6 +1284,7 @@ class OodaRunner:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
         self._executed = []
         self._sub_goals = []
+        self._fresh_ax = None
         self._skill = None
         self._playbook = None
         self._playbook_scanned = False
@@ -1555,6 +1561,12 @@ class OodaRunner:
         # map's image space; convert them to real screen points before
         # anything validates or actuates them. ``ScreenMap`` owns the
         # direction, so the conversion cannot be applied backwards.
+        # The carried probe is worth exactly one observation. Dropping it here
+        # — at the top of every step, before anything actuates, waits or calls
+        # a tool — is what keeps the reuse rule simple enough to be safe: only
+        # a reading taken by *this* step's verification can serve the next
+        # step, and a step that never verified physically hands on nothing.
+        self._fresh_ax = None
         screen_map = self._observation.screen_map
         if screen_map is not None:
             decision = decision.model_copy(
@@ -2074,10 +2086,15 @@ class OodaRunner:
         if self.ax_probe is None:
             return AxProbeResult()
         try:
-            return self.ax_probe()
+            probed = self.ax_probe()
         except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
             LOGGER.debug("ax probe failed during verification: %s", exc)
             return AxProbeResult()
+        # Taken after the settle wait, so it already describes the settled
+        # post-action screen — which is exactly what the next OBSERVE is about
+        # to go and read again. Hand it forward instead (see ``_observe``).
+        self._fresh_ax = probed
+        return probed
 
     # ------------------------------------------------------------------
     # Gates
@@ -2458,7 +2475,21 @@ class OodaRunner:
         # Carried forward with the rest of the perception when a probe fails:
         # losing sight of a password box must not read as "there isn't one".
         asks_for_credential = previous.asks_for_credential
-        if self.ax_probe is not None:
+        carried = self._fresh_ax
+        self._fresh_ax = None
+        if carried is not None:
+            # The previous step's verification already read this screen, after
+            # its settle wait and with no actuation since. Re-reading costs a
+            # full accessibility walk — measured at ~400ms on a real web page,
+            # because every node is a handful of cross-process attribute reads
+            # — to learn what is already in hand. Two probes per step was half
+            # the loop's perception budget spent on the same answer twice.
+            raw_ui_elements = carried.summaries
+            content = carried.content
+            open_tabs = carried.open_tabs
+            asks_for_credential = carried.asks_for_credential
+            self._ax_probe_failures = 0
+        elif self.ax_probe is not None:
             try:
                 ax_result = self.ax_probe()
                 self._ax_probe_failures = 0
