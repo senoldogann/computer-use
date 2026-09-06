@@ -22,32 +22,32 @@
     --specular-deep: inset 0 -1.5px 1.5px 0 rgba(0, 0, 0, 0.35);
     --liquid-glow: 0 24px 64px rgba(0, 0, 0, 0.60), 0 0 1px 1px rgba(255, 255, 255, 0.12);
 
-    /* Liquid Vibrant Accents */
-    --accent: #FF6B4A;                   /* Liquid Coral Orange */
-    --accent-hover: #FF8566;
-    --accent-glow: rgba(255, 107, 74, 0.40);
-    --accent-gradient: linear-gradient(135deg, #FF8566 0%, #FF6B4A 50%, #E64C2E 100%);
+    /* Cohesive Apple macOS & visionOS Liquid Glass Palette */
+    --accent: #007AFF;                   /* Apple System Blue */
+    --accent-hover: #268FFF;
+    --accent-glow: rgba(0, 122, 255, 0.35);
+    --accent-gradient: linear-gradient(180deg, #007AFF 0%, #0062D2 100%);
     
     --bg-base: transparent;
     --surface: rgba(255, 255, 255, 0.05);
     --surface-hover: rgba(255, 255, 255, 0.09);
     --surface-active: rgba(255, 255, 255, 0.14);
-    --border: rgba(255, 255, 255, 0.13);
-    --border-highlight: rgba(255, 255, 255, 0.25);
+    --border: rgba(255, 255, 255, 0.12);
+    --border-highlight: rgba(255, 255, 255, 0.24);
     --border-subtle: rgba(255, 255, 255, 0.07);
 
     --text-primary: #FFFFFF;
-    --text-secondary: rgba(235, 235, 245, 0.72);
-    --text-tertiary: rgba(235, 235, 245, 0.42);
+    --text-secondary: rgba(235, 235, 245, 0.75);
+    --text-tertiary: rgba(235, 235, 245, 0.45);
 
     --success: #30D158;                  /* Apple Emerald */
-    --success-glow: rgba(48, 209, 88, 0.38);
+    --success-glow: rgba(48, 209, 88, 0.35);
     --warning: #FFD60A;                  /* Apple Vivid Amber */
-    --warning-glow: rgba(255, 214, 10, 0.38);
-    --error: #FF453A;                    /* Apple Red / Coral */
-    --error-glow: rgba(255, 69, 58, 0.40);
-    --purple: #BF5AF2;                   /* Apple Violet */
-    --cyan: #64D2FF;                     /* Apple Electric Cyan */
+    --warning-glow: rgba(255, 214, 10, 0.35);
+    --error: #FF453A;                    /* Apple Red */
+    --error-glow: rgba(255, 69, 58, 0.35);
+    --purple: #007AFF;                   /* Cohesive Accent */
+    --cyan: #5AC8FA;                     /* Soft Apple Sky */
 
     --radius-sm: 8px;
     --radius-md: 12px;
@@ -117,7 +117,7 @@
     flex: 0 0 auto;
     display: grid;
     place-items: center;
-    background: var(--accent-gradient);
+    background: linear-gradient(135deg, #007AFF 0%, #0051B3 100%);
     box-shadow: 0 2px 10px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.35);
     position: relative;
     color: #FFFFFF;
@@ -161,7 +161,7 @@
     gap: 6px;
     padding: 3px 9px;
     border-radius: var(--radius-pill);
-    background: #262521;
+    background: rgba(255, 255, 255, 0.05);
     border: 0.5px solid var(--border);
   }
 
@@ -204,7 +204,7 @@
     gap: 5px;
     padding: 3px 8px;
     border-radius: var(--radius-pill);
-    background: #262521;
+    background: rgba(255, 255, 255, 0.05);
     border: 0.5px solid var(--border);
     font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
     font-size: 9.5px;
@@ -304,7 +304,7 @@
   }
 
   .tab-btn svg { width: 13px; height: 13px; flex-shrink: 0; }
-  .tab-btn:hover { background: #262521; color: var(--text-primary); }
+  .tab-btn:hover { background: rgba(255, 255, 255, 0.05); color: var(--text-primary); }
   .tab-btn.active {
     background: #2A2924;
     color: #FAF9F5;
@@ -361,7 +361,7 @@
     width: 34px;
     height: 34px;
     border-radius: 9px;
-    background: #262521;
+    background: rgba(255, 255, 255, 0.05);
     border: 0.5px solid var(--border);
     display: grid;
     place-items: center;
@@ -393,7 +393,7 @@
   .chip {
     padding: 6.5px 10px;
     border-radius: 8px;
-    background: #22211D;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.5px solid var(--border);
     color: var(--text-secondary);
     font-size: 10.5px;
@@ -714,7 +714,7 @@
   .clear-history-btn:hover { background: #282828; color: var(--error); }
 
   .history-card {
-    background: #1A1A1A;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.5px solid var(--border);
     border-radius: 8px;
     padding: 9px 11px;
@@ -724,7 +724,7 @@
     transition: all 0.15s ease;
   }
   .history-card:hover {
-    background: #202020;
+    background: rgba(255, 255, 255, 0.08);
     border-color: var(--border-highlight);
   }
 
@@ -770,21 +770,29 @@
 
   .rerun-btn {
     padding: 3px 8px;
-    border-radius: 5px;
+    border-radius: var(--radius-pill);
     font-size: 10px;
     font-weight: 600;
-    background: rgba(80, 165, 116, 0.12);
-    border: 0.5px solid rgba(80, 165, 116, 0.35);
-    color: var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+    border: 0.5px solid rgba(255, 255, 255, 0.16);
+    color: #FFFFFF;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    flex-shrink: 0;
     transition: all 0.15s ease;
   }
   .rerun-btn:hover {
-    background: var(--accent);
-    color: #fff;
+    background: rgba(0, 122, 255, 0.3);
+    border-color: rgba(0, 122, 255, 0.6);
+    color: #FFF;
+    box-shadow: 0 0 8px rgba(0, 122, 255, 0.35);
+  }
+  .rerun-btn svg, .skill-card svg, .history-card svg {
+    width: 11px !important;
+    height: 11px !important;
+    flex-shrink: 0 !important;
   }
 
   /* ----- Tab 3: Analytics View ------------------------------------------- */
@@ -802,7 +810,7 @@
   }
 
   .kpi-card {
-    background: #1A1A1A;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.5px solid var(--border);
     border-radius: 8px;
     padding: 10px 12px;
@@ -844,7 +852,7 @@
   .section-title svg { width: 12px; height: 12px; color: var(--accent); }
 
   .actions-list {
-    background: #1A1A1A;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.5px solid var(--border);
     border-radius: 8px;
     padding: 8px 12px;
@@ -872,7 +880,7 @@
   }
 
   .skill-card {
-    background: #1A1A1A;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.5px solid var(--border);
     border-radius: 8px;
     padding: 8px 11px;
@@ -945,23 +953,24 @@
   }
 
   .autonomy-toggle-btn.full {
-    color: var(--accent);
-    background: rgba(217, 119, 87, 0.12);
-    border: 0.5px solid rgba(217, 119, 87, 0.35);
+    color: #FFFFFF;
+    background: rgba(0, 122, 255, 0.18);
+    border: 0.5px solid rgba(0, 122, 255, 0.45);
+    box-shadow: 0 0 8px rgba(0, 122, 255, 0.25);
   }
   .autonomy-toggle-btn.full:hover {
-    background: rgba(217, 119, 87, 0.22);
-    box-shadow: 0 0 8px rgba(217, 119, 87, 0.25);
+    background: rgba(0, 122, 255, 0.28);
+    border-color: rgba(0, 122, 255, 0.65);
   }
 
   .autonomy-toggle-btn.guarded {
-    color: var(--warning);
-    background: rgba(212, 163, 89, 0.10);
-    border: 0.5px solid rgba(212, 163, 89, 0.30);
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.5px solid var(--border-subtle);
   }
   .autonomy-toggle-btn.guarded:hover {
-    background: rgba(212, 163, 89, 0.18);
-    box-shadow: 0 0 8px rgba(212, 163, 89, 0.20);
+    background: rgba(255, 255, 255, 0.08);
+    color: #FFFFFF;
   }
 
   .autonomy-icon {
@@ -984,18 +993,19 @@
     line-height: 1.2;
   }
   .mcp-toggle-btn.on {
-    color: var(--purple);
-    background: rgba(157, 121, 188, 0.12);
-    border: 0.5px solid rgba(157, 121, 188, 0.35);
+    color: #FFFFFF;
+    background: rgba(0, 122, 255, 0.18);
+    border: 0.5px solid rgba(0, 122, 255, 0.45);
+    box-shadow: 0 0 8px rgba(0, 122, 255, 0.25);
   }
   .mcp-toggle-btn.on:hover {
-    background: rgba(157, 121, 188, 0.22);
-    box-shadow: 0 0 8px rgba(157, 121, 188, 0.25);
+    background: rgba(0, 122, 255, 0.28);
+    border-color: rgba(0, 122, 255, 0.65);
   }
   .mcp-toggle-btn.off {
     color: var(--text-tertiary);
-    background: rgba(255, 255, 255, 0.05);
-    border: 0.5px solid rgba(255, 255, 255, 0.10);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.5px solid var(--border-subtle);
   }
   .mcp-icon {
     display: inline-flex;
@@ -1017,29 +1027,30 @@
     line-height: 1.2;
   }
   .trust-toggle-btn.on {
-    color: var(--success);
-    background: rgba(120, 140, 93, 0.15);
-    border: 0.5px solid rgba(120, 140, 93, 0.4);
+    color: #FFFFFF;
+    background: rgba(48, 209, 88, 0.18);
+    border: 0.5px solid rgba(48, 209, 88, 0.45);
+    box-shadow: 0 0 8px rgba(48, 209, 88, 0.25);
   }
   .trust-toggle-btn.on:hover {
-    background: rgba(120, 140, 93, 0.25);
-    box-shadow: 0 0 8px var(--success-glow);
+    background: rgba(48, 209, 88, 0.28);
+    border-color: rgba(48, 209, 88, 0.65);
   }
   .trust-toggle-btn.off {
     color: var(--text-tertiary);
-    background: rgba(255, 255, 255, 0.05);
-    border: 0.5px solid rgba(255, 255, 255, 0.10);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.5px solid var(--border-subtle);
   }
 
   .pos-toggle-btn {
     font-size: 9.5px;
     font-weight: 600;
     padding: 2px 7.5px;
-    border-radius: 4px;
+    border-radius: var(--radius-pill);
     cursor: pointer;
-    color: var(--cyan);
-    background: rgba(106, 155, 204, 0.10);
-    border: 0.5px solid rgba(106, 155, 204, 0.30);
+    color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.5px solid var(--border-subtle);
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -1048,7 +1059,8 @@
     transition: all 0.15s ease;
   }
   .pos-toggle-btn:hover {
-    background: rgba(106, 155, 204, 0.20);
+    background: rgba(255, 255, 255, 0.08);
+    color: #FFFFFF;
   }
   .pos-icon {
     display: inline-flex;
@@ -1105,7 +1117,7 @@
     gap: 8px;
     padding: 10px 12px;
     border-radius: var(--radius-md);
-    background: #22211D;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.5px solid var(--border);
   }
   .mcp-installed-header {
@@ -1128,7 +1140,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background: #282723;
+    background: rgba(255, 255, 255, 0.06);
     border: 0.5px solid #383630;
     border-radius: var(--radius-pill);
     padding: 3px 8px 3px 6px;
@@ -1178,13 +1190,13 @@
     align-items: center;
     justify-content: space-between;
     padding: 9px 12px;
-    background: #22211D;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.5px solid var(--border);
     border-radius: var(--radius-md);
     transition: all 0.15s ease;
   }
   .mcp-card:hover {
-    background: #2A2925;
+    background: rgba(255, 255, 255, 0.08);
     border-color: var(--border-highlight);
     transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
@@ -1200,7 +1212,7 @@
     width: 30px;
     height: 30px;
     border-radius: 8px;
-    background: #282723;
+    background: rgba(255, 255, 255, 0.06);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1243,7 +1255,7 @@
     gap: 4px;
   }
   .mcp-action-btn.install {
-    background: #2A2925;
+    background: rgba(255, 255, 255, 0.08);
     color: var(--text-primary);
     border: 0.5px solid var(--border-highlight);
   }
@@ -1274,7 +1286,7 @@
   .mcp-modal {
     width: 100%;
     max-width: 380px;
-    background: #22211D;
+    background: rgba(255, 255, 255, 0.04);
     border: 0.75px solid #45433B;
     border-radius: var(--radius-lg);
     padding: 16px;
@@ -1327,7 +1339,7 @@
 
   .text-input {
     width: 100%;
-    background: #262521;
+    background: rgba(255, 255, 255, 0.05);
     border: 0.5px solid #383630;
     border-radius: var(--radius-md);
     color: var(--text-primary);
@@ -1367,7 +1379,7 @@
 
   .btn-primary {
     flex: 1;
-    background: var(--accent-gradient);
+    background: linear-gradient(135deg, #007AFF 0%, #0051B3 100%);
     color: #fff;
     box-shadow: 0 2px 8px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.35);
   }
@@ -1456,7 +1468,7 @@
   .budget-fill {
     height: 100%;
     width: 0%;
-    background: linear-gradient(90deg, #30D158 0%, #64D2FF 60%, #BF5AF2 100%);
+    background: linear-gradient(90deg, #007AFF 0%, #30D158 100%);
     border-radius: var(--radius-pill);
     transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1), background 0.3s ease;
     box-shadow: 0 0 8px rgba(48, 209, 88, 0.5);
@@ -1673,10 +1685,10 @@
 
   /* Primary Action Button Glass Glow */
   .btn-primary {
-    background: var(--accent-gradient) !important;
+    background: linear-gradient(180deg, #007AFF 0%, #0062D2 100%) !important;
     border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
     border-radius: 10px !important;
-    box-shadow: 0 4px 16px var(--accent-glow), inset 0 1px 1.5px rgba(255, 255, 255, 0.5) !important;
+    box-shadow: 0 4px 14px rgba(0, 122, 255, 0.35), inset 0 1px 1.5px rgba(255, 255, 255, 0.5) !important;
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
   }
   .btn-primary:hover {
@@ -1788,9 +1800,9 @@
           <span>Görsel Odak Lensi</span>
         </div>
         <span class="lens-coords" id="lensCoords">(Hazır)</span>
-        <span class="lens-toggle-icon" id="lensChevron">▾</span>
+        <span class="lens-toggle-icon" id="lensChevron">▸</span>
       </div>
-      <div class="lens-body" id="lensBody">
+      <div class="lens-body" id="lensBody" style="display:none;">
         <div class="lens-row">
           <span class="lens-label">Aktif Hedef:</span>
           <span class="lens-val" id="lensTargetInfo">Auto Focus (TextEdit / Chrome)</span>

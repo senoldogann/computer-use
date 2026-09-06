@@ -394,6 +394,10 @@ pub fn run() -> ! {
         NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 30.0, true, &timer_block)
     };
 
+    if std::env::var("COMPUTERUSE_SHOW_PANEL").map(|v| v == "1").unwrap_or(false) {
+        toggle_panel_ui();
+    }
+
     app.run();
     std::process::exit(0)
 }
