@@ -2182,19 +2182,37 @@ class OodaRunner:
     def _guard_positional(self, action: Action) -> None:
         """One fresh window read gates both focus drift and decision staleness.
 
-        Both questions are about the same thing — "does the window my
-        coordinates describe still own the screen?" — and both need a reading
-        taken *now*, not the one from before the model's turn. Sharing a single
-        ``focused_window`` probe answers them for the price of one small RPC.
+        Both questions need a reading taken *now*, not the one from before the
+        model's turn, and one ``focused_window`` probe answers them for the
+        price of one small RPC.
 
-        Deliberately not a screenshot: re-capturing a Retina frame before every
-        click would roughly double the per-step capture cost, which is the
-        dominant latency in the loop. The window identity catches the races
-        that actually misplace a click — a navigation completing, an app
-        switching, a dialog taking over — while in-page content shifts remain
-        the job of post-action verification and the recovery ladder.
+        **Keyboard actions are guarded too, and they need it more.** This gate
+        used to run only for the pointer, reasoning that focus drift
+        invalidates *coordinates*. A keystroke has no coordinates — it is
+        delivered to whatever holds focus at the instant it is posted — so
+        drift does not misplace it slightly, it redirects the entire payload
+        into a stranger's window. Measured on a live run: the loop typed a
+        document body into Chrome's address bar while its own trace said the
+        target was TextEdit, and nothing stopped it, because ``type_text``
+        returned from this function on the first line. A misplaced click hits
+        a button; a misplaced ``type_text`` writes the user's content
+        somewhere they never chose.
+
+        Staleness stays pointer-only: it asks whether the *layout* a
+        coordinate was read off is still on screen, which is a question a
+        keystroke does not raise. For the keyboard the focus check is the
+        whole answer.
+
+        Deliberately not a screenshot: re-capturing a Retina frame before
+        every action would roughly double the per-step capture cost, which is
+        the dominant latency in the loop. The window identity catches the
+        races that actually misdirect actuation — a navigation completing, an
+        app switching, a dialog taking over — while in-page content shifts
+        remain the job of post-action verification and the recovery ladder.
         """
-        if not isinstance(action, (MouseClick, MouseDrag, MouseScroll)):
+        pointer = isinstance(action, (MouseClick, MouseDrag, MouseScroll))
+        keyboard = isinstance(action, (TypeText, ClipboardPaste, PressHotkey))
+        if not pointer and not keyboard:
             return
         if self.window_probe is None:
             return
@@ -2204,16 +2222,18 @@ class OodaRunner:
             LOGGER.debug("window probe failed before actuation: %s", exc)
             return
         self._guard_focus(current, action)
-        self._guard_staleness(current)
+        if pointer:
+            self._guard_staleness(current)
 
     def _guard_focus(self, current: FocusedWindow, action: Action) -> None:
-        """Refuse positional actions while another app owns the screen.
+        """Refuse actuation while another app owns the screen.
 
         Coordinates are meaningless once focus drifts: a dialog, a
         notification, or the user clicking elsewhere silently re-points every
-        click at the wrong window. The run's target app is re-asserted once
-        (the driver's activation is idempotent) and only a second mismatch is
-        reported as a failure.
+        click at the wrong window. Keystrokes are worse off still — they carry
+        no target at all and simply land wherever focus is. The run's target
+        app is re-asserted once (the driver's activation is idempotent) and
+        only a second mismatch is reported as a failure.
         """
         if not self.app_is_pinned or not current.app_name:
             return
