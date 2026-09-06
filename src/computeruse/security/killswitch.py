@@ -28,14 +28,22 @@ class CursorSample:
     time: float
 
 
-#: How long the burst may span. A human shaking the mouse does it in well
-#: under a second; anything slower is someone using their computer.
-SHAKE_WINDOW_S: Final[float] = 1.0
+#: How long the burst may span. Apple's own shake-to-locate detector (the
+#: gesture users already have muscle memory for on this platform) uses a
+#: 500ms timeout — US 8,159,457, "Zero-click activation of an application" —
+#: so this matches it rather than inventing a looser number.
+SHAKE_WINDOW_S: Final[float] = 0.5
 
-#: How far the cursor may end up from where it started, as a fraction of the
-#: distance it actually travelled. A shake comes back; a purposeful traverse
-#: does not. Generous, because a real shake drifts across the desk.
-SHAKE_MAX_NET_RATIO: Final[float] = 0.34
+#: How far the gesture may wander, measured as the bounding box of the sampled
+#: path. Same reference: displacement is bounded above (200px there) because a
+#: shake stays in one place — someone reaching across the desk reverses too,
+#: and a bounding box tells the two apart where a reversal count cannot.
+SHAKE_MAX_EXTENT: Final[float] = 200.0
+
+#: And bounded below, so cursor jitter and a hand resting on the trackpad are
+#: not a takeover request. The reference uses 10px; this is the same idea
+#: applied to the whole path rather than a single move.
+SHAKE_MIN_TRAVEL: Final[float] = 40.0
 
 
 def is_mouse_shake(
@@ -43,7 +51,8 @@ def is_mouse_shake(
     *,
     min_reversals: int = 6,
     window_s: float = SHAKE_WINDOW_S,
-    max_net_ratio: float = SHAKE_MAX_NET_RATIO,
+    max_extent: float = SHAKE_MAX_EXTENT,
+    min_travel: float = SHAKE_MIN_TRAVEL,
 ) -> bool:
     """Pure detector: is a rapid, bounded back-and-forth motion present?
 
@@ -67,12 +76,14 @@ def is_mouse_shake(
         min_reversals: number of sign changes that qualifies as a shake.
         window_s: reversals only count inside this span, measured back from
             the newest sample. This is the "rapid" in the contract.
-        max_net_ratio: how far the cursor may finish from where it started, as
-            a fraction of the path it travelled. This is the "bounded".
+        max_extent: the largest bounding-box side the gesture may cover. This
+            is the "bounded": a shake stays in one place.
+        min_travel: the least total path length that counts as motion at all,
+            so jitter and a resting hand are never a takeover request.
 
     Returns:
-        True if the trace shows enough oscillatory reversals, quickly, without
-        going anywhere.
+        True if the trace shows enough oscillatory reversals, quickly, in one
+        place.
     """
     if len(samples) < min_reversals + 1:
         return False
@@ -86,10 +97,13 @@ def is_mouse_shake(
         abs(samples[i + 1].x - samples[i].x) + abs(samples[i + 1].y - samples[i].y)
         for i in range(len(samples) - 1)
     )
-    if travelled <= 0.0:
+    if travelled < min_travel:
         return False
-    net = abs(samples[-1].x - samples[0].x) + abs(samples[-1].y - samples[0].y)
-    if net > max_net_ratio * travelled:
+    extent = max(
+        max(s.x for s in samples) - min(s.x for s in samples),
+        max(s.y for s in samples) - min(s.y for s in samples),
+    )
+    if extent > max_extent:
         # It went somewhere. Someone reaching across the screen reverses too.
         return False
 

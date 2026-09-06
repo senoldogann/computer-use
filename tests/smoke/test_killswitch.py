@@ -262,3 +262,30 @@ def test_a_fast_traverse_that_ends_somewhere_else_is_not_a_shake() -> None:
         x += 100.0 if i % 2 == 0 else -20.0  # wobbles, but marches right
         traverse.append(CursorSample(x=x, y=0.0, time=i * 0.02))
     assert not is_mouse_shake(traverse, min_reversals=6)
+
+
+def test_jitter_is_not_a_takeover_request() -> None:
+    """A hand resting on the trackpad reverses direction constantly.
+
+    Without a floor on how far the cursor actually travelled, two points of
+    wobble sixteen times over is a textbook reversal burst.
+    """
+    jitter = [
+        CursorSample(x=500.0 + (2.0 if i % 2 else 0.0), y=300.0, time=i * 0.02)
+        for i in range(16)
+    ]
+    assert not is_mouse_shake(jitter, min_reversals=6)
+
+
+def test_a_real_shake_still_trips() -> None:
+    """The positive control, at human scale.
+
+    Sixty points of amplitude over four hundred milliseconds — the gesture
+    macOS itself recognises for locating the pointer, whose parameters these
+    thresholds are borrowed from.
+    """
+    shake = [
+        CursorSample(x=800.0 + (60.0 if i % 2 else 0.0), y=400.0, time=i * 0.025)
+        for i in range(16)
+    ]
+    assert is_mouse_shake(shake, min_reversals=6)
