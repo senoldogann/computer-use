@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Self
 
@@ -23,6 +24,7 @@ from computeruse.agent import Agent, AgentConfig
 from computeruse.cli import discover_app
 from computeruse.orchestrator.client import ActuationClient, DriverRpcError
 from computeruse.orchestrator.loop import MaxStepsError, StuckLoopError, WorkingState
+from computeruse.orchestrator.mission import MissionStore, new_mission
 from computeruse.orchestrator.planner import SessionCheckpoint
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick
 from computeruse.security.autonomy import AutonomyLevel, PermissionDeniedError
@@ -247,6 +249,8 @@ def test_phantom_coordinate_is_rejected_end_to_end(tmp_path) -> None:
     assert result.trajectory == ()
     assert result.distilled is None
     assert result.episodes == ()
+    assert result.succeeded is False
+    assert result.outcome == "failure"
 
 
 class _SensorDeadClient:
@@ -640,3 +644,42 @@ def test_truncated_run_records_a_failure_episode_and_no_skill(tmp_path) -> None:
     assert not list((store_dir / "skills").glob("*.json")), (
         "a failed run must never distill into a skill"
     )
+
+
+
+def test_cli_failed_finish_reports_failure_and_nonzero_exit(tmp_path: Path) -> None:
+    store = tmp_path / "failed-cli"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(REPO_ROOT / "tests/audit"), str(REPO_ROOT / "src")))}
+    run = subprocess.run(
+        [sys.executable, "-m", "computeruse", "--goal", "audit failure",
+         "--socket", str(SOCKET_PATH), "--store", str(store), "--no-vision",
+         "--provider", "audit_provider:finish_failure"],
+        capture_output=True, text=True, env=env, timeout=30, check=False,
+    )
+    assert run.returncode == 1, run.stdout + run.stderr
+    assert "outcome     : failure" in run.stdout
+    records = [json.loads(path.read_text()) for path in (store / "usage").glob("*.json")]
+    assert len(records) == 1
+    assert records[0]["outcome"] == "failure"
+
+
+
+def test_failed_autonomous_mission_does_not_reset_its_retry_budget(tmp_path: Path) -> None:
+    store = tmp_path / "failed-mission"
+    missions = MissionStore(store / "missions")
+    mission = new_mission(goal="audit failure", app="Safari", plan=None, now=datetime.now(UTC))
+    missions.save(mission.model_copy(update={"status": "failed", "attempts": 2}))
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(REPO_ROOT / "tests/audit"), str(REPO_ROOT / "src")))}
+    run = subprocess.run(
+        [sys.executable, "-m", "computeruse", "--socket", str(SOCKET_PATH),
+         "--store", str(store), "--no-vision", "--autonomous", "2",
+         "--idle-seconds", "0", "--rest-seconds", "0", "--deadline-seconds", "20",
+         "--provider", "audit_provider:finish_failure"],
+        capture_output=True, text=True, env=env, timeout=30, check=False,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    records = missions.missions()
+    assert len(records) == 1
+    assert records[0].mission_id == mission.mission_id
+    assert records[0].status == "failed"
+    assert records[0].attempts == 3

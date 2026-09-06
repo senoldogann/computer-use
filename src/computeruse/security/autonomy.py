@@ -210,16 +210,10 @@ DESTRUCTIVE_FAMILIES: Final[dict[str, frozenset[str]]] = {
 #: write; "update the spreadsheet" is a Tuesday.
 ARGUMENT_ONLY_FAMILIES: Final[frozenset[str]] = frozenset({"execute"})
 
-#: Accessibility titles that clear a calculator's display — and nothing else.
-#: Matched exactly (never substring): a bare "clear" also names "Clear browsing
-#: data" in a browser, which genuinely destroys, while "Tümünü Sil" on a
-#: Turkish Calculator is the All-Clear key. Field-measured false positive: the
-#: "sil" inside "Tümünü Sil" classified the AC keypress as DESTRUCTIVE and
-#: parked an unattended run on its own arithmetic.
+#: Routine display-clear labels, evaluated only after destructive checks.
+#: A title alone cannot prove that a control belongs to Calculator.
 _CALCULATOR_CLEAR_LABELS: Final[frozenset[str]] = frozenset(
     {
-        "tümünü sil",
-        "tumunu sil",
         "all clear",
         "clear",
         "temizle",
@@ -228,7 +222,7 @@ _CALCULATOR_CLEAR_LABELS: Final[frozenset[str]] = frozenset(
 
 
 def _is_calculator_clear_control(target_label: str | None) -> bool:
-    """Is this control a calculator display-clear key, by exact title (pure)."""
+    """Does the exact label describe clearing display state (pure)?"""
     if target_label is None:
         return False
     return " ".join(target_label.casefold().split()) in _CALCULATOR_CLEAR_LABELS
@@ -353,15 +347,6 @@ class AutonomyPolicy:
         """
         if isinstance(turn.action, (Finish, Wait, LoadSkill, WebSearch, WebFetch)):
             return Risk.NONE
-        if _is_calculator_clear_control(target_label) and not isinstance(
-            turn.action, CallTool
-        ):
-            # Clearing a calculator display changes state, so ROUTINE rather
-            # than NONE — but it deletes nothing, and must never park a run
-            # the way a genuinely destructive control does. Tool calls are
-            # excluded: they are classified by their payload, never by a
-            # button title that happens to travel alongside.
-            return Risk.ROUTINE
         subject = turn.sub_goal.lower()
         if target_label:
             subject = f"{subject} {target_label}".lower()
@@ -404,6 +389,8 @@ class AutonomyPolicy:
             # tool this policy has never heard of is a third-party program with
             # side effects the orchestrator cannot see. Guarded mode asks about
             # it; full autonomy still runs it.
+            return Risk.ROUTINE
+        if _is_calculator_clear_control(target_label):
             return Risk.ROUTINE
         if words & self.routine_markers:
             return Risk.ROUTINE

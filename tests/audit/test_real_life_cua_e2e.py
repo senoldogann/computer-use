@@ -285,6 +285,9 @@ def test_real_life_cua_repl_textedit_e2e(tmp_path: Path) -> None:
                 # The driver already holds Accessibility consent, so this costs
                 # no extra permission and cannot block.
                 try:
+                    focused = client.focused_window()
+                    if "TextEdit" not in focused.app_name or scratch.name not in focused.window_title:
+                        raise RuntimeError("scratch document is not focused; refusing cleanup keystrokes")
                     client.send(
                         PressHotkey(type="press_hotkey", modifiers=["command"], key="s")
                     )

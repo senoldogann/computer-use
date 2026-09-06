@@ -224,6 +224,7 @@ class AgentResult:
     """What one run produced: the final state, trajectory, and its learnings."""
 
     state: WorkingState
+    succeeded: bool
     # The app the run actually targeted — the configured name, or the
     # frontmost app discovered when the config left it None.
     app: str
@@ -238,6 +239,11 @@ class AgentResult:
     # This run's identity. Always present (a run is identifiable even when
     # nothing is being written), and the directory name under ``trace_dir``.
     run_id: str = ""
+
+    @property
+    def outcome(self) -> EpisodeOutcome:
+        """Use the verified result consistently in reports and durable missions."""
+        return "success" if self.succeeded else "failure"
 
 
 def guarded(
@@ -379,6 +385,7 @@ class Agent:
         # authorizer below never fires and every destructive action asks.
         grant_store = GrantStore(self._config.store_dir / "grants")
         distilled: DistillResult | None = None
+        succeeded = False
         # Every run is identifiable, whether or not anything is written down:
         # the id is what ties a log line, a trace directory and a user's
         # bug report to the same run.
@@ -424,8 +431,9 @@ class Agent:
             # the auditor rejected every claim and the stalemate guard let it
             # through to end the run, so neither the skill store, the skill's
             # win counter, nor semantic memory may learn from this flow.
-            nonlocal distilled
+            nonlocal distilled, succeeded
             verified = outcome == "success" and not forced_completion
+            succeeded = verified
             # Reinforcement: a mounted skill is a claim about how to do this,
             # and the run just tested it. Recording the verdict is what turns
             # the store from a pile of recipes into one that gets better —
@@ -1018,6 +1026,7 @@ class Agent:
 
         return AgentResult(
             state=state,
+            succeeded=succeeded,
             app=app,
             trajectory=runner.executed_trajectory,
             distilled=distilled,

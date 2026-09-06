@@ -35,7 +35,7 @@ from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.coordinates import Point, Rect, Size
 
 _AX_BOX_PATTERN: Final = re.compile(
-    r'at\s*\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*\)\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)'
+    r'at\s*\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)'
 )
 
 

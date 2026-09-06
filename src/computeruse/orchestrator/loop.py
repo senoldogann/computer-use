@@ -113,10 +113,8 @@ from computeruse.vision.capture import (
     ScreenCapture,
     capture_to_base64_png,
     coarse_fingerprint,
-    downscale_to_max_side,
     frame_fingerprint,
-    screen_map_of,
-    to_logical_resolution,
+    model_capture,
     verify_capture_region,
 )
 from computeruse.vision.coordinates import (
@@ -523,13 +521,14 @@ def resolve_mark(action: Action, marks: tuple[MarkElement, ...]) -> Action:
         if mark.index == action.mark:
             centre_x = mark.rect.origin.x + mark.rect.size.width / 2
             centre_y = mark.rect.origin.y + mark.rect.size.height / 2
+            # Like map_action_to_screen, preserve signed global points after grounding.
             return MouseClick(
                 type="mouse_click",
-                x=max(0, round(centre_x)),
-                y=max(0, round(centre_y)),
+                x=0,
+                y=0,
                 button=action.button,
                 click_count=action.click_count,
-            )
+            ).model_copy(update={"x": round(centre_x), "y": round(centre_y)})
     raise UnknownMarkError(requested=action.mark, available=len(marks))
 
 
@@ -1363,6 +1362,7 @@ class OodaRunner:
         self._pending_action: Action | None = None
         self._pre_action_signature: str = ""
         # Screenshot encode cache, keyed by the exact frame fingerprint.
+        self._last_capture_map: ScreenMap | None = None
         self._last_capture_hash: str | None = None
         self._last_screenshot_b64: str | None = None
         self._last_error: str | None = None
@@ -2754,6 +2754,10 @@ class OodaRunner:
         screen_map = previous.screen_map
         signature = previous.signature
         if self.sensor is not None:
+            frame = None
+            screenshot_b64 = None
+            screen_map = None
+            signature = ""
             captured = self._capture_frame(raw_ui_elements)
             if captured is not None:
                 frame, screenshot_b64, screen_map = captured
@@ -2835,11 +2839,32 @@ class OodaRunner:
                 self._screenshot_warned = True
                 LOGGER.warning("screen capture failed during observe: %s", exc)
             return None
-        logical = to_logical_resolution(capture)
-        mapped = downscale_to_max_side(logical, SCREENSHOT_MAP_MAX_SIDE)
-        screen_map = screen_map_of(logical, mapped)
         if not self.vision_enabled:
-            return capture, None, screen_map
+            logical_size = capture.logical_size
+            ratio = max(1.0, max(logical_size.width, logical_size.height) / SCREENSHOT_MAP_MAX_SIDE)
+            return capture, None, ScreenMap(
+                logical=logical_size,
+                image=Size(
+                    float(max(1, round(logical_size.width / ratio))),
+                    float(max(1, round(logical_size.height / ratio))),
+                ),
+                origin=capture.origin,
+            )
+        fingerprint = (
+            f"{frame_fingerprint(capture)}|{capture.display_id}|{capture.width}|"
+            f"{capture.height}|{capture.scale}|{capture.origin}|"
+            f"{self.set_of_marks_enabled}|{hash(raw_ui_elements)}"
+        )
+        if (fingerprint == self._last_capture_hash
+                and self._last_screenshot_b64 is not None
+                and self._last_capture_map is not None):
+            return capture, self._last_screenshot_b64, self._last_capture_map
+        mapped = model_capture(capture, SCREENSHOT_MAP_MAX_SIDE)
+        screen_map = ScreenMap(
+            logical=capture.logical_size,
+            image=Size(float(mapped.width), float(mapped.height)),
+            origin=capture.origin,
+        )
         # Set-of-Marks: draw the grounded elements onto the map the model sees,
         # so a numbered line in the AX list and a highlighted region on screen
         # are visibly the same thing. The marks are part of the cache key —
@@ -2850,12 +2875,10 @@ class OodaRunner:
             if self.set_of_marks_enabled
             else ()
         )
-        fingerprint = f"{frame_fingerprint(capture)}|{hash(marks)}"
-        if fingerprint == self._last_capture_hash and self._last_screenshot_b64 is not None:
-            return capture, self._last_screenshot_b64, screen_map
         screenshot_b64 = capture_to_base64_png(
             annotate_set_of_marks(mapped, marks) if marks else mapped
         )
+        self._last_capture_map = screen_map
         self._last_capture_hash = fingerprint
         self._last_screenshot_b64 = screenshot_b64
         return capture, screenshot_b64, screen_map

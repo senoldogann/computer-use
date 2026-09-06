@@ -25,6 +25,7 @@ from computeruse.orchestrator.schemas import AgentTurn
 from computeruse.providers.openai import (
     _RETRY_AFTER_MAX_SECONDS,
     DEFAULT_MODEL,
+    ModelCallStats,
     OpenAIError,
     _retry_after_seconds,
     openai_model,
@@ -369,3 +370,39 @@ def test_retry_after_is_honoured_but_capped() -> None:
     assert _retry_after_seconds("not-a-number", 9.0) == 9.0
     assert _retry_after_seconds("0", 9.0) == 9.0
     assert _retry_after_seconds("86400", 9.0) == _RETRY_AFTER_MAX_SECONDS
+
+
+@pytest.mark.parametrize("body", ["[]", "null", "not json"])
+def test_invalid_response_body_raises_provider_error(body: str) -> None:
+    opener, _ = _fake_opener(_FakeResponse(body))
+    model = openai_model(api_key="test", http_open=opener)
+    with pytest.raises(OpenAIError, match="response"):
+        model("JSON")
+
+
+def test_truncated_reply_still_reports_billable_usage() -> None:
+    stats: list[ModelCallStats] = []
+    opener, _ = _fake_opener(_FakeResponse(json.dumps({
+        "choices": [{"message": {"content": "{"}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 17, "completion_tokens": 2048},
+    })))
+    model = openai_model(api_key="test", http_open=opener, stats_sink=stats.append)
+    with pytest.raises(OpenAIError, match="cut off"):
+        model("JSON")
+    assert len(stats) == 1
+    assert stats[0].total_tokens == 2065
+
+
+def test_urlopen_wrapped_timeout_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("computeruse.providers.openai.time.sleep", lambda delay: None)
+    opener, requests = _fake_opener(
+        urllib.error.URLError(TimeoutError("connection timed out")),
+        _FakeResponse(json.dumps({"choices": [{"message": {"content": "ok"}}]})),
+    )
+    assert openai_model(api_key="test", http_open=opener)("JSON") == "ok"
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("header", ["NaN", "Infinity", "-Infinity"])
+def test_nonfinite_retry_after_uses_bounded_backoff(header: str) -> None:
+    assert _retry_after_seconds(header, 0.5) == 0.5

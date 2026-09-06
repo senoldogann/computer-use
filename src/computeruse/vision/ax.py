@@ -384,7 +384,7 @@ def interactive_summaries(
     return tuple(summaries)
 
 
-_SUMMARY_RECT: Final = re.compile(r"at \((\d+),(\d+)\) (\d+)x(\d+)")
+_SUMMARY_RECT: Final = re.compile(r"at \((-?\d+),(-?\d+)\) (\d+)x(\d+)")
 
 
 def summary_covering(summaries: tuple[str, ...], x: float, y: float) -> str | None:
@@ -537,8 +537,7 @@ def summaries_to_image_space(
             f"{round(width / per_pixel_x)}x{round(height / per_pixel_y)}"
         )
 
-    pattern = re.compile(r"at \((\d+),(\d+)\) (\d+)x(\d+)")
-    return tuple(pattern.sub(rescale, line) for line in summaries)
+    return tuple(_SUMMARY_RECT.sub(rescale, line) for line in summaries)
 
 
 #: Cap on the content digest. Bounds the comparison on a text-heavy page

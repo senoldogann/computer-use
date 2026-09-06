@@ -852,3 +852,47 @@ def test_decide_step_preserves_the_navigation_trail() -> None:
         action=MouseClick(type="mouse_click", x=10, y=10, button="left", click_count=1),
     )
     assert decide_step(state, turn).state.observed_trail == state.observed_trail
+
+
+
+def test_capture_failure_does_not_replay_the_previous_screen() -> None:
+    frame = ScreenCapture(display_id=0, width=32, height=20, scale=1.0, data=bytes(2560))
+    frames = iter((frame, None))
+
+    def sensor() -> ScreenCapture:
+        value = next(frames)
+        if value is None:
+            raise RuntimeError("capture unavailable")
+        return value
+
+    runner = OodaRunner(
+        provider=lambda state: _turn(Finish(type="finish", status="failed", summary="stop")),
+        execute_physical=lambda action: None, sensor=sensor, vision_enabled=True,
+    )
+    first = runner._observe(WorkingState(goal="observe"))
+    assert first.screenshot_b64 is not None
+    second = runner._observe(first)
+    assert second.screenshot_b64 is None
+    assert runner._observation.frame is None
+    assert runner._observation.screen_map is None
+
+
+def test_identical_capture_reuses_encoding_but_geometry_invalidates_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = ScreenCapture(display_id=0, width=32, height=20, scale=1.0, data=bytes(2560))
+    frames = iter((frame, frame, frame.model_copy(update={"origin_x": -100.0})))
+    runner = OodaRunner(
+        provider=lambda state: _turn(Finish(type="finish", status="failed", summary="stop")),
+        execute_physical=lambda action: None, sensor=lambda: next(frames), vision_enabled=True,
+    )
+    first = runner._capture_frame(())
+    assert first is not None
+    with monkeypatch.context() as patch:
+        def unexpected_resample(*args: object) -> ScreenCapture:
+            raise AssertionError("cached pixels were resampled")
+        patch.setattr("computeruse.orchestrator.loop.model_capture", unexpected_resample)
+        assert runner._capture_frame(()) == first
+    moved = runner._capture_frame(())
+    assert moved is not None
+    assert moved[2].origin.x == -100.0

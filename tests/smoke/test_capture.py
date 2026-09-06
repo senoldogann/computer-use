@@ -20,7 +20,12 @@ from computeruse.vision import (
     to_luma_grid,
     verify_capture_region,
 )
-from computeruse.vision.capture import crop_capture
+from computeruse.vision.capture import (
+    crop_capture,
+    downscale_to_max_side,
+    model_capture,
+    to_logical_resolution,
+)
 from computeruse.vision.coordinates import (
     DisplayGeometry,
     Point,
@@ -368,3 +373,18 @@ def test_capture_to_png_encodes_valid_png() -> None:
     b64_str = capture_to_base64_png(capture)
     assert isinstance(b64_str, str)
     assert len(b64_str) > 0
+
+
+@pytest.mark.parametrize("scale", [1.0, 1.5, 2.0, 3.0])
+@pytest.mark.parametrize("dimensions", [(64, 40), (65, 43), (4, 4)])
+def test_model_capture_preserves_reference_pixels(
+    scale: float, dimensions: tuple[int, int],
+) -> None:
+    width, height = dimensions
+    frame = ScreenCapture(
+        display_id=2, width=width, height=height, scale=scale,
+        origin_x=-1200, origin_y=100,
+        data=bytes((index * 71 + index // 17) % 256 for index in range(width * height * 4)),
+    )
+    expected = downscale_to_max_side(to_logical_resolution(frame), 16)
+    assert model_capture(frame, 16) == expected
