@@ -1,4 +1,7 @@
 # Python
+# Both forms: the trailing slash matches a directory only, and a worktree
+# set up with a symlinked environment slips straight past it.
+.venv
 .venv/
 node_modules/
 __pycache__/
