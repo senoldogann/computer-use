@@ -3,7 +3,7 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -256,3 +256,67 @@ def test_web_ipv4_mapped_ipv6_ssrf() -> None:
     from computeruse.tools.web import _is_fetchable_url
     assert not _is_fetchable_url("http://[::ffff:127.0.0.1]/")
     assert not _is_fetchable_url("http://[::ffff:169.254.169.254]/")
+
+
+#: Payload size that reproduces the QuickJS teardown crash. The WASM heap
+#: starts at 16MB and the bridge only breaks once an evaluation grows it:
+#: measured against this bridge, a 3MB RPC result tore down cleanly and 4MB
+#: aborted the worker on
+#: ``Assertion failed: list_empty(&rt->gc_obj_list)``. 8MB sits far enough
+#: above the threshold that the test is not measuring the boundary itself.
+_CRASHING_PAYLOAD_BYTES = 8 * 1024 * 1024
+
+#: How many screenshot/crop/follow-up rounds one worker must survive. The
+#: crash was never visible in the call that caused it — that call published
+#: ``completed`` and *then* the process died — so a single round proves
+#: nothing. The failure always surfaced on the following evaluation.
+_TRANSPORT_ROUNDS = 3
+
+
+def test_r5_large_rpc_results_do_not_poison_the_next_evaluation() -> None:
+    """A screenshot-sized RPC result must not kill the sandbox worker.
+
+    Regression for the crash that ended the real TextEdit end-to-end run twice
+    at ``Crop one element``: a multi-megabyte result grew the emscripten
+    linear memory while the QuickJS runtime was live, which corrupted its GC
+    list and aborted the process inside ``JS_FreeRuntime``. The evaluation that
+    triggered it had already reported success, so the damage was only ever
+    observable one call later.
+
+    Deliberately exercises the *transport*, not the screen: the payloads are
+    synthetic, so the test needs neither Screen Recording consent nor a
+    driver, and it fails for exactly one reason.
+    """
+    engine = CuaReplEngine()
+    big_uri = "data:image/png;base64," + "x" * _CRASHING_PAYLOAD_BYTES
+    original = engine._dispatch_js_call
+
+    def dispatch(method: str, params: dict[str, object]) -> object:
+        if method in {"getScreenshot", "cropScreenshot"}:
+            return big_uri
+        return original(method, params)
+
+    try:
+        with patch.object(engine, "_dispatch_js_call", side_effect=dispatch):
+            for round_index in range(_TRANSPORT_ROUNDS):
+                captured = engine.execute(
+                    'const a = await cua.getApp("Probe");'
+                    " const shot = await a.getScreenshot();"
+                    " const crop = await a.cropScreenshot({x:0,y:0,width:10,height:10});"
+                    " return String(shot.length + crop.length);",
+                    timeout_s=30,
+                )
+                assert not captured.is_error, (
+                    f"round {round_index}: large-payload call failed: {captured.error}"
+                )
+                # The real assertion. The crashing build also reported
+                # ``completed`` here and died during teardown, so the worker's
+                # health is only provable by asking it something afterwards.
+                follow_up = engine.execute("return 42", timeout_s=10)
+                assert not follow_up.is_error, (
+                    f"round {round_index}: worker died after a large payload: "
+                    f"{follow_up.error}"
+                )
+                assert follow_up.content.strip() == "42"
+    finally:
+        engine.stop()

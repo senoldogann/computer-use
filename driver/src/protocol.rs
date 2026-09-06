@@ -207,6 +207,20 @@ pub enum Response {
     Health {
         backend: String,
         trusted: bool,
+        /// Whether the kill-hotkey event tap is installed and armed (Law 5.2).
+        ///
+        /// Deliberately its own field rather than folded into ``trusted``.
+        /// They answer different questions and fail for different reasons —
+        /// ``trusted`` is "did the user grant Accessibility consent", this is
+        /// "can the user still take the machine back" — so one flag covering
+        /// both reports a live consent problem for a dead listener and sends
+        /// whoever reads it to the wrong System Settings pane.
+        ///
+        /// ``None`` means the question does not apply: the simulated backend
+        /// never installs a tap (Law 1: CI must not touch the host event
+        /// system), so it has no armed state to report, and answering
+        /// ``false`` there would read as a broken kill switch.
+        kill_listener_armed: Option<bool>,
     },
     Ack,
     OwnsFocusedModal {
@@ -473,11 +487,31 @@ mod tests {
         let resp = Response::Health {
             backend: "simulated".to_string(),
             trusted: true,
+            kill_listener_armed: None,
         };
         let wire = resp.to_wire_string();
         assert!(wire.contains(r#""ok":"health""#));
         assert!(wire.contains(r#""backend":"simulated""#));
         assert!(wire.contains(r#""trusted":true"#));
+        // The simulated backend installs no tap, so it reports null rather
+        // than false: "not applicable" and "broken" must not look alike.
+        assert!(wire.contains(r#""kill_listener_armed":null"#));
+    }
+
+    /// Consent and the kill listener are separate fields, so a driver with
+    /// Accessibility granted and a dead tap still reports ``trusted``. The
+    /// old shape ANDed them together, which sent a reader whose event tap
+    /// had died to the TCC settings pane instead.
+    #[test]
+    fn health_reports_a_dead_kill_listener_without_blaming_consent() {
+        let resp = Response::Health {
+            backend: "quartz/real".to_string(),
+            trusted: true,
+            kill_listener_armed: Some(false),
+        };
+        let wire = resp.to_wire_string();
+        assert!(wire.contains(r#""trusted":true"#));
+        assert!(wire.contains(r#""kill_listener_armed":false"#));
     }
 
     #[test]

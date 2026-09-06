@@ -20,6 +20,13 @@ def test_health_round_trip() -> None:
     assert payload.get("ok") == "health"
     assert payload.get("backend") == "simulated"
     assert payload.get("trusted") is True
+    # Consent and the kill-hotkey tap are separate answers on the wire. They
+    # were briefly ANDed into ``trusted``, which made a dead event tap
+    # indistinguishable from a missing Accessibility grant — two problems with
+    # nothing in common and different fixes. The simulated backend installs no
+    # tap at all (Law 1), so it reports null: "does not apply", not "broken".
+    assert "kill_listener_armed" in payload
+    assert payload.get("kill_listener_armed") is None
 
 
 def test_client_health() -> None:
