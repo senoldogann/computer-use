@@ -100,6 +100,7 @@ from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.tools import WebError, fetch_page
 from computeruse.vision.ax import (
+    element_identity,
     summaries_to_image_space,
     summaries_within,
     summary_covering,
@@ -124,6 +125,7 @@ from computeruse.vision.coordinates import (
     Size,
     point_in_frame,
 )
+from computeruse.vision.diff import ChangeKind
 from computeruse.vision.focus import FocusedWindow, window_summary
 from computeruse.vision.som import (
     MarkElement,
@@ -689,6 +691,32 @@ def target_element_label(action: Action, observation: Observation) -> str | None
     return summary_label(line)
 
 
+def target_element_identity(action: Action, observation: Observation) -> str:
+    """The accessibility identity of the element a positional action hits (pure).
+
+    :func:`target_element_label` answers "what would pressing this do", for the
+    safety guard. This answers "which control was this", for memory: the flow
+    signature drops coordinates so UI drift cannot fork one workflow into many
+    skills, and that left it unable to tell two workflows of the same *shape*
+    apart. ``Button "Save"`` and ``Button "Delete"`` are what makes "save a
+    draft" a different flow from "delete a draft".
+
+    Reads the same logical-point summaries and the same target point as the
+    label does, so the two always describe the same element.
+
+    ``""`` — not ``None`` — when nothing is known, because the signature treats
+    an unknown target as "this step says nothing about identity" and must not
+    be handed a sentinel it would hash.
+    """
+    target = target_point_of(action)
+    if target is None:
+        return ""
+    line = summary_covering(observation.raw_ui_elements, target.x, target.y)
+    if line is None:
+        return ""
+    return element_identity(line) or ""
+
+
 def verification_region(target: Point, *, size: float = 48.0) -> Rect:
     """A square region (logical points) centred on an action's target.
 
@@ -1219,6 +1247,15 @@ class OodaRunner:
         # runner never leaks history between goals.
         self._executed: list[Action] = []
         self._sub_goals: list[str] = []
+        # Accessibility identity of what each executed step acted on, aligned
+        # with ``_executed``. Recorded per step rather than recomputed later
+        # because the answer only exists while that step's observation is the
+        # current one — the screen has moved on by the time the run ends.
+        self._step_targets: list[str] = []
+        # The identity the action now being actuated aimed at, read from the
+        # pre-action observation. Reset per action so a tool call can never
+        # inherit the previous click's target.
+        self._acted_target: str = ""
         # The skill mounted by RETRIEVE in the current run (Law 3.2).
         self._skill: SkillDefinition | None = None
         self._working_app: str | None = None
@@ -1251,6 +1288,11 @@ class OodaRunner:
         # verification, consumed by the next observation, dropped by anything
         # that could invalidate it (see ``_carry_ax_probe``).
         self._fresh_ax: AxProbeResult | None = None
+        #: Whether the current observation reused that reading rather than
+        #: taking its own. Reported, not inferred: the two are indistinguishable
+        #: in the log otherwise, and perception is the last place to be vague
+        #: about where an answer came from.
+        self._ax_was_carried: bool = False
         # The action awaiting a progress verdict, and the observation
         # signature captured just before it ran.
         self._pending_action: Action | None = None
@@ -1284,7 +1326,10 @@ class OodaRunner:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
         self._executed = []
         self._sub_goals = []
+        self._step_targets = []
+        self._acted_target = ""
         self._fresh_ax = None
+        self._ax_was_carried = False
         self._skill = None
         self._playbook = None
         self._playbook_scanned = False
@@ -1380,9 +1425,12 @@ class OodaRunner:
             state = self._retrieve(state)
             if state.active_window or state.ui_elements:
                 LOGGER.info(
-                    "ooda observe: window=%r, ax_elements=%d",
+                    "ooda observe: window=%r, ax_elements=%d%s",
                     state.active_window or "unknown",
                     len(state.ui_elements),
+                    " (carried from the last verification)"
+                    if self._ax_was_carried
+                    else "",
                 )
             state = self._warn_if_blind(state)
             # The provider decides against exactly this snapshot; remember the
@@ -1725,6 +1773,11 @@ class OodaRunner:
         # the flow signature (every workflow would end with "finish").
         self._executed.append(outcome.action)
         self._sub_goals.append(decision.sub_goal or outcome.step_label)
+        # Only a physical action has a target on screen; a tool call or a wait
+        # contributes an empty identity, which the signature ignores entirely.
+        self._step_targets.append(
+            self._acted_target if outcome.route == "physical" else ""
+        )
         if outcome.route == "physical":
             # Live step visibility: a real run takes seconds per LLM decision,
             # and a silent terminal reads as "nothing is happening". Log every
@@ -1836,6 +1889,7 @@ class OodaRunner:
         a contradiction has already raised by then.
         """
         expectation = expectation_for(action)
+        self._acted_target = ""
         # The quiet path is tried BEFORE the focus gate, not after. That gate
         # exists because a synthetic click goes to whatever is frontmost, so it
         # brings the target app forward first — which is precisely what the
@@ -1876,6 +1930,10 @@ class OodaRunner:
         before_ui = self._observation.raw_ui_elements
         before_content = self._observation.content
         before_window = self._observation.window
+        # Read *before* the host is touched: afterwards the control may have
+        # moved, been replaced, or taken the screen with it. This is the only
+        # moment the answer to "which element is this action aimed at" exists.
+        self._acted_target = target_element_identity(action, self._observation)
 
         if not quiet:
             self._execute_physical(action)
@@ -2035,8 +2093,29 @@ class OodaRunner:
             # a change, but not one this region diff can quantify.
             return Evidence.CONFIRMED
         verification = verify_capture_region(before, after, verification_region(target))
-        if verification.changed:
+        if verification.verdict.kind is ChangeKind.CHANGED:
             return Evidence.CONFIRMED
+        if verification.verdict.kind is ChangeKind.NOISE:
+            # A wholesale takeover of the region — an animation, a transition,
+            # a different view. It says something moved; it cannot say *this
+            # action* moved it, because that is exactly what a spinner or a
+            # sliding panel looks like whether the click landed or not.
+            #
+            # Read as CONFIRMED it was worse than useless. ``combine`` lets any
+            # confirmation outrank a *direct* denial, so on an animated screen
+            # a click the accessibility tree explicitly denied came back
+            # verified: combine(direct=(CONTRADICTED,), circumstantial=(NOISE
+            # as CONFIRMED,)) == CONFIRMED. Measured on a 48x48 region flipped
+            # end to end, which is what a transition does.
+            #
+            # The trade is real and worth stating: a genuine wholesale change —
+            # a click that navigates — no longer earns a pixel confirmation
+            # either. That costs nothing dangerous, because pixels abstaining
+            # cannot reach the circumstantial quorum alone, so the action comes
+            # back *unverified* rather than failed, and the focus and AX
+            # witnesses still speak. Losing a confirmation is a smaller error
+            # than inventing one.
+            return Evidence.INCONCLUSIVE
         # A silent region is not a denial. The box is 48 points around the
         # cursor, but an action's visible effect very often lands somewhere
         # else entirely: pressing a calculator key updates the display at the
@@ -2477,6 +2556,10 @@ class OodaRunner:
         asks_for_credential = previous.asks_for_credential
         carried = self._fresh_ax
         self._fresh_ax = None
+        # Recorded so the observe log can say where the reading came from: a
+        # line that looks identical whether the tree was read or reused hides
+        # the one thing someone debugging perception needs to know.
+        self._ax_was_carried = carried is not None
         if carried is not None:
             # The previous step's verification already read this screen, after
             # its settle wait and with no actuation since. Re-reading costs a
@@ -2802,6 +2885,7 @@ class OodaRunner:
                 description=state.goal,
                 steps=tuple(self._executed),
                 step_descriptions=tuple(self._sub_goals),
+                step_targets=tuple(self._step_targets),
             ),
             outcome,
             retrospective,

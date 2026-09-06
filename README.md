@@ -221,8 +221,10 @@ Working & tested:
 - Law 5.2 visibility: an AppKit menu-bar status icon + translucent emerald
   cursor halo while the real driver is active; app activation (`--app` brings
   the target to the front).
-- Law 5 kill-switch: a pure mouse-shake detector + an `OodaRunner` gate that
-  raises `KillSwitchTripped` the instant a human reclaims control.
+- Law 5 kill-switch: an `OodaRunner` gate that raises `KillSwitchTripped` the
+  instant a human reclaims control, fed by the driver's global hotkey and by
+  Ctrl-C. A pure mouse-shake detector exists beside them and is *not* wired to
+  any entry point (`monitor=None` everywhere in production).
 - ADR-2 coordinate core: pure retina/DPI scaling and multi-display mapping in
   `vision/coordinates.py`, fully unit-tested without a display.
 - ADR-2 visual-diff core: `vision/diff.py` implements an anti-aliasing-safe,
@@ -398,8 +400,10 @@ Working & tested:
   the driver hotkey poll alongside the CLI's SIGINT catcher (or any caller's
   own switch) — a statically tripped switch cannot gain a live source (G2).
   The matching rule is pinned by Rust unit tests; the simulated driver never
-  installs a tap (Law 1: no host interaction). All three Law 5.2 channels —
-  global hotkey, rapid mouse shake, Ctrl-C — are now real.
+  installs a tap (Law 1: no host interaction). Two of the three Law 5.2
+  channels are wired: the global hotkey and Ctrl-C. The mouse-shake detector
+  is implemented and tested but reaches no production entry point — see the
+  kill-switch note in AGENTS.md for what wiring it would take.
 - v2 adversarial-audit hardening: internal-action handlers narrow through the
   union with `isinstance` (no `getattr` bypass); the kill-switch rejects
   conflicting signal sources (`signal_triggered` vs `signal_predicate`); the

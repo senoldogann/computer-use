@@ -98,7 +98,16 @@ ACTION_CONTRACT: Final[str] = (
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
     '- activate_app: {"type": "activate_app", "app": str} — brings an application (e.g. "Google Chrome", "Notes", "Finder") to the front\n'
     '- wait: {"type": "wait", "duration_ms": int, "reason": str}\n'
-    '- call_tool: {"type": "call_tool", "tool": str, "arguments": object} — run an MCP tool or CUA REPL JavaScript (e.g. tool \"js\" with code: var app = await cua.getApp(\"AppName\"); await app.click(index);).\n'
+    '- call_tool: {"type": "call_tool", "tool": str, "arguments": object} — run an MCP tool, or CUA REPL JavaScript with tool "js" and {"code": "..."}. Several steps in one turn, each awaited:\n'
+    '    var app = await cua.getApp("AppName");          // handle to a running app\n'
+    '    await app.getAXState();                          // what changed since last time (diffed; {disableDiffing:true} for the full tree)\n'
+    '    var el = await app.find({role:"AXButton", title:"Save"});  // by name, no index needed; also find("Save"), findAll(...), hasElement(...)\n'
+    '    await app.waitForElement("Confirm", {timeoutMs:3000});     // for anything that animates in\n'
+    '    await app.click(el); await app.typeText("..."); await app.pressKey("Cmd+S"); await app.scroll([x,y],"down",1);\n'
+    '    var png = await el.crop();                       // a picture of JUST that control (~50x cheaper than a screenshot) — use it to CHECK a change, not to find things\n'
+    '    var box = await app.getWindowBounds();           // the window\'s real rect, no screenshot needed\n'
+    '    var hit = await app.findVisual("Send");          // OCR, for canvas/WebGL surfaces the AX tree cannot see\n'
+    '  Return a value and it comes back as the tool result. Prefer this over raw coordinates when an element has a name: it aims at the element itself, so it cannot miss by a few points.\n'
     '- finish: {"type": "finish", "status": "success|failed", "summary": str} — "summary" is what the USER READS. If the goal asked a question, the answer goes there: finish with it. Do not hunt for a text box to type it into — you have no one to hand it to but the summary.\n'
     "\n"
     "3. THE CYCLE YOU ARE INSIDE:\n"

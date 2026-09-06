@@ -28,24 +28,83 @@ class CursorSample:
     time: float
 
 
-def is_mouse_shake(samples: Sequence[CursorSample], *, min_reversals: int = 6) -> bool:
+#: How long the burst may span. Apple's own shake-to-locate detector (the
+#: gesture users already have muscle memory for on this platform) uses a
+#: 500ms timeout — US 8,159,457, "Zero-click activation of an application" —
+#: so this matches it rather than inventing a looser number.
+SHAKE_WINDOW_S: Final[float] = 0.5
+
+#: How far the gesture may wander, measured as the bounding box of the sampled
+#: path. Same reference: displacement is bounded above (200px there) because a
+#: shake stays in one place — someone reaching across the desk reverses too,
+#: and a bounding box tells the two apart where a reversal count cannot.
+SHAKE_MAX_EXTENT: Final[float] = 200.0
+
+#: And bounded below, so cursor jitter and a hand resting on the trackpad are
+#: not a takeover request. The reference uses 10px; this is the same idea
+#: applied to the whole path rather than a single move.
+SHAKE_MIN_TRAVEL: Final[float] = 40.0
+
+
+def is_mouse_shake(
+    samples: Sequence[CursorSample],
+    *,
+    min_reversals: int = 6,
+    window_s: float = SHAKE_WINDOW_S,
+    max_extent: float = SHAKE_MAX_EXTENT,
+    min_travel: float = SHAKE_MIN_TRAVEL,
+) -> bool:
     """Pure detector: is a rapid, bounded back-and-forth motion present?
 
     A human taking over by forcing the mouse side to side produces a *burst of
     direction reversals* within a short window while the net displacement stays
     small. A false positive is an escape hatch tripped for the user — control
     is yanked away mid-workflow — so false positives (a few reversals from
-    normal work) must be rare: we require a generous reversal count all
-    happening inside the window.
+    normal work) must be rare.
+
+    All three clauses of that sentence are now actually checked. Two of them
+    were not: ``CursorSample.time`` was carried and never read, and the net
+    displacement was never computed. Measured against the old code — fourteen
+    reversals spread over *thirteen minutes* returned True, and so did an
+    agent clicking alternately between two targets three seconds apart, which
+    is ordinary work. A kill switch that trips on its own operator is worse
+    than one that is switched off, which is the state this channel was
+    actually in.
 
     Args:
         samples: timestamped cursor positions, oldest first.
         min_reversals: number of sign changes that qualifies as a shake.
+        window_s: reversals only count inside this span, measured back from
+            the newest sample. This is the "rapid" in the contract.
+        max_extent: the largest bounding-box side the gesture may cover. This
+            is the "bounded": a shake stays in one place.
+        min_travel: the least total path length that counts as motion at all,
+            so jitter and a resting hand are never a takeover request.
 
     Returns:
-        True if the trace shows enough oscillatory reversals.
+        True if the trace shows enough oscillatory reversals, quickly, in one
+        place.
     """
     if len(samples) < min_reversals + 1:
+        return False
+    # Only the tail matters: a burst is recent by definition, and letting old
+    # samples contribute is how minutes of ordinary work added up to a shake.
+    newest = samples[-1].time
+    samples = [sample for sample in samples if newest - sample.time <= window_s]
+    if len(samples) < min_reversals + 1:
+        return False
+    travelled = sum(
+        abs(samples[i + 1].x - samples[i].x) + abs(samples[i + 1].y - samples[i].y)
+        for i in range(len(samples) - 1)
+    )
+    if travelled < min_travel:
+        return False
+    extent = max(
+        max(s.x for s in samples) - min(s.x for s in samples),
+        max(s.y for s in samples) - min(s.y for s in samples),
+    )
+    if extent > max_extent:
+        # It went somewhere. Someone reaching across the screen reverses too.
         return False
 
     # Direction along x and y is checked separately; a shake on either axis

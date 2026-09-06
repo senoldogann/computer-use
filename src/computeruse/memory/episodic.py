@@ -39,6 +39,7 @@ def signature_from_trace(
     app: str,
     steps: tuple[Action, ...],
     step_descriptions: tuple[str, ...] = (),
+    step_targets: tuple[str, ...] = (),
 ) -> str:
     """Compute the canonical flow signature from an app + action list."""
     return _flow_signature(
@@ -47,6 +48,7 @@ def signature_from_trace(
             description="",
             steps=steps,
             step_descriptions=step_descriptions,
+            step_targets=step_targets,
         )
     )
 
@@ -54,7 +56,10 @@ def signature_from_trace(
 def signature_of_episode(episode: Episode) -> str:
     """Recompute an episode's signature from its own fields (identity check)."""
     return signature_from_trace(
-        episode.app, episode.steps, step_descriptions=episode.step_descriptions
+        episode.app,
+        episode.steps,
+        step_descriptions=episode.step_descriptions,
+        step_targets=episode.step_targets,
     )
 
 
@@ -65,6 +70,7 @@ def episode_from_trace(
     steps: tuple[Action, ...],
     outcome: EpisodeOutcome,
     step_descriptions: tuple[str, ...] = (),
+    step_targets: tuple[str, ...] = (),
     retrospective: str | None = None,
     episode_id: str | None = None,
     # Optional (not required) so every existing caller keeps compiling: a run
@@ -85,12 +91,16 @@ def episode_from_trace(
         description=description,
         steps=steps,
         step_descriptions=step_descriptions,
+        step_targets=step_targets,
         outcome=outcome,
         retrospective=retrospective,
         run_id=run_id,
         forced_completion=forced_completion,
         signature=signature_from_trace(
-            app, steps, step_descriptions=step_descriptions
+            app,
+            steps,
+            step_descriptions=step_descriptions,
+            step_targets=step_targets,
         ),
     )
 
@@ -139,15 +149,25 @@ class EpisodicStore:
         return episodes
 
     def known_signatures(self) -> set[str]:
-        """The set of flow-signatures already in episodic memory.
+        """Flow signatures of runs that actually worked (de-dup gate).
 
         Feeds the distiller's ``known_signatures``; a flow with a matching
-        signature here is treated as already-seen and skipped. This is the
-        de-dup gate on the hot path of every new run, so it reads only each
-        file's ``signature`` field — never full-deserializing the episode or
-        dragging its step logs up (G4, Law 4: don't pull heavy traces until
-        asked). A corrupt or unreadable file is skipped with a warning: one
-        bad historical episode must not block learning from the rest.
+        signature here is treated as already-seen and skipped.
+
+        Only *verified successes* count, and that qualifier is the whole point.
+        Every terminal run leaves an episode — Law 4.1 wants the failures kept
+        — so returning every signature meant a flow that once failed was filed
+        as "already known", and the later run that finally got it right came
+        back ``duplicate`` and never became a skill. The store learned nothing
+        precisely from the workflows that had been hard enough to fail first.
+        A force-accepted finish is excluded for the same reason it is excluded
+        from distillation: the auditor never confirmed it happened.
+
+        This is on the hot path of every new run, so it reads only each file's
+        own fields — never full-deserializing the episode or dragging its step
+        logs up (G4, Law 4: don't pull heavy traces until asked). A corrupt or
+        unreadable file is skipped with a warning: one bad historical episode
+        must not block learning from the rest.
         """
         signatures: set[str] = set()
         for path in self._store_dir.glob("*.json"):
@@ -157,6 +177,10 @@ class EpisodicStore:
                 LOGGER.warning("skipping unreadable episode %s: %s", path.name, exc)
                 continue
             signature = raw.get("signature")
-            if isinstance(signature, str):
+            if (
+                isinstance(signature, str)
+                and raw.get("outcome") == "success"
+                and not raw.get("forced_completion", False)
+            ):
                 signatures.add(signature)
         return signatures
