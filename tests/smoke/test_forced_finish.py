@@ -127,6 +127,8 @@ def test_forced_success_distills_nothing(tmp_path: Path) -> None:
     episode = result.episodes[0]
     assert episode.outcome == "success"
     assert episode.forced_completion is True
+    assert result.succeeded is False
+    assert result.outcome == "failure"
 
 
 def test_legacy_episode_without_the_flag_reads_as_not_forced() -> None:

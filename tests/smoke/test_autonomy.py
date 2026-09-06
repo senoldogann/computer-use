@@ -528,13 +528,8 @@ def test_a_statement_inside_a_payload_is_still_caught(
 
 
 def test_calculator_clear_is_not_destructive() -> None:
-    """The AC key is display state, not destruction.
-
-    Field-measured: the "sil" inside Turkish "Tümünü Sil" classified the
-    Calculator's All-Clear key as DESTRUCTIVE and parked an unattended run on
-    its own arithmetic. ROUTINE still asks in guarded mode; full autonomy runs.
-    """
-    for label in ("Tümünü Sil", "All Clear", "Clear", "Temizle"):
+    """Clear labels cannot override a destructive verb or payload."""
+    for label in ("All Clear", "Clear", "Temizle"):
         turn = AgentTurn(
             thought="t",
             sub_goal="clear the display",
@@ -552,6 +547,12 @@ def test_calculator_clear_is_not_destructive() -> None:
         action=MouseClick(type="mouse_click", x=10, y=10),
     )
     assert classify_risk(destructive, target_label="Hesabı Sil") is Risk.DESTRUCTIVE
+    assert classify_risk(destructive, target_label="Tümünü Sil") is Risk.DESTRUCTIVE
+    shell = AgentTurn(
+        thought="t", sub_goal="continue",
+        action=TypeText(type="type_text", text="rm -rf /tmp/example"),
+    )
+    assert classify_risk(shell, target_label="Clear") is Risk.DESTRUCTIVE
     # And the exemption never leaks into tool calls: those are classified by
     # their payload, never by a button title travelling alongside.
     tool = AgentTurn(

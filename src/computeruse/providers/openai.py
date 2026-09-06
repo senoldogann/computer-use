@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import ssl
 import time
@@ -68,7 +69,8 @@ _TRANSPORT_BACKOFF_BASE_SECONDS: Final[float] = 0.5
 
 def _is_retryable_oserror(exc: OSError) -> bool:
     """Pure: is this OS error one a retry could plausibly fix?"""
-    return isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError))
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return isinstance(reason, (TimeoutError, ConnectionError, ssl.SSLError))
 
 
 # HTTP statuses that mean "not now" rather than "not ever". 429 is the rate
@@ -101,7 +103,7 @@ def _retry_after_seconds(header: str | None, fallback: float) -> float:
         seconds = float(header.strip())
     except ValueError:
         return fallback
-    if seconds <= 0:
+    if not math.isfinite(seconds) or seconds <= 0:
         return fallback
     return min(seconds, _RETRY_AFTER_MAX_SECONDS)
 
@@ -275,8 +277,12 @@ def openai_model(
         while True:
             try:
                 with opener(request, timeout=timeout_seconds) as response:
-                    payload: dict[str, object] = json.loads(response.read().decode("utf-8"))
+                    payload = _require_dict(
+                        json.loads(response.read().decode("utf-8")), "body"
+                    )
                 break
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise OpenAIError(f"OpenAI response is not valid UTF-8 JSON: {exc}") from exc
             except urllib.error.HTTPError as exc:
                 # HTTPError is an OSError; catch it first and surface the API's
                 # own body (e.g. "model not found", "insufficient quota").
@@ -311,23 +317,6 @@ def openai_model(
                 )
                 time.sleep(wait_s)
         elapsed_s = time.perf_counter() - started_at
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise OpenAIError(f"OpenAI response missing choices: {payload}")
-        choice = _require_dict(cast(object, choices[0]), "choice")
-        message = _require_dict(choice.get("message"), "message")
-        content = message.get("content")
-        if not isinstance(content, str):
-            raise OpenAIError(f"OpenAI response missing text content: {payload}")
-        # A cut-off reply is not a malformed one, and saying so is the
-        # difference between a model that shortens its answer and one that
-        # keeps re-sending the same too-long object until the run gives up.
-        if choice.get("finish_reason") == "length":
-            raise OpenAIError(
-                f"OpenAI stopped at the {max_tokens}-token completion limit, so "
-                "the JSON object is cut off and cannot be parsed. Whatever text "
-                "the action carries has to be shorter."
-            )
         # usage is optional on the wire; when absent (proxies, some fakes) the
         # sink still gets the latency with zeroed token counts.
         usage_raw = payload.get("usage")
@@ -368,6 +357,23 @@ def openai_model(
                     completion_tokens=completion_tokens,
                     elapsed_s=elapsed_s,
                 )
+            )
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise OpenAIError(f"OpenAI response missing choices: {payload}")
+        choice = _require_dict(cast(object, choices[0]), "choice")
+        message = _require_dict(choice.get("message"), "message")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise OpenAIError(f"OpenAI response missing text content: {payload}")
+        # A cut-off reply is not a malformed one, and saying so is the
+        # difference between a model that shortens its answer and one that
+        # keeps re-sending the same too-long object until the run gives up.
+        if choice.get("finish_reason") == "length":
+            raise OpenAIError(
+                f"OpenAI stopped at the {max_tokens}-token completion limit, so "
+                "the JSON object is cut off and cannot be parsed. Whatever text "
+                "the action carries has to be shorter."
             )
         return content
 

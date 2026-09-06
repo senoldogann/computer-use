@@ -1185,17 +1185,23 @@ def _run_autonomous_session(
             raise
         missions.save(
             mission_finished(
-                mission, plan=result.state.plan, succeeded=True, now=now_utc()
+                mission, plan=result.state.plan, succeeded=result.succeeded, now=now_utc()
             )
         )
-        record(result.run_id, "success", len(result.state.completed_steps))
+        record(result.run_id, result.outcome, len(result.state.completed_steps))
         print(
             f"autonomous  : {proposal.goal!r} -> {len(result.state.completed_steps)} steps"
         )
         if claim is not None and watch_dir is not None:
-            settle_processed(
-                claim.processing_path, processed_dir=watch_dir / PROCESSED_DIRNAME
-            )
+            if result.succeeded:
+                settle_processed(
+                    claim.processing_path, processed_dir=watch_dir / PROCESSED_DIRNAME
+                )
+            else:
+                settle_failed(
+                    claim.processing_path, failed_dir=watch_dir / FAILED_DIRNAME,
+                    reason=result.state.last_error or "run did not verify successful completion",
+                )
 
     def propose() -> GoalProposal | None:
         """Inbox first, then unfinished work, then something new.
@@ -1236,7 +1242,13 @@ def _run_autonomous_session(
                         f"from watched folder {watch_dir}"
                     ),
                 )
-        open_work = resumable(missions.missions(), max_attempts=DEFAULT_MAX_ATTEMPTS)
+        known_missions = missions.missions()
+        exhausted_goals = {
+            goal for mission in known_missions
+            if mission.attempts >= DEFAULT_MAX_ATTEMPTS and mission.status == "failed"
+            for goal in (mission.goal, remaining_goal(mission))
+        }
+        open_work = resumable(known_missions, max_attempts=DEFAULT_MAX_ATTEMPTS)
         for mission in open_work:
             if mission.goal in waiting:
                 continue
@@ -1253,7 +1265,7 @@ def _run_autonomous_session(
         # rng.choice would discard the legitimate candidates left in the pool
         # along with the excluded one and end the session early. A None here
         # therefore means the pools are genuinely empty — not an unlucky roll.
-        return propose_goal(skills, episodes, rng=rng, exclude=waiting | operator_goals)
+        return propose_goal(skills, episodes, rng=rng, exclude=waiting | operator_goals | exhausted_goals)
 
     done = run_autonomously(
         SessionLimits(
@@ -1951,7 +1963,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id=result.run_id,
             goal=config.goal,
             app=result.app,
-            outcome="success",
+            outcome=result.outcome,
             steps=len(result.state.completed_steps),
             tokens=run_tokens["total"],
             cost_usd=run_cost["usd"],
@@ -1960,6 +1972,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print(f"goal        : {config.goal}")
         print(f"run_id      : {result.run_id}")
+        print(f"outcome     : {result.outcome}")
         print(f"app         : {result.app}")
         if config.trace_dir is not None:
             print(f"trace       : {config.trace_dir / result.run_id}")
@@ -1978,7 +1991,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"knowledge   : {len(result.knowledge)} entries for {config.app}")
         if result.skill is not None:
             print(f"skill       : {result.skill.skill_id} (mounted)")
-        return 0
+        return int(not result.succeeded)
     except KillSwitchTripped:
         print(
             "interrupted: human reclaimed control (kill-switch tripped)",

@@ -19,8 +19,15 @@ from computeruse.orchestrator.loop import (
     OodaRunner,
     WorkingState,
     map_action_to_screen,
+    resolve_mark,
 )
-from computeruse.orchestrator.schemas import Action, AgentTurn, Finish, MouseClick
+from computeruse.orchestrator.schemas import (
+    Action,
+    AgentTurn,
+    ClickMark,
+    Finish,
+    MouseClick,
+)
 from computeruse.security.autonomy import AutonomyLevel
 from computeruse.vision.ax import summaries_within
 from computeruse.vision.capture import (
@@ -32,6 +39,7 @@ from computeruse.vision.capture import (
 )
 from computeruse.vision.coordinates import Point, Rect, ScreenMap, Size
 from computeruse.vision.focus import FocusedWindow
+from computeruse.vision.som import parse_ax_elements_to_marks
 from tests.smoke.conftest import SIMULATED_SETTLE, SOCKET_PATH
 
 #: A second display 1024x600 points wide, sitting to the right of a 1512pt one.
@@ -321,3 +329,25 @@ def test_a_window_frame_carries_its_own_origin() -> None:
     centre = smap.to_screen(Point(mapped.width / 2, mapped.height / 2))
     assert 311.0 < centre.x < 311.0 + 230.0
     assert 453.0 < centre.y < 453.0 + 408.0
+
+
+
+def test_left_display_ax_mark_reaches_its_global_coordinate() -> None:
+    summaries = ('Button "Save" at (-1160,-112) 80x24',)
+    frame = _frame(width=1440, height=900, origin=Point(-1440, -900))
+    runner = OodaRunner(
+        provider=lambda state: _turn(Finish(type="finish", status="failed", summary="stop")),
+        execute_physical=lambda action: None,
+        sensor=lambda: frame, vision_enabled=True,
+        ax_probe=lambda: AxProbeResult(summaries=summaries),
+    )
+    state = runner._observe(WorkingState(goal="inspect left display"))
+    assert len(runner._observation.marks) == 1
+    click = resolve_mark(ClickMark(type="click_mark", mark=1), runner._observation.marks)
+    assert isinstance(click, MouseClick)
+    assert (click.x, click.y) == (-1160, -112)
+    runner._validate_bounds(click, frame)
+    image_marks = parse_ax_elements_to_marks(state.ui_elements)
+    assert len(image_marks) == 1
+    assert image_marks[0].rect.origin.x >= 0
+    assert image_marks[0].rect.origin.y >= 0

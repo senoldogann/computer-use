@@ -327,6 +327,51 @@ def downscale_to_max_side(capture: ScreenCapture, max_side: int = SCREENSHOT_MAP
     )
 
 
+def model_capture(capture: ScreenCapture, max_side: int) -> ScreenCapture:
+    """Average only the Retina blocks retained by the final model image.
+
+    Produces the same pixels as logical-resolution averaging followed by
+    nearest-neighbour resizing, without building the full intermediate image.
+    """
+    if max_side <= 0:
+        raise ValueError(f"max_side must be positive, got {max_side}")
+    factor = int(capture.scale)
+    if capture.scale != factor or factor < 2:
+        return downscale_to_max_side(to_logical_resolution(capture), max_side)
+    logical_w = capture.width // factor
+    logical_h = capture.height // factor
+    longest = max(logical_w, logical_h)
+    if longest <= max_side:
+        return to_logical_resolution(capture)
+    ratio = longest / max_side
+    width = max(1, round(logical_w / ratio))
+    height = max(1, round(logical_h / ratio))
+    columns = [int(x * logical_w / width) * factor for x in range(width)]
+    rows = [int(y * logical_h / height) * factor for y in range(height)]
+    data = capture.data
+    output = bytearray(width * height * 4)
+    inv = 1.0 / (factor * factor)
+    for y, source_y in enumerate(rows):
+        for x, source_x in enumerate(columns):
+            blue = green = red = alpha = 0
+            for dy in range(factor):
+                start = ((source_y + dy) * capture.width + source_x) * 4
+                for dx in range(factor):
+                    index = start + dx * 4
+                    blue += data[index]
+                    green += data[index + 1]
+                    red += data[index + 2]
+                    alpha += data[index + 3]
+            offset = (y * width + x) * 4
+            output[offset:offset + 4] = bytes((
+                int(blue * inv), int(green * inv), int(red * inv), int(alpha * inv)
+            ))
+    return ScreenCapture(
+        display_id=capture.display_id, width=width, height=height, scale=1.0,
+        origin_x=capture.origin_x, origin_y=capture.origin_y, data=bytes(output),
+    )
+
+
 def to_logical_resolution(capture: ScreenCapture) -> ScreenCapture:
     """Downscale a physical-pixel frame to logical-point resolution.
 
@@ -476,13 +521,12 @@ def capture_to_png(capture: ScreenCapture) -> bytes:
         raw.append(0)  # Filter 0: None
         row_start = y * stride
         # Bulk BGRA→RGBA conversion: swap R and B for each pixel.
-        row_mv = memoryview(data)[row_start : row_start + stride]
+        row = data[row_start : row_start + stride]
         rgba_row = bytearray(stride)
-        for x in range(0, stride, 4):
-            rgba_row[x] = row_mv[x + 2]      # R ← B
-            rgba_row[x + 1] = row_mv[x + 1]  # G ← G
-            rgba_row[x + 2] = row_mv[x]      # B ← R
-            rgba_row[x + 3] = row_mv[x + 3]  # A ← A
+        rgba_row[0::4] = row[2::4]
+        rgba_row[1::4] = row[1::4]
+        rgba_row[2::4] = row[0::4]
+        rgba_row[3::4] = row[3::4]
         raw.extend(rgba_row)
 
     def make_chunk(tag: bytes, payload: bytes) -> bytes:
