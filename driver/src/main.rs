@@ -48,9 +48,22 @@ fn main() {
     );
     // Law 5.2: only the real backend may touch the host's event system; the
     // kill-hotkey tap is a host listener, so it belongs to the real driver.
+    //
+    // The call blocks until the tap reports armed-or-failed, so by the time
+    // the socket below accepts its first connection the answer ``health``
+    // gives is already final. A degraded kill switch does NOT stop the driver:
+    // Ctrl-C still works, and refusing to start would leave the user with no
+    // agent *and* no explanation. It is announced loudly instead.
     if backend.is_real() {
         #[cfg(target_os = "macos")]
-        actuation_driver::hotkey::spawn_listener();
+        if actuation_driver::hotkey::spawn_listener() {
+            eprintln!("[driver] kill-hotkey listener armed (Command+Shift+Escape)");
+        } else {
+            eprintln!(
+                "[driver] WARNING: kill-hotkey listener is NOT armed; \
+                 Command+Shift+Escape will not stop a run (Ctrl-C still will)"
+            );
+        }
     }
 
     // Bind with a fixed socket; a stale socket file from a crashed run is
@@ -204,14 +217,29 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
             };
         }
         Request::Health => {
+            // Two independent questions, reported as two fields. Consent and
+            // the kill listener fail for unrelated reasons and are fixed in
+            // unrelated places; collapsing them into one flag makes a dead
+            // event tap indistinguishable from a missing TCC grant.
             #[cfg(target_os = "macos")]
             let trusted = if backend.is_real() {
-                actuation_driver::ax::trusted() && actuation_driver::hotkey::is_listener_armed()
+                actuation_driver::ax::trusted()
             } else {
                 true
             };
             #[cfg(not(target_os = "macos"))]
             let trusted = true;
+
+            // Only the real backend installs a tap, so only it has an armed
+            // state; the simulated one answers null rather than false.
+            #[cfg(target_os = "macos")]
+            let kill_listener_armed = if backend.is_real() {
+                Some(actuation_driver::hotkey::is_listener_armed())
+            } else {
+                None
+            };
+            #[cfg(not(target_os = "macos"))]
+            let kill_listener_armed = None;
 
             return Response::Health {
                 backend: if backend.is_real() {
@@ -220,6 +248,7 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
                     "simulated".to_string()
                 },
                 trusted,
+                kill_listener_armed,
             };
         }
         Request::HotkeyState => {

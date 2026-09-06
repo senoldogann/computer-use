@@ -100,9 +100,19 @@ async function runEval(QuickJS, callId, code) {
     for (const deferred of deferreds) {
       if (deferred.alive) deferred.dispose();
     }
+    // Drain whatever the guest queued before tearing the runtime down. A job
+    // that throws here is a real finding about the evaluation that just ran,
+    // so it is reported rather than dropped: swallowing it is how a runtime
+    // that is quietly falling over keeps looking healthy.
     try {
       vm.runtime.executePendingJobs();
-    } catch {}
+    } catch (drainError) {
+      process.stderr.write(
+        "[cua-bridge] pending jobs threw during teardown: " +
+          (drainError.stack || String(drainError)) + "\n"
+      );
+      if (!evalError) evalError = drainError;
+    }
     try {
       vm.dispose();
     } catch (disposeError) {
@@ -125,12 +135,40 @@ async function runEval(QuickJS, callId, code) {
   }
 }
 
-getQuickJS().then((QuickJS) => {
-  if (typeof QuickJS.module?._malloc === "function" && typeof QuickJS.module?._free === "function") {
-    // Warm up linear WebAssembly memory to 64MB so mid-evaluation growth never corrupts QuickJS GC
-    const ptr = QuickJS.module._malloc(64 * 1024 * 1024);
-    QuickJS.module._free(ptr);
+/**
+ * Grow the emscripten linear memory to its working size before any runtime
+ * exists, then hand the block straight back.
+ *
+ * Not an optimisation. The WASM heap starts at 16MB, and growing it *while a
+ * QuickJS runtime is live* corrupts that runtime's GC bookkeeping: the next
+ * `JS_FreeRuntime` aborts the whole process on
+ * `Assertion failed: list_empty(&rt->gc_obj_list)`. Measured against this
+ * bridge: an RPC result of 3MB tore down cleanly, 4MB and above killed the
+ * worker — so a real screenshot returned success and then took the process
+ * with it, and the *following* evaluation was the one that reported failed.
+ * Growing up front means no growth happens mid-evaluation.
+ *
+ * Deliberately throws when the module does not expose the allocator. Skipping
+ * the warm-up quietly would restore the crash on a future dependency bump
+ * while every test still passed.
+ */
+function reserveLinearMemory(QuickJS, bytes) {
+  const module = QuickJS.module;
+  if (typeof module?._malloc !== "function" || typeof module?._free !== "function") {
+    throw new Error(
+      "quickjs module exposes no _malloc/_free; the WASM heap cannot be " +
+        "pre-grown, and growing it mid-evaluation corrupts the QuickJS GC"
+    );
   }
+  const ptr = module._malloc(bytes);
+  if (!ptr) {
+    throw new Error(`could not reserve ${bytes} bytes of WASM linear memory`);
+  }
+  module._free(ptr);
+}
+
+getQuickJS().then((QuickJS) => {
+  reserveLinearMemory(QuickJS, 64 * 1024 * 1024);
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   rl.on("line", (line) => {
     try {
