@@ -1288,6 +1288,11 @@ class OodaRunner:
         # verification, consumed by the next observation, dropped by anything
         # that could invalidate it (see ``_carry_ax_probe``).
         self._fresh_ax: AxProbeResult | None = None
+        #: Whether the current observation reused that reading rather than
+        #: taking its own. Reported, not inferred: the two are indistinguishable
+        #: in the log otherwise, and perception is the last place to be vague
+        #: about where an answer came from.
+        self._ax_was_carried: bool = False
         # The action awaiting a progress verdict, and the observation
         # signature captured just before it ran.
         self._pending_action: Action | None = None
@@ -1324,6 +1329,7 @@ class OodaRunner:
         self._step_targets = []
         self._acted_target = ""
         self._fresh_ax = None
+        self._ax_was_carried = False
         self._skill = None
         self._playbook = None
         self._playbook_scanned = False
@@ -1419,9 +1425,12 @@ class OodaRunner:
             state = self._retrieve(state)
             if state.active_window or state.ui_elements:
                 LOGGER.info(
-                    "ooda observe: window=%r, ax_elements=%d",
+                    "ooda observe: window=%r, ax_elements=%d%s",
                     state.active_window or "unknown",
                     len(state.ui_elements),
+                    " (carried from the last verification)"
+                    if self._ax_was_carried
+                    else "",
                 )
             state = self._warn_if_blind(state)
             # The provider decides against exactly this snapshot; remember the
@@ -2547,6 +2556,10 @@ class OodaRunner:
         asks_for_credential = previous.asks_for_credential
         carried = self._fresh_ax
         self._fresh_ax = None
+        # Recorded so the observe log can say where the reading came from: a
+        # line that looks identical whether the tree was read or reused hides
+        # the one thing someone debugging perception needs to know.
+        self._ax_was_carried = carried is not None
         if carried is not None:
             # The previous step's verification already read this screen, after
             # its settle wait and with no actuation since. Re-reading costs a
