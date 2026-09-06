@@ -401,6 +401,26 @@ class ActuationClient:
             raise TypeError("malformed hotkey_state response: tripped must be a bool")
         return tripped
 
+    def release_inputs(self) -> None:
+        """Send all hardware-up signals even after a kill-switch interruption."""
+        response = self.request("release_inputs")
+        if response.get("ok") != "ack":
+            raise DriverRpcError(
+                method="release_inputs",
+                driver_message=str(response.get("message", "missing cleanup ACK")),
+            )
+
+    def owns_focused_modal(self, pid: int) -> bool:
+        """Prove ownership from the host AX chain, never from a dialog's title."""
+        response = self.request("owns_focused_modal", {"pid": pid})
+        owned = response.get("owned")
+        if response.get("ok") != "owns_focused_modal" or not isinstance(owned, bool):
+            raise DriverRpcError(
+                method="owns_focused_modal",
+                driver_message=str(response.get("message", "invalid modal ownership response")),
+            )
+        return owned
+
     def focused_window(self) -> FocusedWindow:
         """Read the frontmost app, its focused window, and the cursor.
 

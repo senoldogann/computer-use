@@ -29,6 +29,9 @@ class MockDriverClient:
     def send(self, action: Action) -> None:
         self.sent_actions.append(action)
 
+    def release_inputs(self) -> None:
+        """No hardware is held by this recording driver."""
+
     def activate_app(self, app_name: str) -> None:
         self.activated_apps.append(app_name)
         self.frontmost = app_name

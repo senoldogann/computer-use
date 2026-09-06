@@ -8,7 +8,8 @@ Includes historical node tracking and self-healing locator capabilities.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 
 from computeruse.vision.ax import AXElement
 
@@ -138,6 +139,34 @@ def _default_index_map() -> dict[int, IndexedNode]:
     return {}
 
 
+def _stable_nodes(
+    observed: list[IndexedNode], previous: list[IndexedNode], next_index: int,
+) -> tuple[list[IndexedNode], int]:
+    """Allocate non-recycled IDs in linear time, without mutating observations."""
+    by_signature: dict[str, list[IndexedNode]] = {}
+    by_identity: dict[tuple[str, str], list[IndexedNode]] = {}
+    counts = Counter((node.role, node.title) for node in observed)
+    for node in previous:
+        by_signature.setdefault(node.signature, []).append(node)
+        by_identity.setdefault((node.role, node.title), []).append(node)
+    result: list[IndexedNode] = []
+    used: set[int] = set()
+    for node in observed:
+        exact = by_signature.get(node.signature, [])
+        same = by_identity.get((node.role, node.title), [])
+        candidate = exact[0] if len(exact) == 1 else None
+        if candidate is None and node.title and len(same) == counts[(node.role, node.title)] == 1:
+            candidate = same[0]
+        if candidate is not None and candidate.index not in used:
+            index = candidate.index
+        else:
+            index = next_index
+            next_index += 1
+        used.add(index)
+        result.append(replace(node, index=index))
+    return result, next_index
+
+
 @dataclass
 class AXStateTracker:
     """Tracks state and calculates diffs across consecutive turns for an app."""
@@ -148,6 +177,8 @@ class AXStateTracker:
     current_index_map: dict[int, IndexedNode] = field(default_factory=_default_index_map)
     historical_index_map: dict[int, IndexedNode] = field(default_factory=_default_index_map)
     user_interrupted: bool = False
+    next_index: int = 0
+    current_window_title: str | None = None
 
     def mark_user_interruption(self) -> None:
         """Mark that a user input (mouse/keyboard) interrupted the agent."""
@@ -165,12 +196,13 @@ class AXStateTracker:
         """Find a currently live element matching role and title (case-insensitive)."""
         clean_title = title.strip().casefold()
         clean_role = role.strip().casefold()
+        matches: list[IndexedNode] = []
         for elem in self.current_index_map.values():
             norm_role = elem.role.removeprefix("AX").casefold()
             elem_role = elem.role.strip().casefold()
             if (elem_role == clean_role or norm_role == clean_role) and elem.title.strip().casefold() == clean_title:
-                return elem
-        return None
+                matches.append(elem)
+        return matches[0] if len(matches) == 1 else None
 
     def find_elements(
         self,
@@ -238,6 +270,21 @@ class AXStateTracker:
         matches = self.find_elements(role=role, title=title, query=query)
         return matches[0] if matches else None
 
+    def refresh_state(self, root: AXElement, window_title: str) -> None:
+        """Refresh actuation identity without consuming the model-visible diff."""
+        observed = index_accessible_elements(root, start_index=0)
+        # IDs are never recycled. A banner cannot silently steal a button's ID.
+        # Only unique identities survive movement; repeated labels must be
+        # re-observed instead of guessing which identical control was intended.
+        if self.current_window_title is not None and self.current_window_title != window_title:
+            self.historical_index_map = {}
+        new_nodes, self.next_index = _stable_nodes(
+            observed, list(self.historical_index_map.values()), self.next_index,
+        )
+        self.current_window_title = window_title
+        self.current_index_map = {node.index: node for node in new_nodes}
+        self.historical_index_map.update(self.current_index_map)
+
     def render_state(
         self,
         root: AXElement,
@@ -245,9 +292,8 @@ class AXStateTracker:
         disable_diffing: bool = False,
     ) -> str:
         """Generate token-efficient state string (initial full tree, or incremental diff)."""
-        new_nodes = index_accessible_elements(root, start_index=0)
-        self.current_index_map = {node.index: node for node in new_nodes}
-        self.historical_index_map.update(self.current_index_map)
+        self.refresh_state(root, window_title)
+        new_nodes = list(self.current_index_map.values())
 
         # Handle user disruption / drift guard
         if self.user_interrupted:
@@ -282,7 +328,7 @@ class AXStateTracker:
         for n in new_nodes:
             if n.signature in old_sigs:
                 old = old_sigs[n.signature]
-                if n.focused != old.focused or n.value != old.value:
+                if n.index != old.index or n.focused != old.focused or n.value != old.value:
                     changed.append(n)
 
         self.last_nodes = new_nodes

@@ -196,6 +196,13 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
     // Helper: fold a backend failure into a structured Error response.
     let outcome = match req {
         Request::Ping => return Response::Pong,
+        Request::ReleaseInputs => backend.release_inputs(),
+        Request::OwnsFocusedModal(params) => {
+            return match backend.owns_focused_modal(params.pid) {
+                Ok(owned) => Response::OwnsFocusedModal { owned },
+                Err(error) => Response::Error { message: error.to_string() },
+            };
+        }
         Request::Health => {
             #[cfg(target_os = "macos")]
             let trusted = if backend.is_real() {
@@ -392,4 +399,3 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
         Err(BackendError(message)) => Response::Error { message },
     }
 }
-

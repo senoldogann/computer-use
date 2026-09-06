@@ -39,6 +39,9 @@ class MockDriverClient:
     def send(self, action: Action) -> None:
         self.sent_actions.append(action)
 
+    def release_inputs(self) -> None:
+        """No hardware is held by this recording driver."""
+
     def activate_app(self, app_name: str) -> None:
         self.activated_apps.append(app_name)
         self.frontmost = app_name
@@ -201,13 +204,18 @@ def test_cua_repl_engine_actions_dispatch() -> None:
 
 
 def test_cua_repl_engine_get_app_and_ax_diffing() -> None:
-    # Custom snapshot provider simulating window state evolution
-    turn_count = 0
+    # Reads do not change the screen; only the successful click opens it.
+    opened = False
+
+    class FormDriver(MockDriverClient):
+        def send(self, action: Action) -> None:
+            nonlocal opened
+            super().send(action)
+            if isinstance(action, MouseClick):
+                opened = True
 
     def mock_provider(app_name: str) -> tuple[AXElement, str]:
-        nonlocal turn_count
-        turn_count += 1
-        if turn_count == 1:
+        if not opened:
             # Initial state
             root = AXElement(
                 role="Window",
@@ -242,9 +250,9 @@ def test_cua_repl_engine_get_app_and_ax_diffing() -> None:
                     ),
                 ),
             )
-        return root, "Open" if turn_count == 1 else "Untitled"
+        return root, "Untitled" if opened else "Open"
 
-    engine = CuaReplEngine(snapshot_provider=mock_provider)
+    engine = CuaReplEngine(driver_client=FormDriver(), snapshot_provider=mock_provider)
     try:
         # Step 1: getApp
         code_1 = """
@@ -268,7 +276,7 @@ def test_cua_repl_engine_get_app_and_ax_diffing() -> None:
             'The following is a diff from the previous accessibility tree for Window: "Untitled"'
             in res_2.content
         )
-        assert '+ [1] TextArea "Document"' in res_2.content
+        assert '+ [4] TextArea "Document"' in res_2.content
     finally:
         engine.stop()
 
