@@ -1013,6 +1013,86 @@ fn handle_script_message(message: &WKScriptMessage) {
                 }
             }
         }
+                Some("get_models") => {
+            let key = openai_key();
+            let has_openai = key.is_some();
+            let mut models: Vec<serde_json::Value> = Vec::new();
+
+            if let Some(ref api_key) = key {
+                let cache_path = std::path::Path::new("/tmp/computeruse_openai_models.json");
+                let mut loaded_from_cache = false;
+                if let Ok(cache_text) = std::fs::read_to_string(cache_path) {
+                    if let Ok(cached_json) = serde_json::from_str::<serde_json::Value>(&cache_text) {
+                        if let Some(list) = cached_json.as_array() {
+                            models = list.clone();
+                            loaded_from_cache = true;
+                        }
+                    }
+                }
+
+                if !loaded_from_cache {
+                    if let Ok(output) = std::process::Command::new("curl")
+                        .args([
+                            "-s",
+                            "--max-time", "3",
+                            "-H", &format!("Authorization: Bearer {}", api_key),
+                            "https://api.openai.com/v1/models",
+                        ])
+                        .output()
+                    {
+                        if output.status.success() {
+                            if let Ok(json_resp) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                                if let Some(list) = json_resp.get("data").and_then(serde_json::Value::as_array) {
+                                    for item in list {
+                                        if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
+                                            if id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("chat") {
+                                                models.push(serde_json::json!({
+                                                    "id": format!("openai:{}", id),
+                                                    "name": id,
+                                                    "provider": "openai",
+                                                    "available": true
+                                                }));
+                                            }
+                                        }
+                                    }
+                                    let _ = std::fs::write(cache_path, serde_json::to_string(&models).unwrap_or_default());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if models.is_empty() {
+                for id in ["gpt-4o", "gpt-4o-mini", "o3-mini", "o1", "gpt-4-turbo"] {
+                    models.push(serde_json::json!({
+                        "id": format!("openai:{}", id),
+                        "name": id,
+                        "provider": "openai",
+                        "available": has_openai
+                    }));
+                }
+            }
+
+            let response = serde_json::json!({
+                "providers": {
+                    "openai": { "configured": has_openai, "name": "OpenAI" },
+                    "anthropic": { "configured": false, "name": "Anthropic" },
+                    "google": { "configured": false, "name": "Google" },
+                    "local": { "configured": false, "name": "Ollama (Local)" }
+                },
+                "models": models
+            });
+
+            if let Ok(json_str) = serde_json::to_string(&response) {
+                let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+                if !ptr.is_null() {
+                    let wv = unsafe { &*(ptr as *const WKWebView) };
+                    let js = format!("if(window.onModelsLoaded)window.onModelsLoaded({json_str});");
+                    call_js(wv, &js);
+                }
+            }
+        }
         Some("stop") => stop_agent(),
         Some("toggle_panel") => toggle_panel_ui(),
         Some("set_compact") => {

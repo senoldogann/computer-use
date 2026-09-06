@@ -3202,6 +3202,63 @@
     background: rgba(255, 255, 255, 0.04) !important;
   }
 
+
+  /* Backdrop overlay for dismissing modals cleanly */
+  .popover-backdrop {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    background: rgba(0, 0, 0, 0.2) !important;
+    z-index: 9990 !important;
+    cursor: default !important;
+  }
+
+  .palette-close-btn {
+    width: 22px !important;
+    height: 22px !important;
+    border-radius: 4px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: none !important;
+    color: #AAA8A3 !important;
+    cursor: pointer !important;
+    font-size: 13px !important;
+    transition: all 0.15s ease !important;
+  }
+  .palette-close-btn:hover {
+    color: #F5F4F2 !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+  }
+
+  .provider-status-dot {
+    width: 6px !important;
+    height: 6px !important;
+    border-radius: 50% !important;
+    display: inline-block !important;
+  }
+  .provider-status-dot.active {
+    background: #50A574 !important;
+    box-shadow: 0 0 6px #50A574 !important;
+  }
+  .provider-status-dot.inactive {
+    background: #5A5854 !important;
+  }
+
+  .curated-section-header {
+    font-size: 9.5px !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    color: #FFB17F !important;
+    padding: 6px 8px 3px !important;
+  }
+
 </style>
 </head>
 <body class="compact-mode">
@@ -3584,112 +3641,98 @@
       </div>
     </div>
 
+    <!-- Backdrop Overlay for reliable closing -->
+    <div id="popoverBackdrop" class="popover-backdrop" style="display:none;" onclick="closeAllLuxuryPopovers()"></div>
+
     <!-- PHOTO 1: Multi-Provider Model Palette Popover -->
     <div class="luxury-floating-popover model-palette-popover" id="modelPaletteModal" style="display:none;">
       <div class="palette-sidebar">
-        <button class="palette-provider-btn active" data-prov="all" title="All & Favorites" onclick="filterByProvider('all', event)">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-        </button>
-        <button class="palette-provider-btn" data-prov="openai" title="OpenAI / Codex" onclick="filterByProvider('openai', event)">
+        <button class="palette-provider-btn active" data-prov="openai" title="OpenAI (Aktif API Anahtarı)" onclick="filterByProvider('openai', event)">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
-        <button class="palette-provider-btn" data-prov="anthropic" title="Anthropic / Claude" onclick="filterByProvider('anthropic', event)">
+        <button class="palette-provider-btn" data-prov="anthropic" title="Anthropic (API Anahtarı Yok)" onclick="filterByProvider('anthropic', event)">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 21 7.5-18h3L21 21"/><path d="M6.5 14h11"/></svg>
         </button>
-        <button class="palette-provider-btn" data-prov="google" title="Google / Gemini" onclick="filterByProvider('google', event)">
+        <button class="palette-provider-btn" data-prov="google" title="Google (API Anahtarı Yok)" onclick="filterByProvider('google', event)">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 19 8.5 19 15.5 12 22 5 15.5 5 8.5 12 2"/></svg>
         </button>
-        <button class="palette-provider-btn" data-prov="local" title="Local / Ollama" onclick="filterByProvider('local', event)">
+        <button class="palette-provider-btn" data-prov="local" title="Local / Ollama (Bağlı Değil)" onclick="filterByProvider('local', event)">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
         </button>
       </div>
       <div class="palette-main">
         <div class="palette-search-wrapper">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#AAA8A3" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input class="palette-search-input" id="paletteSearchInput" placeholder="Search models..." oninput="filterPaletteModels(this.value)">
+          <input class="palette-search-input" id="paletteSearchInput" placeholder="OpenAI modellerinde ara..." oninput="filterPaletteModels(this.value)">
+          <button class="palette-close-btn" onclick="closeAllLuxuryPopovers()" title="Kapat (Esc)">✕</button>
         </div>
+
+        <div id="unconfiguredProviderNotice" style="display:none;padding:16px;font-size:11px;color:#AAA8A3;line-height:1.45;text-align:center;">
+          <div style="font-size:20px;margin-bottom:8px;">🔑</div>
+          <div style="font-weight:600;color:#F5F4F2;margin-bottom:4px;" id="unconfiguredProviderTitle">Sağlayıcı Yapılandırılmadı</div>
+          <div id="unconfiguredProviderDesc">Bu sağlayıcıyı kullanmak için ~/.computeruse/env dosyasına API anahtarını ekleyin.</div>
+        </div>
+
         <div class="palette-model-list" id="paletteModelList">
-          <div class="palette-model-item selected" data-model="openai:gpt-6-astra" data-prov="openai" onclick="selectPaletteModel('openai:gpt-6-astra', 'GPT-6-Astra', 'Codex', event)">
+          <div class="curated-section-header">Önerilen Gerçek Modeller</div>
+          <!-- Real OpenAI models -->
+          <div class="palette-model-item selected" data-model="openai:gpt-4o" data-prov="openai" onclick="selectPaletteModel('openai:gpt-4o', 'gpt-4o', 'OpenAI', event)">
             <div>
-              <div class="palette-model-title">GPT-6-Astra</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+              <div class="palette-model-title">gpt-4o</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Flagship Çok Modlu & Hızlı</div>
             </div>
             <div class="palette-model-actions">
               <span class="palette-shortcut">⌘1</span>
               <span class="palette-star active">★</span>
             </div>
           </div>
-          <div class="palette-model-item" data-model="openai:gpt-5.6-terra" data-prov="openai" onclick="selectPaletteModel('openai:gpt-5.6-terra', 'GPT-5.6-Terra', 'Codex', event)">
+          <div class="palette-model-item" data-model="openai:gpt-4o-mini" data-prov="openai" onclick="selectPaletteModel('openai:gpt-4o-mini', 'gpt-4o-mini', 'OpenAI', event)">
             <div>
-              <div class="palette-model-title">GPT-5.6-Terra</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+              <div class="palette-model-title">gpt-4o-mini</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Düşük Gecikme & Ekonomik</div>
             </div>
             <div class="palette-model-actions">
               <span class="palette-shortcut">⌘2</span>
               <span class="palette-star active">★</span>
             </div>
           </div>
-          <div class="palette-model-item" data-model="openai:gpt-5.6-luna" data-prov="openai" onclick="selectPaletteModel('openai:gpt-5.6-luna', 'GPT-5.6-Luna', 'Codex', event)">
+          <div class="palette-model-item" data-model="openai:o3-mini" data-prov="openai" onclick="selectPaletteModel('openai:o3-mini', 'o3-mini', 'OpenAI', event)">
             <div>
-              <div class="palette-model-title">GPT-5.6-Luna</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+              <div class="palette-model-title">o3-mini</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Akıl Yürütme & Kodlama</div>
             </div>
             <div class="palette-model-actions">
               <span class="palette-shortcut">⌘3</span>
               <span class="palette-star">★</span>
             </div>
           </div>
-          <div class="palette-model-item" data-model="openai:gpt-5.6-sol" data-prov="openai" onclick="selectPaletteModel('openai:gpt-5.6-sol', 'GPT-5.6-Sol', 'Codex', event)">
+          <div class="palette-model-item" data-model="openai:o1" data-prov="openai" onclick="selectPaletteModel('openai:o1', 'o1', 'OpenAI', event)">
             <div>
-              <div class="palette-model-title">GPT-5.6-Sol</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+              <div class="palette-model-title">o1</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Derin STEM & OS Akıl Yürütme</div>
             </div>
             <div class="palette-model-actions">
               <span class="palette-shortcut">⌘4</span>
               <span class="palette-star">★</span>
             </div>
           </div>
-          <div class="palette-model-item" data-model="anthropic:claude-3-7-sonnet" data-prov="anthropic" onclick="selectPaletteModel('anthropic:claude-3-7-sonnet', 'Claude 3.7 Sonnet', 'Anthropic', event)">
+          <div class="palette-model-item" data-model="openai:gpt-4-turbo" data-prov="openai" onclick="selectPaletteModel('openai:gpt-4-turbo', 'gpt-4-turbo', 'OpenAI', event)">
             <div>
-              <div class="palette-model-title">Claude 3.7 Sonnet</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 21 7.5-18h3L21 21"/></svg> Anthropic</div>
+              <div class="palette-model-title">gpt-4-turbo</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> 128k Geniş Bağlam</div>
             </div>
             <div class="palette-model-actions">
               <span class="palette-shortcut">⌘5</span>
-              <span class="palette-star active">★</span>
-            </div>
-          </div>
-          <div class="palette-model-item" data-model="anthropic:claude-3-5-sonnet" data-prov="anthropic" onclick="selectPaletteModel('anthropic:claude-3-5-sonnet', 'Claude 3.5 Sonnet', 'Anthropic', event)">
-            <div>
-              <div class="palette-model-title">Claude 3.5 Sonnet</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 21 7.5-18h3L21 21"/></svg> Anthropic</div>
-            </div>
-            <div class="palette-model-actions">
               <span class="palette-star">★</span>
             </div>
           </div>
-          <div class="palette-model-item" data-model="google:gemini-2.0-flash" data-prov="google" onclick="selectPaletteModel('google:gemini-2.0-flash', 'Gemini 2.0 Flash', 'Google', event)">
-            <div>
-              <div class="palette-model-title">Gemini 2.0 Flash</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 19 8.5 19 15.5 12 22 5 15.5 5 8.5 12 2"/></svg> Google</div>
-            </div>
-            <div class="palette-model-actions">
-              <span class="palette-star">★</span>
-            </div>
-          </div>
-          <div class="palette-model-item" data-model="local:deepseek-r1" data-prov="local" onclick="selectPaletteModel('local:deepseek-r1', 'DeepSeek R1', 'Ollama', event)">
-            <div>
-              <div class="palette-model-title">DeepSeek R1 (Local)</div>
-              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/></svg> Ollama</div>
-            </div>
-            <div class="palette-model-actions">
-              <span class="palette-star">★</span>
-            </div>
-          </div>
+
+          <div class="curated-section-header" id="dynamicSectionHeader">Hesabınızdaki Diğer Modeller</div>
+          <div id="dynamicModelsContainer"></div>
         </div>
-        <div class="palette-footer-row" onclick="filterByProvider('legacy', event)">
-          <span>Legacy models</span>
-          <span>32 models ›</span>
+        <div class="palette-footer-row" onclick="requestRefreshModels(event)">
+          <span>OpenAI API Bağlantısı: Aktif</span>
+          <span style="color:#FFB17F;">Yenile ↻</span>
         </div>
       </div>
     </div>
@@ -3726,7 +3769,7 @@
           <!-- Button 3: Model Picker (Photo 1) -->
           <button class="ide-popover-trigger" id="modelTriggerBtn" type="button" onclick="toggleModelPalette(event)" title="Yapay Zeka Modeli Seç">
             <span style="color:#FFB17F;font-size:10px;">✦</span>
-            <span id="modelTriggerLabel">GPT-6-Astra</span>
+            <span id="modelTriggerLabel">gpt-4o</span>
             <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
 
@@ -5992,8 +6035,8 @@
   window.selectedReasoning = "low";
   window.selectedServiceTier = "standard";
   window.selectedAutonomyMode = "full";
-  window.selectedModelId = "openai:gpt-6-astra";
-  window.selectedModelName = "GPT-6-Astra";
+  window.selectedModelId = "openai:gpt-4o";
+  window.selectedModelName = "gpt-4o";
 
   function closeAllLuxuryPopovers() {
     var r = document.getElementById("reasoningTierPopover");
@@ -6189,6 +6232,184 @@
         e.preventDefault();
       }
     }
+  });
+
+
+  // Dynamic Model Loader from Rust / OpenAI API
+  window.onModelsLoaded = function(data) {
+    if (!data) return;
+    var list = data.models || [];
+    var container = document.getElementById("dynamicModelsContainer");
+    if (!container) return;
+    container.innerHTML = "";
+    
+    // Filter out models already in curated list
+    var curatedIds = ["gpt-4o", "gpt-4o-mini", "o3-mini", "o1", "gpt-4-turbo"];
+    var extraModels = list.filter(function(m) {
+      var id = m.name || m.id.replace("openai:", "");
+      return curatedIds.indexOf(id) === -1;
+    });
+
+    extraModels.forEach(function(m) {
+      var id = m.name || m.id.replace("openai:", "");
+      var item = document.createElement("div");
+      item.className = "palette-model-item";
+      item.setAttribute("data-model", "openai:" + id);
+      item.setAttribute("data-prov", "openai");
+      item.onclick = function(e) {
+        selectPaletteModel("openai:" + id, id, "OpenAI", e);
+      };
+      item.innerHTML = 
+        '<div>' +
+          '<div class="palette-model-title">' + escapeHtml(id) + '</div>' +
+          '<div class="palette-model-meta"><span class="provider-status-dot active"></span> OpenAI Hesabı</div>' +
+        '</div>' +
+        '<div class="palette-model-actions">' +
+          '<span class="palette-star">★</span>' +
+        '</div>';
+      container.appendChild(item);
+    });
+
+    var header = document.getElementById("dynamicSectionHeader");
+    if (header) {
+      header.textContent = "Hesabınızdaki Diğer Modeller (" + extraModels.length + ")";
+    }
+  };
+
+  window.requestRefreshModels = function(e) {
+    if (e) e.stopPropagation();
+    post({ cmd: "get_models" });
+  };
+
+  // Override filterByProvider for configured vs unconfigured
+  var origFilterByProvider = window.filterByProvider;
+  window.filterByProvider = function(prov, e) {
+    if (e) e.stopPropagation();
+    document.querySelectorAll(".palette-sidebar .palette-provider-btn").forEach(function(b) {
+      if (b.getAttribute("data-prov") === prov) b.classList.add("active");
+      else b.classList.remove("active");
+    });
+
+    var notice = document.getElementById("unconfiguredProviderNotice");
+    var list = document.getElementById("paletteModelList");
+    var search = document.querySelector(".palette-search-wrapper");
+
+    if (prov !== "openai") {
+      if (notice) {
+        notice.style.display = "block";
+        var titles = {
+          anthropic: "Anthropic / Claude",
+          google: "Google / Gemini",
+          local: "Local / Ollama"
+        };
+        var envKeys = {
+          anthropic: "ANTHROPIC_API_KEY",
+          google: "GEMINI_API_KEY",
+          local: "OLLAMA_HOST"
+        };
+        document.getElementById("unconfiguredProviderTitle").textContent = (titles[prov] || prov) + " Yapılandırılmadı";
+        document.getElementById("unconfiguredProviderDesc").textContent = "Bu sağlayıcıyı kullanmak için ~/.computeruse/env dosyasına " + (envKeys[prov] || "API anahtarını") + " ekleyin.";
+      }
+      if (list) list.style.display = "none";
+    } else {
+      if (notice) notice.style.display = "none";
+      if (list) list.style.display = "flex";
+    }
+  };
+
+  // Close Popover Handler (Reliable Backdrop & Escape)
+  window.closeAllLuxuryPopovers = function() {
+    var r = document.getElementById("reasoningTierPopover");
+    var a = document.getElementById("autonomyTierPopover");
+    var m = document.getElementById("modelPaletteModal");
+    var bd = document.getElementById("popoverBackdrop");
+    if (r) r.style.display = "none";
+    if (a) a.style.display = "none";
+    if (m) m.style.display = "none";
+    if (bd) bd.style.display = "none";
+    var btns = document.querySelectorAll(".ide-popover-trigger");
+    btns.forEach(function(b) { b.classList.remove("active"); });
+  };
+
+  window.toggleReasoningPopover = function(e) {
+    if (e) e.stopPropagation();
+    var p = document.getElementById("reasoningTierPopover");
+    var bd = document.getElementById("popoverBackdrop");
+    if (!p) return;
+    var isOpen = p.style.display === "block";
+    closeAllLuxuryPopovers();
+    if (!isOpen) {
+      p.style.display = "block";
+      if (bd) bd.style.display = "block";
+      var btn = document.getElementById("reasoningTriggerBtn");
+      if (btn) btn.classList.add("active");
+    }
+  };
+
+  window.toggleAutonomyPopover = function(e) {
+    if (e) e.stopPropagation();
+    var p = document.getElementById("autonomyTierPopover");
+    var bd = document.getElementById("popoverBackdrop");
+    if (!p) return;
+    var isOpen = p.style.display === "block";
+    closeAllLuxuryPopovers();
+    if (!isOpen) {
+      p.style.display = "block";
+      if (bd) bd.style.display = "block";
+      var btn = document.getElementById("autonomyTriggerBtn");
+      if (btn) btn.classList.add("active");
+    }
+  };
+
+  window.toggleModelPalette = function(e) {
+    if (e) e.stopPropagation();
+    var p = document.getElementById("modelPaletteModal");
+    var bd = document.getElementById("popoverBackdrop");
+    if (!p) return;
+    var isOpen = p.style.display === "flex";
+    closeAllLuxuryPopovers();
+    if (!isOpen) {
+      p.style.display = "flex";
+      if (bd) bd.style.display = "block";
+      var btn = document.getElementById("modelTriggerBtn");
+      if (btn) btn.classList.add("active");
+      var searchInput = document.getElementById("paletteSearchInput");
+      if (searchInput) {
+        setTimeout(function() { searchInput.focus(); }, 50);
+      }
+      post({ cmd: "get_models" });
+    }
+  };
+
+  // Keyboard shortcut updates for real OpenAI models
+  document.addEventListener("keydown", function(e) {
+    if (e.key === "Escape") {
+      closeAllLuxuryPopovers();
+      return;
+    }
+    if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
+      if (e.key === "1") {
+        selectPaletteModel("openai:gpt-4o", "gpt-4o", "OpenAI");
+        e.preventDefault();
+      } else if (e.key === "2") {
+        selectPaletteModel("openai:gpt-4o-mini", "gpt-4o-mini", "OpenAI");
+        e.preventDefault();
+      } else if (e.key === "3") {
+        selectPaletteModel("openai:o3-mini", "o3-mini", "OpenAI");
+        e.preventDefault();
+      } else if (e.key === "4") {
+        selectPaletteModel("openai:o1", "o1", "OpenAI");
+        e.preventDefault();
+      } else if (e.key === "5") {
+        selectPaletteModel("openai:gpt-4-turbo", "gpt-4-turbo", "OpenAI");
+        e.preventDefault();
+      }
+    }
+  });
+
+  // Fetch real models on DOM ready
+  document.addEventListener("DOMContentLoaded", function() {
+    post({ cmd: "get_models" });
   });
 
 </script>
