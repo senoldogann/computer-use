@@ -2591,6 +2591,140 @@
     gap: 8px;
   }
 
+
+  .lens-reticle-box {
+    height: 32px !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+  .reticle-target {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #FFB17F !important;
+    font-size: 10px !important;
+    font-family: ui-monospace, Menlo, Monaco, monospace !important;
+  }
+  .reticle-crosshair {
+    width: 6px !important;
+    height: 6px !important;
+    border-radius: 50% !important;
+    background: #FFB17F !important;
+    box-shadow: 0 0 6px #FFB17F !important;
+  }
+
+
+  .chips-container {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    width: 100% !important;
+    margin-top: 6px !important;
+  }
+  .chip {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #AAA8A3 !important;
+    font-size: 11.5px !important;
+    text-align: center !important;
+    cursor: pointer !important;
+    transition: all 0.15s ease !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    padding: 4px 12px !important;
+    border-radius: 6px !important;
+    width: auto !important;
+  }
+  .chip:hover {
+    background: rgba(255, 255, 255, 0.04) !important;
+    color: #FFB17F !important;
+    transform: translateY(-1px) !important;
+  }
+  .chip svg {
+    color: #FFB17F !important;
+    flex-shrink: 0 !important;
+  }
+
+
+  /* Center example command chips & remove background/box */
+  .chips-container {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    gap: 7px !important;
+    margin: 8px auto 0 !important;
+  }
+  .chip {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #AAA8A3 !important;
+    font-size: 11.5px !important;
+    cursor: pointer !important;
+    gap: 7px !important;
+    padding: 3px 8px !important;
+    border-radius: 4px !important;
+    transition: all 0.15s ease !important;
+    text-align: center !important;
+  }
+  .chip:hover {
+    color: #FFB17F !important;
+    background: transparent !important;
+    border: none !important;
+    transform: translateY(-1px) !important;
+  }
+  .chip svg {
+    color: #FFB17F !important;
+    flex-shrink: 0 !important;
+  }
+
+  /* Reticle Physical Action Coordinate: zero background & zero border */
+  .lens-reticle-box,
+  .reticle-target,
+  .reticle-caption,
+  #reticleTarget {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+  .reticle-caption {
+    color: #AAA8A3 !important;
+    font-size: 10px !important;
+  }
+
+
+  /* Ambient Intelligence Pulse when agent is executing tasks */
+  body.running-glow .input-wrapper,
+  body.running-glow {
+    box-shadow: 0 0 24px rgba(255, 177, 127, 0.22) !important;
+  }
+  @keyframes ambientPulse {
+    0% { box-shadow: 0 0 16px rgba(255, 177, 127, 0.15); }
+    50% { box-shadow: 0 0 32px rgba(255, 177, 127, 0.35); }
+    100% { box-shadow: 0 0 16px rgba(255, 177, 127, 0.15); }
+  }
+  body.running-glow {
+    animation: ambientPulse 2.4s ease-in-out infinite;
+  }
+
 </style>
 </head>
 <body class="compact-mode">
@@ -3549,6 +3683,7 @@
   appToggleBtn.addEventListener("click", toggleAppField);
 
   window.usePreset = function(promptText, appText){
+    window.expandWindow();
     goal.value = promptText;
     if (appText) {
       app.value = appText;
@@ -4376,6 +4511,14 @@
   };
   function setRunning(r){
     window.isAgentRunning = !!r;
+    if (r) {
+      document.body.classList.add("running-glow");
+    } else {
+      document.body.classList.remove("running-glow");
+      if (!goal.value || !goal.value.trim()) {
+        window.collapseWindow();
+      }
+    }
     runBtn.disabled = r;
     stopBtn.style.display = r ? "inline-flex" : "none";
     var panicBtn = document.getElementById("panicBtn");
@@ -4911,6 +5054,7 @@
     summary: function(s){ renderSummaryCard(s); },
     done: function(ok){ window._lastErr = !ok; setRunning(false); },
     clear: function(){
+      goal.value = "";
       log.innerHTML = "";
       currentTree = null;
       sessionEvents = [];
@@ -4918,9 +5062,7 @@
         log.appendChild(emptyHero);
         emptyHero.style.display = "flex";
       }
-      if (!goal.value.trim()) {
-        window.collapseWindow();
-      }
+      window.collapseWindow();
     }
   };
 
@@ -5132,15 +5274,45 @@
   };
 
   var goalInputEl = document.getElementById("goal");
+  
+  function evaluateAutoCollapse() {
+    if (window._isRunning) return;
+    var text = (goalInputEl ? goalInputEl.value : "").trim();
+    if (text.length > 0) {
+      window.expandWindow();
+    } else {
+      window.collapseWindow();
+    }
+  }
+
   if (goalInputEl) {
-    goalInputEl.addEventListener("input", function() {
-      if (goalInputEl.value.trim().length > 0) {
-        window.expandWindow();
+    goalInputEl.addEventListener("input", evaluateAutoCollapse);
+    goalInputEl.addEventListener("keyup", evaluateAutoCollapse);
+    goalInputEl.addEventListener("change", evaluateAutoCollapse);
+    goalInputEl.addEventListener("blur", function() {
+      var text = (goalInputEl ? goalInputEl.value : "").trim();
+      if (!text && !window._isRunning) {
+        window.collapseWindow();
       }
     });
     goalInputEl.addEventListener("keydown", function(e) {
-      if (e.key === "Enter") {
-        window.expandWindow();
+      if (e.key === "Escape") {
+        goalInputEl.value = "";
+        window.collapseWindow();
+      }
+    });
+
+    document.addEventListener("keydown", function(e) {
+      if (e.key === "Escape") {
+        var p = document.getElementById("witnessLensPopover");
+        if (p && p.style.display === "block") {
+          p.style.display = "none";
+          return;
+        }
+        if (!window.isAgentRunning) {
+          if (goalInputEl) goalInputEl.value = "";
+          window.collapseWindow();
+        }
       }
     });
   }
