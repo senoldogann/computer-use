@@ -233,7 +233,7 @@
     top: 56px;
     left: 50%;
     transform: translateX(-50%) translateY(-10px);
-    background: #2A241E;
+    background: rgba(255, 255, 255, 0.08);
     border: 0.5px solid rgba(217, 119, 87, 0.45);
     color: #FAF9F5;
     font-size: 11px;
@@ -306,7 +306,7 @@
   .tab-btn svg { width: 13px; height: 13px; flex-shrink: 0; }
   .tab-btn:hover { background: rgba(255, 255, 255, 0.05); color: var(--text-primary); }
   .tab-btn.active {
-    background: #2A2924;
+    background: rgba(255, 255, 255, 0.08);
     color: #FAF9F5;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
     border: 0.5px solid #3F3D35;
@@ -332,14 +332,14 @@
     gap: 2px;
     padding: 10px 12px;
     min-height: 0;
-    background: #151412;
+    background: transparent !important;
   }
 
   #log::-webkit-scrollbar,
   .tab-pane::-webkit-scrollbar { width: 5px; }
   #log::-webkit-scrollbar-thumb,
   .tab-pane::-webkit-scrollbar-thumb {
-    background: #33312B;
+    background: rgba(255, 255, 255, 0.15);
     border-radius: 3px;
   }
   #log::-webkit-scrollbar-track,
@@ -407,7 +407,7 @@
   .chip svg { width: 13px; height: 13px; flex-shrink: 0; color: var(--accent); }
 
   .chip:hover {
-    background: #2A2924;
+    background: rgba(255, 255, 255, 0.08);
     border-color: var(--border-highlight);
     color: var(--text-primary);
   }
@@ -437,7 +437,7 @@
     transition: background 0.15s ease;
   }
   .step-card:hover {
-    background: #1A1C1A;
+    background: rgba(255, 255, 255, 0.06);
   }
 
   /* One streaming event row: small icon + monospace text, like the feed */
@@ -920,57 +920,59 @@
 
   .input-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-  }
-
-  .input-label {
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-    color: var(--text-secondary);
+    width: 100%;
+    margin-bottom: 7px;
   }
 
   .input-header-actions {
     display: flex;
     align-items: center;
-    gap: 6px;
+    width: 100%;
+    gap: 5px;
+    justify-content: space-between;
+    overflow: hidden;
   }
 
   .autonomy-toggle-btn {
     font-size: 9.5px;
     font-weight: 600;
-    padding: 2px 7.5px;
-    border-radius: 4px;
+    padding: 3px 7px;
+    border-radius: var(--radius-pill);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    justify-content: center;
+    gap: 4px;
     outline: none;
     line-height: 1.2;
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
   }
-
   .autonomy-toggle-btn.full {
-    color: #FFFFFF;
-    background: rgba(0, 122, 255, 0.18);
-    border: 0.5px solid rgba(0, 122, 255, 0.45);
-    box-shadow: 0 0 8px rgba(0, 122, 255, 0.25);
+    color: #FFFFFF !important;
+    background: #007AFF !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.45) !important;
   }
+  .autonomy-toggle-btn.full .autonomy-icon svg { fill: #FFFFFF !important; }
   .autonomy-toggle-btn.full:hover {
-    background: rgba(0, 122, 255, 0.28);
-    border-color: rgba(0, 122, 255, 0.65);
+    background: #1A8CFF !important;
+    box-shadow: 0 3px 10px rgba(0, 122, 255, 0.6) !important;
   }
 
   .autonomy-toggle-btn.guarded {
-    color: var(--text-secondary);
-    background: rgba(255, 255, 255, 0.04);
-    border: 0.5px solid var(--border-subtle);
+    color: rgba(255, 255, 255, 0.55) !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.12) !important;
+    box-shadow: none !important;
   }
+  .autonomy-toggle-btn.guarded .autonomy-icon svg { fill: rgba(255, 255, 255, 0.45) !important; }
   .autonomy-toggle-btn.guarded:hover {
-    background: rgba(255, 255, 255, 0.08);
-    color: #FFFFFF;
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #FFFFFF !important;
   }
 
   .autonomy-icon {
@@ -982,30 +984,41 @@
   .mcp-toggle-btn {
     font-size: 9.5px;
     font-weight: 600;
-    padding: 2px 7.5px;
-    border-radius: 4px;
+    padding: 3px 7px;
+    border-radius: var(--radius-pill);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    justify-content: center;
+    gap: 4px;
     outline: none;
     line-height: 1.2;
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
   }
   .mcp-toggle-btn.on {
-    color: #FFFFFF;
-    background: rgba(0, 122, 255, 0.18);
-    border: 0.5px solid rgba(0, 122, 255, 0.45);
-    box-shadow: 0 0 8px rgba(0, 122, 255, 0.25);
+    color: #FFFFFF !important;
+    background: #007AFF !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.45) !important;
   }
+  .mcp-toggle-btn.on .mcp-icon svg { stroke: #FFFFFF !important; }
   .mcp-toggle-btn.on:hover {
-    background: rgba(0, 122, 255, 0.28);
-    border-color: rgba(0, 122, 255, 0.65);
+    background: #1A8CFF !important;
+    box-shadow: 0 3px 10px rgba(0, 122, 255, 0.6) !important;
   }
   .mcp-toggle-btn.off {
-    color: var(--text-tertiary);
-    background: rgba(255, 255, 255, 0.04);
-    border: 0.5px solid var(--border-subtle);
+    color: rgba(255, 255, 255, 0.55) !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.12) !important;
+    box-shadow: none !important;
+  }
+  .mcp-toggle-btn.off .mcp-icon svg { stroke: rgba(255, 255, 255, 0.45) !important; }
+  .mcp-toggle-btn.off:hover {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #FFFFFF !important;
   }
   .mcp-icon {
     display: inline-flex;
@@ -1016,52 +1029,68 @@
   .trust-toggle-btn {
     font-size: 9.5px;
     font-weight: 600;
-    padding: 2px 7.5px;
-    border-radius: 4px;
+    padding: 3px 7px;
+    border-radius: var(--radius-pill);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    justify-content: center;
+    gap: 4px;
     outline: none;
     line-height: 1.2;
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
   }
   .trust-toggle-btn.on {
-    color: #FFFFFF;
-    background: rgba(48, 209, 88, 0.18);
-    border: 0.5px solid rgba(48, 209, 88, 0.45);
-    box-shadow: 0 0 8px rgba(48, 209, 88, 0.25);
+    color: #FFFFFF !important;
+    background: #30D158 !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    box-shadow: 0 2px 8px rgba(48, 209, 88, 0.45) !important;
   }
+  .trust-toggle-btn.on svg { stroke: #FFFFFF !important; }
   .trust-toggle-btn.on:hover {
-    background: rgba(48, 209, 88, 0.28);
-    border-color: rgba(48, 209, 88, 0.65);
+    background: #34E060 !important;
+    box-shadow: 0 3px 10px rgba(48, 209, 88, 0.6) !important;
   }
   .trust-toggle-btn.off {
-    color: var(--text-tertiary);
-    background: rgba(255, 255, 255, 0.04);
-    border: 0.5px solid var(--border-subtle);
+    color: rgba(255, 255, 255, 0.55) !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.12) !important;
+    box-shadow: none !important;
+  }
+  .trust-toggle-btn.off svg { stroke: rgba(255, 255, 255, 0.45) !important; }
+  .trust-toggle-btn.off:hover {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #FFFFFF !important;
   }
 
   .pos-toggle-btn {
     font-size: 9.5px;
     font-weight: 600;
-    padding: 2px 7.5px;
+    padding: 3px 7px;
     border-radius: var(--radius-pill);
     cursor: pointer;
-    color: var(--text-secondary);
-    background: rgba(255, 255, 255, 0.04);
-    border: 0.5px solid var(--border-subtle);
+    color: rgba(255, 255, 255, 0.55);
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 4px;
     outline: none;
     line-height: 1.2;
     transition: all 0.15s ease;
+    flex: 1 1 0;
+    min-width: 0;
+    white-space: nowrap;
   }
   .pos-toggle-btn:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.12);
     color: #FFFFFF;
   }
+
   .pos-icon {
     display: inline-flex;
     align-items: center;
@@ -1351,7 +1380,7 @@
 
   .text-input::placeholder { color: #6E6B63; }
   .text-input:focus {
-    background: #2A2924;
+    background: rgba(255, 255, 255, 0.08);
     border-color: var(--accent);
     box-shadow: 0 0 0 2px var(--accent-glow);
   }
@@ -1592,12 +1621,14 @@
   .model-picker-pill {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    background: rgba(255, 255, 255, 0.07);
-    border: 0.5px solid var(--glass-border);
+    justify-content: center;
+    gap: 3px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 0.5px solid rgba(255, 255, 255, 0.12);
     border-radius: var(--radius-pill);
-    padding: 1.5px 6px 1.5px 7px;
-    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15);
+    padding: 2.5px 6px;
+    flex: 1.15 1 0;
+    min-width: 0;
   }
   .model-pill-icon {
     font-size: 10px;
@@ -1718,7 +1749,7 @@
     </div>
 
     <div class="header-actions">
-      <button class="panic-btn" id="panicBtn" title="Acil Durdur (Emergency Freeze) - Ajanı anında dondur" onclick="emergencyPanicStop()">
+      <button class="panic-btn" id="panicBtn" style="display:none;" title="Acil Durdur (Emergency Freeze) - Ajanı anında dondur" onclick="emergencyPanicStop()">
         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
         <span>Acil Durdur</span>
       </button>
@@ -2008,15 +2039,14 @@
   <footer>
     <div class="input-wrapper">
       <div class="input-header">
-        <label class="input-label" for="goal">Instruction / Goal</label>
         <div class="input-header-actions">
           <div class="model-picker-pill" title="Yapay Zeka Modeli & Akıl Yürütme Katmanı">
             <span class="model-pill-icon">⚡</span>
             <select id="modelSelect" class="model-select" onchange="onModelSelected(this.value)">
-              <option value="openai:gpt-5.6-terra" selected>Terra (Dengeli)</option>
-              <option value="openai:gpt-5.6-luna">Luna (Hızlı)</option>
-              <option value="openai:gpt-5.6-sol">Sol (Amiral)</option>
-              <option value="openai">Auto (OpenAI)</option>
+              <option value="openai:gpt-5.6-terra" selected>Terra</option>
+              <option value="openai:gpt-5.6-luna">Luna</option>
+              <option value="openai:gpt-5.6-sol">Sol</option>
+              <option value="openai">Auto</option>
             </select>
           </div>
           <button class="autonomy-toggle-btn full" id="autonomyToggleBtn" type="button" title="Full Autonomy (Level 3): Rutin adımlarda izin istemeden otomatik ilerler">
@@ -2086,6 +2116,8 @@
   window.emergencyPanicStop = function() {
     post({ cmd: "stop" });
     showToast("🚨 Acil Durdurma! Ajan anında donduruldu.");
+    var panicBtn = document.getElementById("panicBtn");
+    if (panicBtn) panicBtn.style.display = "none";
     var bStatus = document.getElementById("budgetStatusText");
     if (bStatus) bStatus.textContent = "Acil Durduruldu";
   };
@@ -2596,8 +2628,12 @@
   function toggleAppField(){
     var isHidden = appField.style.display === "none" || !appField.style.display;
     appField.style.display = isHidden ? "flex" : "none";
-    appToggleBtn.textContent = isHidden ? "− Target App" : "+ Target App";
-    if (isHidden) app.focus();
+    if (isHidden) {
+      appToggleBtn.classList.add("active");
+      app.focus();
+    } else {
+      appToggleBtn.classList.remove("active");
+    }
   }
 
   appToggleBtn.addEventListener("click", toggleAppField);
@@ -3430,6 +3466,8 @@
   function setRunning(r){
     runBtn.disabled = r;
     stopBtn.style.display = r ? "inline-flex" : "none";
+    var panicBtn = document.getElementById("panicBtn");
+    if (panicBtn) panicBtn.style.display = r ? "inline-flex" : "none";
     dot.className = "status-dot " + (r ? "busy" : (window._lastErr ? "err" : "ok"));
     setStatus(r ? "Running" : (window._lastErr ? "Error" : "Idle"), r ? "w" : (window._lastErr ? "e" : ""));
   }
