@@ -70,6 +70,20 @@ class Risk(Enum):
 # motivated the word-boundary matching below).
 _TYPED_COMMANDS: frozenset[str] = frozenset({"rm", "dd", "mkfs", "shutdown", "reboot"})
 
+#: The keys macOS draws as one "delete" key. Bare, they edit text; with
+#: Command they move the selection to the Trash.
+DELETION_KEYS: Final[frozenset[str]] = frozenset({"delete", "backspace"})
+
+
+def normalise_key(key: str) -> str:
+    """Pure: the meaning of a key name, not its spelling.
+
+    Only the deletion pair needs it today: AppKit reports the same physical
+    key as "delete" or "backspace" depending on the caller, and the guard must
+    not give one of those a pass.
+    """
+    return "delete" if key.casefold() in DELETION_KEYS else key
+
 #: The family name a grant uses to cover the typed commands above. Kept
 #: separate from :data:`DESTRUCTIVE_FAMILIES` because these are not verbs a UI
 #: shows — they are things typed at a prompt, and the classifier finds them by
@@ -353,11 +367,17 @@ class AutonomyPolicy:
             subject = f"{subject} {target_label}".lower()
         if isinstance(turn.action, PressHotkey):
             is_bare_deletion_key = (
-                turn.action.key in {"delete", "backspace"}
+                turn.action.key in DELETION_KEYS
                 and not any(m in turn.action.modifiers for m in ("command", "control"))
             )
             if not is_bare_deletion_key:
-                subject = f"{subject} {turn.action.key}".lower()
+                # Normalised, because on this platform Backspace *is* Delete:
+                # one physical key, and Command+it is "Move to Trash" either
+                # way. Appending the raw name made Command+Delete destructive
+                # (the word is a marker) and Command+Backspace risk NONE (it
+                # is not) — the same gesture, two verdicts, decided by which
+                # name the model happened to use.
+                subject = f"{subject} {normalise_key(turn.action.key)}".lower()
         if isinstance(turn.action, CallTool):
             # The tool's name is a short identifier the server chose
             # (``delete_file``, ``send_message``), never prose — token matching
@@ -365,7 +385,7 @@ class AutonomyPolicy:
             subject = f"{subject} {turn.action.tool}".lower()
 
         words = intent_words(subject)
-        if words & self.destructive_markers:
+        if destructive_hits(words, self.destructive_markers):
             return Risk.DESTRUCTIVE
         if words & self.typed_commands:
             return Risk.DESTRUCTIVE
@@ -388,6 +408,56 @@ class AutonomyPolicy:
         if words & self.routine_markers:
             return Risk.ROUTINE
         return Risk.NONE
+
+
+#: Markers that only mean something destructive next to the right object.
+#:
+#: "format" is the whole reason this exists. It sits in the *overwrite* family
+#: for "format the drive", and a disk really is destroyed that way — but in
+#: document work the word is almost always a noun. Measured on a live run: the
+#: sub-goal "Append the three observed Hacker News items in the requested
+#: format and save rapor.txt" made a ``command+end`` keypress — move the cursor
+#: to the end of the document — classify DESTRUCTIVE, so a Level 3 run stopped
+#: and asked a human for permission to move a cursor. Unattended, that parks
+#: the mission.
+#:
+#: Same reasoning that already removed "drop" from the delete family because
+#: it split "Drop-down": a marker that fires on ordinary vocabulary is not
+#: protecting anyone, it is training its user to click through the guard.
+#: Qualifying it keeps "format the SD card" destructive and lets "date format"
+#: alone.
+QUALIFIED_MARKERS: Final[dict[str, frozenset[str]]] = {
+    "format": frozenset(
+        {
+            "disk", "disks", "drive", "drives", "volume", "volumes",
+            "partition", "partitions", "usb", "sd", "ssd", "hdd", "card",
+            "stick", "filesystem", "fs",
+            "disket", "sürücü", "surucu", "bölüm", "bolum", "birim", "kart",
+            "festplatte", "laufwerk", "datenträger", "datentrager",
+            "disco", "unidad", "disque", "lecteur",
+        }
+    ),
+}
+
+
+def qualified_out(words: set[str], marker: str) -> bool:
+    """Pure: is this marker present but stripped of its destructive sense?
+
+    ``True`` when the marker needs an object to be destructive and that object
+    is absent — "the requested format" rather than "format the drive".
+    """
+    qualifiers = QUALIFIED_MARKERS.get(marker)
+    return qualifiers is not None and not (words & qualifiers)
+
+
+def destructive_hits(words: set[str], markers: frozenset[str]) -> set[str]:
+    """Pure: the destructive markers in ``words``, qualifiers honoured.
+
+    Shared by the risk classifier and by capability-grant matching so the two
+    cannot disagree about what counts — a grant that covered something the
+    guard never flagged would be authority nobody asked for.
+    """
+    return {word for word in words & markers if not qualified_out(words, word)}
 
 
 def intent_words(subject: str) -> set[str]:

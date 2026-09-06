@@ -37,8 +37,10 @@ through identical scaffolding.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal, cast
@@ -167,6 +169,27 @@ _INTERNAL_ACTIONS: Final[frozenset[str]] = frozenset({"wait", "load_skill", "fin
 REPEAT_WARN_AFTER: Final[int] = 2
 REPEAT_ABORT_AFTER: Final[int] = 3
 
+#: How many recent (screen state -> action) transitions the cycle guard
+#: remembers.
+#:
+#: The streak guard above counts *consecutive identical* actions, which
+#: catches "click the same dead button forever" and nothing else. Measured on
+#: a live two-application run: the model alternated
+#: ``activate_app TextEdit`` and ``activate_app Google Chrome`` for 54 of 62
+#: steps — roughly 490k tokens and six minutes of real machine time — and the
+#: guard never fired once. Two reasons, both fatal: no two *consecutive*
+#: actions were ever equal, and each activation genuinely succeeded, so every
+#: no-progress test the loop had said the run was fine. It was not fine; the
+#: two actions were undoing each other.
+#:
+#: What that run actually did was revisit the same screen and take the same
+#: action from it, over and over. That is the thing worth detecting, and it
+#: needs no notion of progress at all. Twelve spans several turns of a
+#: period-2 or period-3 cycle while staying far too short to accumulate
+#: across a workflow that is genuinely moving (whose states differ, so its
+#: transitions never repeat).
+CYCLE_MEMORY: Final[int] = 12
+
 # Tool-tier stuck budget (Law 2.2): consecutive calls to the same tool asking
 # nearly the same question. Deliberately roomier than the physical tier — a
 # tool costs no cursor and legitimate research re-asks with refinements, so
@@ -200,6 +223,15 @@ AX_FROZEN_AFTER_FAILURES: Final[int] = 3
 # normal navigation pattern, not a lost-model signal.
 _REPETITION_SENSITIVE: Final[frozenset[str]] = frozenset(
     {"mouse_click", "mouse_drag", "mouse_scroll", "type_text", "clipboard_paste", "press_hotkey"}
+)
+
+#: Actions the *cycle* guard watches. Everything the repetition guard watches,
+#: plus ``activate_app`` — which the repetition guard rightly ignores (bringing
+#: an app forward twice is harmless) but which is exactly what a two-app
+#: oscillation is made of. ``mouse_move`` stays out of both: positioning the
+#: cursor at the same point is navigation, not an attempt at anything.
+_CYCLE_SENSITIVE: Final[frozenset[str]] = _REPETITION_SENSITIVE | frozenset(
+    {"activate_app"}
 )
 
 # Law 3.2 minimum relevance for mounting a skill (see registry.search scoring:
@@ -1081,6 +1113,35 @@ def observation_signature(observation: Observation) -> str:
     return f"{observation.signature}|{title}|{hash(observation.raw_ui_elements)}"
 
 
+def cycle_signature(observation: Observation) -> str:
+    """Collapse an observation into the identity used to detect *cycles* (pure).
+
+    Deliberately finer than :func:`observation_signature`, which answers "did
+    the screen move?" and leaves the content digest out on purpose — a
+    coarse-but-cheap change detector. Cycle detection asks a stricter
+    question, "have I been in this exact state before?", and the content is
+    precisely what separates the two cases that matter:
+
+    * A click into a note body that confirms every time and rewrites the text
+      underneath it. The elements never move, so the coarse signature calls it
+      "unchanged" — but the run is advancing, and refusing it strands the
+      agent (that regression is pinned by
+      ``test_a_confirmed_repeat_is_not_a_stuck_loop``).
+    * Two ``activate_app`` calls that undo each other. Each one succeeds, so
+      no progress test objects, and the run returns to a screen it has already
+      answered — with the same answer.
+
+    Including the content tells them apart: the first never repeats a state,
+    the second repeats one every other step.
+    """
+    window = observation.window
+    title = f"{window.app_name}|{window.window_title}" if window is not None else ""
+    return (
+        f"{observation.signature}|{title}|{hash(observation.raw_ui_elements)}"
+        f"|{hash(observation.content)}"
+    )
+
+
 @dataclass
 class OodaRunner:
     """Imperative shell: drives the full autonomy cycle with real side effects.
@@ -1259,6 +1320,10 @@ class OodaRunner:
         # The skill mounted by RETRIEVE in the current run (Law 3.2).
         self._skill: SkillDefinition | None = None
         self._working_app: str | None = None
+        # Bounded so a long run cannot grow it; see CYCLE_MEMORY.
+        self._visited_transitions: deque[tuple[str, str]] = deque(
+            maxlen=CYCLE_MEMORY
+        )
         # Best-effort perception warnings are logged once per run, then
         # demoted to debug: a permanently-failing probe (e.g. consent missing)
         # must not spam one line per step, but the first failure is still loud.
@@ -2306,6 +2371,59 @@ class OodaRunner:
         would_stuck = self._stuck_streak + 1 if self._same_physical(action) else 0
         if would_stuck >= REPEAT_ABORT_AFTER:
             raise StuckLoopError(action=action, repeats=would_stuck, goal=goal)
+        self._guard_cycle(action, goal)
+
+    def _guard_cycle(self, action: Action, goal: str) -> None:
+        """Refuse an action already taken from this exact screen, repeatedly.
+
+        The streak guard above asks "is this the same as last time, and did
+        nothing move?". Both halves fail on a *cycle*. Two actions that undo
+        each other are never consecutively equal, and each one genuinely
+        succeeds — the app really does come to the front — so every
+        progress test the loop has says the run is healthy while it goes
+        nowhere. Measured live: 54 of 62 steps alternating between two
+        ``activate_app`` calls, ended only by ``max_steps``.
+
+        Revisiting is the honest signal, and it needs no notion of progress:
+        if the screen looks exactly as it did before and the model answers it
+        exactly as it did before, the next screen will be the one after that,
+        and the run is on a loop with no exit. A workflow that is genuinely
+        advancing cannot trip this, because its screens differ — that is what
+        advancing means.
+
+        Raised into the recovery ladder, like the streak guard, so the model
+        gets the escalating "change your approach" guidance rather than
+        having the run taken away from it at the first trip.
+        """
+        if action.type not in _CYCLE_SENSITIVE:
+            return
+        if self._same_physical(action):
+            # Period-1 belongs to the streak guard above, which already
+            # counted it and owns the thresholds the run's tests pin. Two
+            # guards scoring the same repeat would abort a step early.
+            return
+        transition = (
+            cycle_signature(self._observation),
+            json.dumps(action.model_dump(exclude_none=True), sort_keys=True),
+        )
+        repeats = sum(1 for seen in self._visited_transitions if seen == transition)
+        if repeats + 1 >= REPEAT_ABORT_AFTER:
+            # Forget the window on the way out. The refusal has been handed to
+            # the recovery ladder, which will tell the model to change its
+            # approach; keeping the history would *also* ban the action
+            # permanently, and the banned action is often the right one — a
+            # run that finally read what it needed off screen A still has to
+            # switch to screen B, and screen A has not changed in the
+            # meantime. Measured: the guard refused that switch on every later
+            # attempt, so a run that had recovered could not act on it.
+            #
+            # Termination is still guaranteed without the history, and by the
+            # stronger mechanism: the ladder itself is finite, so a run that
+            # keeps looping climbs RETRY -> ALTERNATE -> REPLAN -> ABORT
+            # whatever this window remembers.
+            self._visited_transitions.clear()
+            raise StuckLoopError(action=action, repeats=repeats + 1, goal=goal)
+        self._visited_transitions.append(transition)
 
     def _note_tool_call(self, action: CallTool, goal: str) -> str | None:
         """Count one tool call toward the tool-tier stuck budget (shell).
@@ -2546,6 +2664,7 @@ class OodaRunner:
         return self._last_physical is not None and equivalent_action(
             self._last_physical, action
         )
+
 
     # ------------------------------------------------------------------
     # OBSERVE

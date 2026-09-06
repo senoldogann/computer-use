@@ -50,11 +50,51 @@ UNINFORMATIVE_WORDS: Final[frozenset[str]] = STOP_WORDS | WORKFLOW_NOISE_WORDS
 SKILL_ID_PATTERN: Final[str] = r"^[a-z0-9][a-z0-9._-]*$"
 
 
+#: Longest description the Stage-1 index may carry (Law 3.2, zero context
+#: bloat): every summary is in the agent's context on every turn, so this is a
+#: hard budget rather than a formatting preference.
+SUMMARY_DESCRIPTION_MAX: Final[int] = 200
+
+
+def condense_description(description: str) -> str:
+    """Fit a description into the Stage-1 budget (pure).
+
+    Two-stage retrieval says the *summary* is small and the *definition* is
+    allowed to be long — that is the whole point of loading a skill on demand.
+    :func:`summary_of` used to copy the description across verbatim anyway, so
+    a definition longer than the budget produced a summary that failed its own
+    validation.
+
+    That failure was silent in the worst way: distillation wrote the skill,
+    the run reported ``distill: skill (textedit.abae...)`` as a success, and
+    the registry then skipped the file on every subsequent read. Measured on a
+    live two-application run, where goals are naturally long: both skills the
+    session distilled were 265 and 320 characters, so the whole of Law 3 —
+    learn from a successful run, reuse it later — was a no-op for that
+    session and every session after it.
+
+    Truncation is at a word boundary where one is available, because a
+    summary is read by a model deciding whether to load the skill, and a
+    description cut mid-word reads as corruption.
+    """
+    collapsed = " ".join(description.split())
+    if len(collapsed) <= SUMMARY_DESCRIPTION_MAX:
+        return collapsed
+    # One character of the budget belongs to the ellipsis.
+    head = collapsed[: SUMMARY_DESCRIPTION_MAX - 1]
+    cut = head.rfind(" ")
+    # Only honour a word boundary that is not so early it throws the summary
+    # away; otherwise a single long token would leave a two-word description.
+    if cut >= SUMMARY_DESCRIPTION_MAX // 2:
+        head = head[:cut]
+    return head.rstrip() + "\u2026"
+
+
 class SkillSummary(BaseModel):
     """Stage-1 payload: the only thing that lives in the agent context."""
 
     skill_id: str = Field(pattern=SKILL_ID_PATTERN)
-    description: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=SUMMARY_DESCRIPTION_MAX)
     app: str
     uses: int = Field(default=0, ge=0)
     wins: int = Field(default=0, ge=0)
@@ -92,10 +132,15 @@ class SkillDefinition(BaseModel):
 
 
 def summary_of(definition: SkillDefinition) -> SkillSummary:
-    """Derive the Stage-1 summary from a definition (pure projection)."""
+    """Derive the Stage-1 summary from a definition (pure projection).
+
+    The description is condensed rather than copied: the definition may be as
+    long as it needs to be, the summary may not (see
+    :func:`condense_description`).
+    """
     return SkillSummary(
         skill_id=definition.skill_id,
-        description=definition.description,
+        description=condense_description(definition.description),
         app=definition.app,
         # Tags are the search surface for the Stage-1 scan, so they must be
         # projected into the summary or tag-matching would be dead code.
