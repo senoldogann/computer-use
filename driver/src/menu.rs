@@ -637,6 +637,25 @@ define_class!(
     }
 );
 
+
+fn set_panel_compact(compact: bool) {
+    let ptr = PANEL_PTR.load(core::sync::atomic::Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    let panel = unsafe { &*(ptr as *const NSWindow) };
+    let current_frame = panel.frame();
+    let target_height: f64 = if compact { 72.0 } else { 640.0 };
+    if (current_frame.size.height - target_height).abs() < 2.0 {
+        return;
+    }
+    let new_frame = objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(current_frame.origin.x, current_frame.origin.y),
+        objc2_core_foundation::CGSize::new(480.0, target_height),
+    );
+    panel.setFrame_display_animate(new_frame, true, true);
+}
+
 fn toggle_panel_ui() {
     eprintln!("[menu] toggle fired");
     let ptr = PANEL_PTR.load(core::sync::atomic::Ordering::SeqCst);
@@ -678,7 +697,7 @@ fn activate_app() {
 // ---------------------------------------------------------------------------
 
 fn build_effect_view(mtm: MainThreadMarker) -> Retained<NSVisualEffectView> {
-    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 72.0));
     let effect = NSVisualEffectView::initWithFrame(
         NSVisualEffectView::alloc(mtm),
         frame,
@@ -687,6 +706,10 @@ fn build_effect_view(mtm: MainThreadMarker) -> Retained<NSVisualEffectView> {
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
     effect.setWantsLayer(true);
+    effect.setAutoresizingMask(
+        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
     effect
 }
 
@@ -700,7 +723,7 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
         let bridge: Retained<ScriptBridge> = msg_send![bridge, init];
         let name = NSString::from_str("bridge");
         let _: () = controller.addScriptMessageHandler_name(ProtocolObject::from_ref(&*bridge), &name);
-        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
+        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 72.0));
         let webview = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
 
         // KVC: disable opaque default background so native NSVisualEffectView vibrancy and CSS glass show through
@@ -708,6 +731,10 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
         let key = NSString::from_str("drawsBackground");
         let _: () = msg_send![&*webview, setValue: &*false_val, forKey: &*key];
 
+        webview.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
         let html = NSString::from_str(include_str!("../assets/menu.html"));
         let base = NSURL::fileURLWithPath(&NSString::from_str("/"));
         webview.loadHTMLString_baseURL(&html, Some(&base));
@@ -716,7 +743,7 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
 }
 
 fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
-    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 72.0));
     // Titled | FullSizeContentView: the title bar is hidden (transparent) so
     // the panel reads as floating glass, but the window stays *key* so the
     // user can actually type into the embedded web page.
@@ -988,6 +1015,11 @@ fn handle_script_message(message: &WKScriptMessage) {
         }
         Some("stop") => stop_agent(),
         Some("toggle_panel") => toggle_panel_ui(),
+        Some("set_compact") => {
+            if let Some(compact) = value.get("compact").and_then(serde_json::Value::as_bool) {
+                set_panel_compact(compact);
+            }
+        }
         Some("confirm") => {
             // Law 5.1: the panel's Approve/Deny answer for an action the agent
             // paused on. Written to the child's piped stdin; the CLI's confirm
