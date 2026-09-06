@@ -9,12 +9,15 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
+import pytest
 from smoke.cua_fakes import model_focus
 
-from computeruse.repl.engine import CuaReplEngine
+from computeruse.repl.engine import CuaReplEngine, WindowBoundsUnavailableError
+from computeruse.vision.ax import AXElement
 
 
 @dataclass
@@ -92,19 +95,46 @@ def test_cua_hybrid_vision_ocr_fallback() -> None:
 
 
 def test_cua_window_bounds_inspection() -> None:
-    """Model can inspect exact application window coordinates and size."""
+    """Model can inspect exact application window coordinates and size.
+
+    The geometry comes off the accessibility tree, which is where it actually
+    lives. This test used to mock ``focused_window()`` returning a rect —
+    an API that does not exist; the real one answers pid, names and the cursor
+    and nothing else — so it passed while the implementation raised on every
+    call and returned a hardcoded 800x600 window at the origin instead.
+    """
     mock_client = MagicMock()
     mock_client.app_pid.return_value = 8003
     mock_client.focused_window.return_value = {
-        "title": "Main Dashboard",
-        "x": 100,
-        "y": 80,
-        "width": 1280,
-        "height": 800,
+        "app_name": "DashboardApp",
+        "app": "DashboardApp",
+        "bundle_id": "",
     }
     model_focus(mock_client)
 
-    engine = CuaReplEngine(driver_client=mock_client)
+    window = AXElement(
+        role="AXWindow",
+        title="Main Dashboard",
+        x=100.0,
+        y=80.0,
+        width=1280.0,
+        height=800.0,
+        children=[],
+    )
+    root = AXElement(
+        role="AXApplication",
+        title="DashboardApp",
+        x=0.0,
+        y=0.0,
+        width=1280.0,
+        height=800.0,
+        children=[window],
+    )
+
+    engine = CuaReplEngine(
+        driver_client=mock_client,
+        snapshot_provider=lambda _app: (root, "Main Dashboard"),
+    )
     engine.start()
 
     script = """
@@ -116,12 +146,39 @@ def test_cua_window_bounds_inspection() -> None:
     engine.stop()
 
     assert not res.is_error
-    import json
     data = json.loads(res.content)
-    assert data["width"] == 1280
-    assert data["height"] == 800
-    assert data["x"] == 100
-    assert data["y"] == 80
+    assert (data["x"], data["y"]) == (100, 80)
+    assert (data["width"], data["height"]) == (1280, 800)
+    assert data["title"] == "Main Dashboard"
+
+
+def test_window_bounds_are_refused_rather_than_invented() -> None:
+    """No window in the tree means no answer — not a plausible rectangle.
+
+    The fabricated 800x600 fallback was the dangerous shape of this bug: a
+    model deriving click coordinates from invented geometry aims at whatever
+    is really at those points on a physical host.
+    """
+    mock_client = MagicMock()
+    mock_client.app_pid.return_value = 8004
+    mock_client.focused_window.return_value = {
+        "app_name": "Headless",
+        "app": "Headless",
+        "bundle_id": "",
+    }
+    model_focus(mock_client)
+    windowless = AXElement(
+        role="AXApplication", title="Headless", x=0.0, y=0.0,
+        width=0.0, height=0.0, children=[],
+    )
+    engine = CuaReplEngine(
+        driver_client=mock_client,
+        snapshot_provider=lambda _app: (windowless, "Headless"),
+    )
+    with pytest.raises(WindowBoundsUnavailableError):
+        engine._dispatch_js_call(  # pyright: ignore[reportPrivateUsage]
+            "getWindowBounds", {"app": "Headless"}
+        )
 
 
 def test_cua_transaction_auto_retry_and_escape_rollback() -> None:

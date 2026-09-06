@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from computeruse.orchestrator.client import OCR_MAX_LINES, OCR_MIN_CONFIDENCE
 from computeruse.orchestrator.evidence import Evidence, app_evidence
 from computeruse.orchestrator.schemas import (
     Action,
@@ -67,6 +68,31 @@ BRIDGE_SCRIPT_PATH = Path(__file__).parent / "cua_bridge.js"
 #: that has not surfaced in half a second is not going to.
 FOCUS_SETTLE_POLLS: int = 10
 FOCUS_SETTLE_INTERVAL_S: float = 0.05
+
+
+def _first_window(node: AXElement) -> AXElement | None:
+    """The application's window element, or ``None`` (pure).
+
+    Breadth-first: a window is a direct child of the application root in every
+    tree this has been seen on, and going deep would find sheets and popovers
+    before the window that contains them.
+    """
+    queue: list[AXElement] = [node]
+    while queue:
+        current = queue.pop(0)
+        if current.role.endswith("Window"):
+            return current
+        queue.extend(current.children)
+    return None
+
+
+class WindowBoundsUnavailableError(RuntimeError):
+    """The application's window geometry could not be read.
+
+    Raised rather than answered with a plausible-looking rectangle: a model
+    that trusts invented geometry computes click coordinates from it, and a
+    wrong coordinate on a physical host is a click on whatever is really there.
+    """
 
 
 class ScreenCaptureUnavailableError(RuntimeError):
@@ -842,7 +868,22 @@ end run"""
 
             if self.driver_client and hasattr(self.driver_client, "recognize_text"):
                 try:
-                    lines = cast(list[Any], self.driver_client.recognize_text(pid=pid))
+                    # Every argument is required and the pid one is called
+                    # ``window_pid``. Calling it ``pid=`` raised TypeError on
+                    # every single invocation, the broad handler below logged
+                    # it and answered ``None``, and the OCR fallback therefore
+                    # reported "nothing on screen matches" for two releases
+                    # without ever having looked. Verified live: the warning
+                    # was "got an unexpected keyword argument 'pid'".
+                    lines = cast(
+                        list[Any],
+                        self.driver_client.recognize_text(
+                            display_id=0,
+                            window_pid=pid,
+                            min_confidence=OCR_MIN_CONFIDENCE,
+                            max_lines=OCR_MAX_LINES,
+                        ),
+                    )
                     for line in lines:
                         text_val = str(getattr(line, "text", ""))
                         if query in text_val.casefold():
@@ -861,7 +902,11 @@ end run"""
                                 "confidence": float(getattr(line, "confidence", 1.0)),
                             }
                             return res_box
-                except Exception as exc:  # noqa: BLE001
+                except TypeError:
+                    # A wrong call is a coding error, not "no text found".
+                    # Swallowing it is what kept the bug above alive.
+                    raise
+                except Exception as exc:  # noqa: BLE001 - a fallback may not raise
                     LOGGER.warning("findVisualElement failed for %s: %s", app_name, exc)
             return None
 
@@ -869,22 +914,29 @@ end run"""
             app_name = str(params["app"])
             pid_val: int | None = self.driver_client.app_pid(app_name) if self.driver_client else None
 
-            if self.driver_client and hasattr(self.driver_client, "focused_window"):
-                try:
-                    win = cast(dict[str, object], self.driver_client.focused_window(pid=pid_val))
-                    res_win: dict[str, object] = {
-                        "title": str(win.get("title", "")),
-                        "x": int(cast(int, win.get("x", 0))),
-                        "y": int(cast(int, win.get("y", 0))),
-                        "width": int(cast(int, win.get("width", 0))),
-                        "height": int(cast(int, win.get("height", 0))),
-                        "pid": pid_val,
-                    }
-                    return res_win
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.debug("Could not query window bounds for %s: %s", app_name, exc)
-            fallback_win: dict[str, object] = {"title": app_name, "x": 0, "y": 0, "width": 800, "height": 600, "pid": pid_val}
-            return fallback_win
+            # Read off the accessibility tree, which carries every element's
+            # rect — including the window's. The previous implementation called
+            # ``focused_window(pid=...)``, which takes no arguments at all, so
+            # it raised on every call, logged at debug level, and returned a
+            # hardcoded 800x600 window at the origin. Measured live on a
+            # 1710x1112 display: TextEdit came back as 800x600 at (0,0), which
+            # is not a degraded answer but an invented one — and a model
+            # deriving click coordinates from it would aim at nothing.
+            snapshot, window_title = self._get_app_snapshot(app_name)
+            window = _first_window(snapshot)
+            if window is None:
+                raise WindowBoundsUnavailableError(
+                    f"cannot read {app_name!r}'s window geometry: its "
+                    "accessibility tree exposes no window element"
+                )
+            return {
+                "title": window.title or window_title,
+                "x": int(window.x),
+                "y": int(window.y),
+                "width": int(window.width),
+                "height": int(window.height),
+                "pid": pid_val,
+            }
 
         if method == "cropScreenshot":
             raw_bounds = cast(dict[str, float], params.get("bounds", {}))
