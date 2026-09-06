@@ -2192,6 +2192,209 @@
     opacity: 1;
   }
 
+
+  /* ========================================================================
+     STRICT SYNARA COLOR HARMONY & FIXES
+     ======================================================================== */
+
+  /* Composer Live Real-Time Gauge */
+  .composer-live-gauge {
+    padding: 0 14px 4px 14px !important;
+    background: transparent !important;
+    border: none !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 3px !important;
+  }
+  .composer-live-gauge .budget-track {
+    height: 2px !important;
+    background: #252422 !important;
+    border-radius: 1px !important;
+    overflow: hidden !important;
+  }
+  .composer-live-gauge .budget-fill {
+    background: linear-gradient(90deg, #FFB17F 0%, #E69866 100%) !important;
+  }
+  .composer-live-gauge .budget-meta {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+  }
+  .composer-live-gauge .pulse-dot {
+    width: 6px !important;
+    height: 6px !important;
+    border-radius: 50% !important;
+    background: #FFB17F !important;
+    box-shadow: 0 0 8px rgba(255, 177, 127, 0.7) !important;
+    display: inline-block !important;
+    margin-right: 4px !important;
+  }
+  .composer-live-gauge .budget-status {
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    color: #AAA8A3 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+  }
+  .composer-live-gauge .budget-val {
+    font-size: 9.5px !important;
+    color: #AAA8A3 !important;
+    font-family: var(--font-mono) !important;
+  }
+
+  /* Universal Synara Toggles (Zero Blue, Zero Electric Green) */
+  .autonomy-toggle-btn.full,
+  .mcp-toggle-btn.on,
+  .trust-toggle-btn.on,
+  .app-toggle-btn.active {
+    background: #FFB17F !important;
+    color: #121110 !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.4) !important;
+    box-shadow: 0 2px 8px rgba(255, 177, 127, 0.35) !important;
+  }
+  .autonomy-toggle-btn.full:hover,
+  .mcp-toggle-btn.on:hover,
+  .trust-toggle-btn.on:hover,
+  .app-toggle-btn.active:hover {
+    background: #FFC49E !important;
+    color: #121110 !important;
+    box-shadow: 0 3px 12px rgba(255, 177, 127, 0.5) !important;
+  }
+  .autonomy-toggle-btn.full .autonomy-icon svg,
+  .autonomy-toggle-btn.full svg {
+    fill: #121110 !important;
+  }
+  .mcp-toggle-btn.on .mcp-icon svg,
+  .mcp-toggle-btn.on svg,
+  .trust-toggle-btn.on svg {
+    stroke: #121110 !important;
+  }
+
+  .autonomy-toggle-btn.guarded,
+  .mcp-toggle-btn.off,
+  .trust-toggle-btn.off,
+  .pos-toggle-btn,
+  .app-toggle-btn {
+    background: #1B1A19 !important;
+    color: #AAA8A3 !important;
+    border: 0.5px solid #252422 !important;
+    box-shadow: none !important;
+  }
+  .autonomy-toggle-btn.guarded:hover,
+  .mcp-toggle-btn.off:hover,
+  .trust-toggle-btn.off:hover,
+  .pos-toggle-btn:hover,
+  .app-toggle-btn:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+    border-color: #383632 !important;
+    box-shadow: none !important;
+  }
+  .autonomy-toggle-btn.guarded .autonomy-icon svg,
+  .autonomy-toggle-btn.guarded svg {
+    fill: #AAA8A3 !important;
+  }
+  .mcp-toggle-btn.off .mcp-icon svg,
+  .mcp-toggle-btn.off svg,
+  .trust-toggle-btn.off svg {
+    stroke: #AAA8A3 !important;
+  }
+
+  /* MCP Cards Grid & Row Layout Fix (No overlapping text) */
+  .mcp-card {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 9px 12px !important;
+    gap: 16px !important;
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    border-radius: 10px !important;
+  }
+  .mcp-card:hover {
+    background: #252422 !important;
+    border-color: #383632 !important;
+    transform: none !important;
+  }
+  .mcp-card-left {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+  .mcp-card-icon {
+    width: 28px !important;
+    height: 28px !important;
+    border-radius: 7px !important;
+    background: #252422 !important;
+    border: 0.5px solid #383632 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex-shrink: 0 !important;
+  }
+  .mcp-card-info {
+    display: flex !important;
+    flex-direction: column !important;
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+  .mcp-card-name {
+    font-size: 11.5px !important;
+    font-weight: 650 !important;
+    color: #F5F4F2 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    line-height: 1.2 !important;
+  }
+  .mcp-card-desc {
+    font-size: 10px !important;
+    color: #AAA8A3 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    margin-top: 2px !important;
+    line-height: 1.2 !important;
+  }
+  .mcp-action-btn {
+    flex-shrink: 0 !important;
+    width: 78px !important;
+    height: 26px !important;
+    padding: 0 6px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 4px !important;
+    border-radius: 6px !important;
+    font-size: 10.5px !important;
+    font-weight: 600 !important;
+    border: 0.5px solid #252422 !important;
+    box-sizing: border-box !important;
+  }
+  .mcp-action-btn.install {
+    background: #252422 !important;
+    color: #AAA8A3 !important;
+  }
+  .mcp-action-btn.install:hover {
+    background: #FFB17F !important;
+    color: #121110 !important;
+    border-color: #FFB17F !important;
+  }
+  .mcp-action-btn.installed {
+    background: rgba(255, 177, 127, 0.12) !important;
+    color: #FFB17F !important;
+    border: 0.5px solid rgba(255, 177, 127, 0.3) !important;
+  }
+  .mcp-action-btn.installed:hover {
+    background: rgba(255, 90, 78, 0.15) !important;
+    color: #FF5A4E !important;
+    border-color: rgba(255, 90, 78, 0.3) !important;
+  }
+
 </style>
 </head>
 <body>
@@ -2240,16 +2443,7 @@
       </button>
     </div>
   </header>
-  <!-- Liquid Budget & Live OODA Gauge -->
-  <div class="liquid-budget-gauge" id="liquidBudgetGauge">
-    <div class="budget-track">
-      <div class="budget-fill" id="budgetFill"></div>
-    </div>
-    <div class="budget-meta">
-      <span class="budget-status"><span class="pulse-dot"></span> <span id="budgetStatusText">Canlı Ajan Hazır</span></span>
-      <span class="budget-val" id="budgetMetaVal">0 / 25,000 tok · 0.0s</span>
-    </div>
-  </div>
+
 
 
   <!-- Toast Notification Overlay -->
@@ -2544,6 +2738,16 @@
           </div>
         </div>
         <span class="popover-check">✓</span>
+      </div>
+    </div>
+        <!-- Real-time Live Status Strip above Composer -->
+    <div class="liquid-budget-gauge composer-live-gauge" id="liquidBudgetGauge">
+      <div class="budget-track">
+        <div class="budget-fill" id="budgetFill"></div>
+      </div>
+      <div class="budget-meta">
+        <span class="budget-status"><span class="pulse-dot"></span> <span id="budgetStatusText">Canlı Ajan Hazır</span></span>
+        <span class="budget-val" id="budgetMetaVal">0 / 25,000 tok · 0.0s</span>
       </div>
     </div>
     <div class="input-wrapper">
@@ -4708,6 +4912,15 @@
   });
 
   setTimeout(function(){ var activeBtn = document.querySelector('.tab-btn.active'); if (activeBtn) updateTabIndicator(activeBtn); initNeuralMesh(); }, 60);
+  
+  // Global / local Cmd+B window toggle listener
+  window.addEventListener("keydown", function(e) {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "b" || e.key === "B")) {
+      e.preventDefault();
+      post({ cmd: "toggle_panel" });
+    }
+  });
+
   post({cmd:"ready"});
   post({cmd:"get_mcp"});
 })();

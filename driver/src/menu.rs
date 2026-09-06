@@ -398,6 +398,8 @@ pub fn run() -> ! {
         toggle_panel_ui();
     }
 
+    spawn_toggle_hotkey_listener();
+
     app.run();
     std::process::exit(0)
 }
@@ -985,6 +987,7 @@ fn handle_script_message(message: &WKScriptMessage) {
             }
         }
         Some("stop") => stop_agent(),
+        Some("toggle_panel") => toggle_panel_ui(),
         Some("confirm") => {
             // Law 5.1: the panel's Approve/Deny answer for an action the agent
             // paused on. Written to the child's piped stdin; the CLI's confirm
@@ -1826,4 +1829,81 @@ mod tests {
         // Past the deadline the answer never flips back to waiting.
         assert_eq!(stop_phase(true, grace_ms + 1), StopPhase::Escalate);
     }
+}
+
+
+extern "C" {
+    static _dispatch_main_q: [u8; 0];
+    fn dispatch_async_f(
+        queue: *const u8,
+        context: *mut std::ffi::c_void,
+        work: extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+extern "C" fn toggle_panel_on_main(_: *mut std::ffi::c_void) {
+    toggle_panel_ui();
+}
+
+fn spawn_toggle_hotkey_listener() {
+    std::thread::Builder::new()
+        .name("menu-toggle-hotkey".to_string())
+        .spawn(move || {
+            use core_graphics::event::{
+                CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+                CGEventType, EventField, CGEventFlags, CallbackResult,
+            };
+            use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+
+            let tap = match CGEventTap::new(
+                CGEventTapLocation::Session,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                vec![CGEventType::KeyDown],
+                |_proxy, etype, event| {
+                    if matches!(etype, CGEventType::KeyDown) {
+                        let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                        let flags = event.get_flags();
+                        let has_cmd = flags.contains(CGEventFlags::CGEventFlagCommand);
+                        let has_ctrl = flags.contains(CGEventFlags::CGEventFlagControl);
+                        let has_alt = flags.contains(CGEventFlags::CGEventFlagAlternate);
+
+                        // Keycode 11 is 'b' / 'B' on macOS US keyboard layout
+                        if has_cmd && !has_ctrl && !has_alt && keycode == 11 {
+                            eprintln!("[menu] Cmd+B hotkey detected -> toggling panel");
+                            unsafe {
+                                dispatch_async_f(
+                                    _dispatch_main_q.as_ptr(),
+                                    std::ptr::null_mut(),
+                                    toggle_panel_on_main,
+                                );
+                            }
+                            return CallbackResult::Drop; // Consume the event so it doesn't trigger bold in underlying apps
+                        }
+                    }
+                    CallbackResult::Keep
+                },
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[menu] warning: global hotkey CGEventTap failed: {:?}", e);
+                    return;
+                }
+            };
+
+            let source = match tap.mach_port().create_runloop_source(0) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[menu] warning: failed to create runloop source for hotkey tap: {:?}", e);
+                    return;
+                }
+            };
+
+            let run_loop = CFRunLoop::get_current();
+            run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
+            tap.enable();
+            eprintln!("[menu] Cmd+B global toggle hotkey tap armed");
+            CFRunLoop::run_current();
+        })
+        .expect("spawn hotkey listener thread");
 }
