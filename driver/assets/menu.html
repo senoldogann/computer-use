@@ -2878,6 +2878,330 @@
     margin: 3px 0;
   }
 
+
+  /* ==========================================================================
+     High-End IDE Popovers & Triggers (Windsurf / Cursor / Codex Style)
+     ========================================================================== */
+
+  .input-header-actions {
+    display: flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    position: relative !important;
+  }
+
+  .ide-popover-trigger {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    background: transparent !important;
+    border: none !important;
+    color: #AAA8A3 !important;
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    padding: 2.5px 6px !important;
+    border-radius: 5px !important;
+    transition: all 0.15s ease !important;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif !important;
+  }
+  .ide-popover-trigger:hover,
+  .ide-popover-trigger.active {
+    color: #F5F4F2 !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+  }
+  .ide-popover-trigger svg {
+    color: #AAA8A3 !important;
+    flex-shrink: 0 !important;
+  }
+  .ide-popover-trigger:hover svg {
+    color: #F5F4F2 !important;
+  }
+  .trigger-separator {
+    color: #252422 !important;
+    font-size: 11px !important;
+    margin: 0 1px !important;
+    user-select: none !important;
+  }
+
+  /* Shared Luxury Popover Shell */
+  .luxury-floating-popover {
+    position: absolute !important;
+    bottom: 42px !important;
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.04) !important;
+    backdrop-filter: blur(24px) saturate(180%) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(180%) !important;
+    z-index: 9999 !important;
+    animation: popoverFadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif !important;
+    user-select: none !important;
+  }
+
+  @keyframes popoverFadeIn {
+    from { opacity: 0; transform: translateY(6px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .popover-section-label {
+    font-size: 10.5px !important;
+    font-weight: 550 !important;
+    color: #7A7874 !important;
+    padding: 6px 10px 4px !important;
+  }
+  .popover-divider {
+    height: 0.5px !important;
+    background: #252422 !important;
+    margin: 4px 0 !important;
+  }
+
+  /* PHOTO 2: Reasoning & Service Tier Popover */
+  .reasoning-popover {
+    left: 10px !important;
+    width: 200px !important;
+    padding: 5px !important;
+  }
+  .tier-list {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 1px !important;
+  }
+  .tier-item {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 5px 8px !important;
+    border-radius: 6px !important;
+    cursor: pointer !important;
+    transition: background 0.12s ease !important;
+    color: #F5F4F2 !important;
+    font-size: 11.5px !important;
+  }
+  .tier-item:hover {
+    background: rgba(255, 255, 255, 0.06) !important;
+  }
+  .tier-item.selected {
+    background: #252422 !important;
+    border: 0.5px solid #383632 !important;
+  }
+  .tier-default-badge {
+    font-size: 9px !important;
+    color: #AAA8A3 !important;
+    background: rgba(255, 255, 255, 0.08) !important;
+    padding: 1px 5px !important;
+    border-radius: 4px !important;
+    margin-left: auto !important;
+    margin-right: 6px !important;
+  }
+  .tier-check {
+    color: #FFB17F !important;
+    font-size: 10.5px !important;
+    font-weight: bold !important;
+    visibility: hidden !important;
+  }
+  .tier-item.selected .tier-check {
+    visibility: visible !important;
+  }
+  .tier-desc {
+    font-size: 9.5px !important;
+    color: #7A7874 !important;
+    margin-top: 1px !important;
+  }
+
+  /* PHOTO 3: Autonomy & Permissions Popover */
+  .autonomy-popover {
+    left: 60px !important;
+    width: 290px !important;
+    padding: 6px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 3px !important;
+  }
+  .autonomy-card {
+    display: flex !important;
+    align-items: flex-start !important;
+    gap: 9px !important;
+    padding: 7px 9px !important;
+    border-radius: 7px !important;
+    cursor: pointer !important;
+    transition: all 0.12s ease !important;
+    border: 0.5px solid transparent !important;
+  }
+  .autonomy-card:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+  }
+  .autonomy-card.selected {
+    background: #252422 !important;
+    border: 0.5px solid #383632 !important;
+  }
+  .autonomy-card-icon {
+    margin-top: 2px !important;
+    color: #AAA8A3 !important;
+    flex-shrink: 0 !important;
+  }
+  .autonomy-card.selected .autonomy-card-icon {
+    color: #FFB17F !important;
+  }
+  .autonomy-card-content {
+    flex: 1 !important;
+    min-width: 0 !important;
+  }
+  .autonomy-card-title {
+    font-size: 11.5px !important;
+    font-weight: 550 !important;
+    color: #F5F4F2 !important;
+  }
+  .autonomy-card-desc {
+    font-size: 10px !important;
+    color: #AAA8A3 !important;
+    line-height: 1.35 !important;
+    margin-top: 2px !important;
+  }
+
+  /* PHOTO 1: Multi-Provider Model Palette Popover */
+  .model-palette-popover {
+    left: 10px !important;
+    width: 360px !important;
+    height: 380px !important;
+    display: flex !important;
+    flex-direction: row !important;
+    overflow: hidden !important;
+    padding: 0 !important;
+  }
+  .palette-sidebar {
+    width: 44px !important;
+    background: #151413 !important;
+    border-right: 0.5px solid #252422 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    padding: 8px 0 !important;
+    gap: 8px !important;
+    flex-shrink: 0 !important;
+  }
+  .palette-provider-btn {
+    width: 28px !important;
+    height: 28px !important;
+    border-radius: 6px !important;
+    display: grid !important;
+    place-items: center !important;
+    background: transparent !important;
+    border: none !important;
+    color: #7A7874 !important;
+    cursor: pointer !important;
+    transition: all 0.12s ease !important;
+  }
+  .palette-provider-btn:hover {
+    color: #F5F4F2 !important;
+    background: rgba(255, 255, 255, 0.06) !important;
+  }
+  .palette-provider-btn.active {
+    color: #FFB17F !important;
+    background: #252422 !important;
+    box-shadow: 0 0 0 1px #383632 !important;
+  }
+  .palette-main {
+    flex: 1 !important;
+    min-width: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+  }
+  .palette-search-wrapper {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    padding: 8px 12px !important;
+    border-bottom: 0.5px solid #252422 !important;
+  }
+  .palette-search-input {
+    flex: 1 !important;
+    background: transparent !important;
+    border: none !important;
+    outline: none !important;
+    color: #F5F4F2 !important;
+    font-size: 11.5px !important;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif !important;
+  }
+  .palette-search-input::placeholder {
+    color: #7A7874 !important;
+  }
+  .palette-model-list {
+    flex: 1 !important;
+    overflow-y: auto !important;
+    padding: 6px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 2px !important;
+  }
+  .palette-model-item {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 6px 10px !important;
+    border-radius: 7px !important;
+    cursor: pointer !important;
+    transition: all 0.12s ease !important;
+    border: 0.5px solid transparent !important;
+  }
+  .palette-model-item:hover {
+    background: rgba(255, 255, 255, 0.05) !important;
+  }
+  .palette-model-item.selected {
+    background: #252422 !important;
+    border: 0.5px solid #383632 !important;
+  }
+  .palette-model-title {
+    font-size: 11.5px !important;
+    font-weight: 550 !important;
+    color: #F5F4F2 !important;
+  }
+  .palette-model-meta {
+    font-size: 10px !important;
+    color: #7A7874 !important;
+    margin-top: 2px !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+  }
+  .palette-model-actions {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+  }
+  .palette-shortcut {
+    font-size: 9px !important;
+    color: #7A7874 !important;
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 0.5px solid #252422 !important;
+    padding: 1px 4px !important;
+    border-radius: 3px !important;
+  }
+  .palette-star {
+    font-size: 11px !important;
+    color: #7A7874 !important;
+    cursor: pointer !important;
+  }
+  .palette-star.active,
+  .palette-star:hover {
+    color: #FFB17F !important;
+  }
+  .palette-footer-row {
+    padding: 7px 12px !important;
+    border-top: 0.5px solid #252422 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    font-size: 10.5px !important;
+    color: #7A7874 !important;
+    cursor: pointer !important;
+  }
+  .palette-footer-row:hover {
+    color: #F5F4F2 !important;
+    background: rgba(255, 255, 255, 0.04) !important;
+  }
+
 </style>
 </head>
 <body class="compact-mode">
@@ -3165,51 +3489,208 @@
 
   <!-- Footer Compose -->
   <footer>
-    <!-- Custom Floating Glass Model Popover -->
-    <div class="custom-glass-popover" id="modelPopover" style="display:none;">
-      <div class="popover-header">AI AKIL YÜRÜTME MODELİ</div>
-      <div class="popover-item selected" data-model="openai:gpt-5.6-terra" onclick="selectModelOption('openai:gpt-5.6-terra', 'Terra', event)">
-        <div class="popover-item-left">
-          <div class="popover-item-icon">⚡</div>
-          <div>
-            <div class="popover-item-title">GPT-5.6 Terra</div>
-            <div class="popover-item-desc">Dengeli & Hızlı (Önerilen)</div>
-          </div>
+    <!-- PHOTO 2: Reasoning & Service Tier Popover -->
+    <div class="luxury-floating-popover reasoning-popover" id="reasoningTierPopover" style="display:none;">
+      <div class="popover-section-label">Reasoning</div>
+      <div class="tier-list">
+        <div class="tier-item selected" data-reasoning="low" onclick="selectReasoningOption('low', 'Low', 'Default', event)">
+          <span>Low</span>
+          <span class="tier-default-badge">Default</span>
+          <span class="tier-check">✓</span>
         </div>
-        <span class="popover-badge">Standart</span>
-        <span class="popover-check">✓</span>
+        <div class="tier-item" data-reasoning="medium" onclick="selectReasoningOption('medium', 'Medium', '', event)">
+          <span>Medium</span>
+          <span class="tier-check">✓</span>
+        </div>
+        <div class="tier-item" data-reasoning="high" onclick="selectReasoningOption('high', 'High', '', event)">
+          <span>High</span>
+          <span class="tier-check">✓</span>
+        </div>
+        <div class="tier-item" data-reasoning="extra_high" onclick="selectReasoningOption('extra_high', 'Extra High', '', event)">
+          <span>Extra High</span>
+          <span class="tier-check">✓</span>
+        </div>
+        <div class="tier-item" data-reasoning="max" onclick="selectReasoningOption('max', 'Max', '', event)">
+          <span>Max</span>
+          <span class="tier-check">✓</span>
+        </div>
+        <div class="tier-item" data-reasoning="ultra" onclick="selectReasoningOption('ultra', 'Ultra', '', event)">
+          <span>Ultra</span>
+          <span class="tier-check">✓</span>
+        </div>
       </div>
-      <div class="popover-item" data-model="openai:gpt-5.6-luna" onclick="selectModelOption('openai:gpt-5.6-luna', 'Luna', event)">
-        <div class="popover-item-left">
-          <div class="popover-item-icon">🌙</div>
-          <div>
-            <div class="popover-item-title">GPT-5.6 Luna</div>
-            <div class="popover-item-desc">Ultra Düşük Gecikme</div>
-          </div>
+      <div class="popover-divider"></div>
+      <div class="popover-section-label">Service Tier</div>
+      <div class="tier-list">
+        <div class="tier-item selected" data-tier="standard" onclick="selectServiceTier('standard', 'Standard', 'Default', event)">
+          <span>Standard</span>
+          <span class="tier-default-badge">Default</span>
+          <span class="tier-check">✓</span>
         </div>
-        <span class="popover-badge">Hızlı</span>
-        <span class="popover-check">✓</span>
+        <div class="tier-item" data-tier="fast" onclick="selectServiceTier('fast', 'Fast', '2x speed', event)">
+          <div>
+            <div>Fast</div>
+            <div class="tier-desc">2x speed, increased usage</div>
+          </div>
+          <span class="tier-check">✓</span>
+        </div>
       </div>
-      <div class="popover-item" data-model="openai:gpt-5.6-sol" onclick="selectModelOption('openai:gpt-5.6-sol', 'Sol', event)">
-        <div class="popover-item-left">
-          <div class="popover-item-icon">☀️</div>
-          <div>
-            <div class="popover-item-title">GPT-5.6 Sol</div>
-            <div class="popover-item-desc">Amiral Akıl Yürütme Katmanı</div>
-          </div>
+    </div>
+
+    <!-- PHOTO 3: Autonomy & Permissions Popover -->
+    <div class="luxury-floating-popover autonomy-popover" id="autonomyTierPopover" style="display:none;">
+      <div class="autonomy-card" data-mode="supervised" onclick="selectAutonomyTier('supervised', 1, false, 'Supervised', event)">
+        <div class="autonomy-card-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         </div>
-        <span class="popover-badge">Akılcı</span>
-        <span class="popover-check">✓</span>
+        <div class="autonomy-card-content">
+          <div class="autonomy-card-title">Supervised</div>
+          <div class="autonomy-card-desc">Ask before commands and file changes.</div>
+        </div>
+        <span class="tier-check">✓</span>
       </div>
-      <div class="popover-item" data-model="openai" onclick="selectModelOption('openai', 'Auto', event)">
-        <div class="popover-item-left">
-          <div class="popover-item-icon">✨</div>
-          <div>
-            <div class="popover-item-title">Auto Model</div>
-            <div class="popover-item-desc">Dinamik otomatik yönlendirme</div>
+
+      <div class="autonomy-card" data-mode="edits" onclick="selectAutonomyTier('edits', 2, false, 'Auto-accept edits', event)">
+        <div class="autonomy-card-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        </div>
+        <div class="autonomy-card-content">
+          <div class="autonomy-card-title">Auto-accept edits</div>
+          <div class="autonomy-card-desc">Auto-approve edits, ask before other actions.</div>
+        </div>
+        <span class="tier-check">✓</span>
+      </div>
+
+      <div class="autonomy-card" data-mode="auto" onclick="selectAutonomyTier('auto', 3, false, 'Auto', event)">
+        <div class="autonomy-card-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        </div>
+        <div class="autonomy-card-content">
+          <div class="autonomy-card-title">Auto</div>
+          <div class="autonomy-card-desc">Supported providers approve routine actions; others still ask.</div>
+        </div>
+        <span class="tier-check">✓</span>
+      </div>
+
+      <div class="autonomy-card selected" data-mode="full" onclick="selectAutonomyTier('full', 3, true, 'Full access', event)">
+        <div class="autonomy-card-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+        </div>
+        <div class="autonomy-card-content">
+          <div class="autonomy-card-title">Full access</div>
+          <div class="autonomy-card-desc">Allow commands and edits without prompts.</div>
+        </div>
+        <span class="tier-check">✓</span>
+      </div>
+    </div>
+
+    <!-- PHOTO 1: Multi-Provider Model Palette Popover -->
+    <div class="luxury-floating-popover model-palette-popover" id="modelPaletteModal" style="display:none;">
+      <div class="palette-sidebar">
+        <button class="palette-provider-btn active" data-prov="all" title="All & Favorites" onclick="filterByProvider('all', event)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        </button>
+        <button class="palette-provider-btn" data-prov="openai" title="OpenAI / Codex" onclick="filterByProvider('openai', event)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        <button class="palette-provider-btn" data-prov="anthropic" title="Anthropic / Claude" onclick="filterByProvider('anthropic', event)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 21 7.5-18h3L21 21"/><path d="M6.5 14h11"/></svg>
+        </button>
+        <button class="palette-provider-btn" data-prov="google" title="Google / Gemini" onclick="filterByProvider('google', event)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 19 8.5 19 15.5 12 22 5 15.5 5 8.5 12 2"/></svg>
+        </button>
+        <button class="palette-provider-btn" data-prov="local" title="Local / Ollama" onclick="filterByProvider('local', event)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="palette-main">
+        <div class="palette-search-wrapper">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#AAA8A3" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="palette-search-input" id="paletteSearchInput" placeholder="Search models..." oninput="filterPaletteModels(this.value)">
+        </div>
+        <div class="palette-model-list" id="paletteModelList">
+          <div class="palette-model-item selected" data-model="openai:gpt-6-astra" data-prov="openai" onclick="selectPaletteModel('openai:gpt-6-astra', 'GPT-6-Astra', 'Codex', event)">
+            <div>
+              <div class="palette-model-title">GPT-6-Astra</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘1</span>
+              <span class="palette-star active">★</span>
+            </div>
+          </div>
+          <div class="palette-model-item" data-model="openai:gpt-5.6-terra" data-prov="openai" onclick="selectPaletteModel('openai:gpt-5.6-terra', 'GPT-5.6-Terra', 'Codex', event)">
+            <div>
+              <div class="palette-model-title">GPT-5.6-Terra</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘2</span>
+              <span class="palette-star active">★</span>
+            </div>
+          </div>
+          <div class="palette-model-item" data-model="openai:gpt-5.6-luna" data-prov="openai" onclick="selectPaletteModel('openai:gpt-5.6-luna', 'GPT-5.6-Luna', 'Codex', event)">
+            <div>
+              <div class="palette-model-title">GPT-5.6-Luna</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘3</span>
+              <span class="palette-star">★</span>
+            </div>
+          </div>
+          <div class="palette-model-item" data-model="openai:gpt-5.6-sol" data-prov="openai" onclick="selectPaletteModel('openai:gpt-5.6-sol', 'GPT-5.6-Sol', 'Codex', event)">
+            <div>
+              <div class="palette-model-title">GPT-5.6-Sol</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg> Codex</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘4</span>
+              <span class="palette-star">★</span>
+            </div>
+          </div>
+          <div class="palette-model-item" data-model="anthropic:claude-3-7-sonnet" data-prov="anthropic" onclick="selectPaletteModel('anthropic:claude-3-7-sonnet', 'Claude 3.7 Sonnet', 'Anthropic', event)">
+            <div>
+              <div class="palette-model-title">Claude 3.7 Sonnet</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 21 7.5-18h3L21 21"/></svg> Anthropic</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘5</span>
+              <span class="palette-star active">★</span>
+            </div>
+          </div>
+          <div class="palette-model-item" data-model="anthropic:claude-3-5-sonnet" data-prov="anthropic" onclick="selectPaletteModel('anthropic:claude-3-5-sonnet', 'Claude 3.5 Sonnet', 'Anthropic', event)">
+            <div>
+              <div class="palette-model-title">Claude 3.5 Sonnet</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 21 7.5-18h3L21 21"/></svg> Anthropic</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-star">★</span>
+            </div>
+          </div>
+          <div class="palette-model-item" data-model="google:gemini-2.0-flash" data-prov="google" onclick="selectPaletteModel('google:gemini-2.0-flash', 'Gemini 2.0 Flash', 'Google', event)">
+            <div>
+              <div class="palette-model-title">Gemini 2.0 Flash</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 19 8.5 19 15.5 12 22 5 15.5 5 8.5 12 2"/></svg> Google</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-star">★</span>
+            </div>
+          </div>
+          <div class="palette-model-item" data-model="local:deepseek-r1" data-prov="local" onclick="selectPaletteModel('local:deepseek-r1', 'DeepSeek R1', 'Ollama', event)">
+            <div>
+              <div class="palette-model-title">DeepSeek R1 (Local)</div>
+              <div class="palette-model-meta"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/></svg> Ollama</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-star">★</span>
+            </div>
           </div>
         </div>
-        <span class="popover-check">✓</span>
+        <div class="palette-footer-row" onclick="filterByProvider('legacy', event)">
+          <span>Legacy models</span>
+          <span>32 models ›</span>
+        </div>
       </div>
     </div>
     
@@ -3223,42 +3704,40 @@
       </div>
 
       <div class="input-header">
+        <!-- Exact Windsurf / Cursor / Codex Footer Trigger Toolbar (Photos 2 & 3) -->
         <div class="input-header-actions">
-          <div class="model-picker-pill" id="modelPickerPill" title="Yapay Zeka Modeli & Akıl Yürütme Katmanı" onclick="toggleModelPopover(event)">
-            <span class="model-pill-icon">⚡</span>
-            <span id="modelCurrentName" style="font-size:9.5px;font-weight:600;color:#F5F4F2;">Terra</span>
-            <svg class="model-pill-chev" id="modelChev" width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-            <select id="modelSelect" class="model-select" style="display:none;" onchange="onModelSelected(this.value)">
-              <option value="openai:gpt-5.6-terra" selected>Terra</option>
-              <option value="openai:gpt-5.6-luna">Luna</option>
-              <option value="openai:gpt-5.6-sol">Sol</option>
-              <option value="openai">Auto</option>
-            </select>
-          </div>
-          <button class="autonomy-toggle-btn full" id="autonomyToggleBtn" type="button" title="Full Autonomy (Level 3): Rutin adımlarda izin istemeden otomatik ilerler">
-            <span class="autonomy-icon" id="autonomyIcon">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            </span>
-            <span id="autonomyLabel">Full Auto</span>
+          <!-- Button 1: Reasoning (Photo 2) -->
+          <button class="ide-popover-trigger" id="reasoningTriggerBtn" type="button" onclick="toggleReasoningPopover(event)" title="Akıl Yürütme Seviyesi ve Hız Modu">
+            <span id="reasoningTriggerLabel">Low</span>
+            <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-          <button class="mcp-toggle-btn on" id="mcpToggleBtn" type="button" title="MCP Sunucuları: Eklenti araçlarını modele bağlar">
-            <span class="mcp-icon">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v6m0 8v6M4.93 4.93l4.24 4.24m5.66 5.66 4.24 4.24M2 12h6m8 0h6"/></svg>
-            </span>
+          
+          <div class="trigger-separator">|</div>
+
+          <!-- Button 2: Autonomy & Permissions (Photo 3) -->
+          <button class="ide-popover-trigger" id="autonomyTriggerBtn" type="button" onclick="toggleAutonomyPopover(event)" title="İzin ve Otonomi Seviyesi">
+            <svg id="autonomyTriggerIcon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+            <span id="autonomyTriggerLabel">Full access</span>
+            <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+
+          <div class="trigger-separator">|</div>
+
+          <!-- Button 3: Model Picker (Photo 1) -->
+          <button class="ide-popover-trigger" id="modelTriggerBtn" type="button" onclick="toggleModelPalette(event)" title="Yapay Zeka Modeli Seç">
+            <span style="color:#FFB17F;font-size:10px;">✦</span>
+            <span id="modelTriggerLabel">GPT-6-Astra</span>
+            <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+
+          <div class="trigger-separator">|</div>
+
+          <!-- Button 4: MCP Toggle -->
+          <button class="ide-popover-trigger active" id="mcpToggleBtn" type="button" onclick="toggleMcp()" title="MCP Sunucuları: Eklenti araçlarını modele bağlar">
             <span id="mcpLabel">MCP</span>
           </button>
-          <button class="trust-toggle-btn off" id="trustToggleBtn" type="button" title="Trust mode (--yes): CONFIRM adımlarını sormadan otomatik onayla. BLOCK ve kill-switch aktif kalır.">
-            <span class="mcp-icon">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
-            </span>
-            <span id="trustLabel">Trust: Off</span>
-          </button>
-          <button class="pos-toggle-btn" id="posToggleBtn" type="button" title="Konum: Ekranın alt ortası (Claude Dock stili) veya Menü Barı">
-            <span class="pos-icon" id="posIcon">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="16" width="16" height="4" rx="1"/><circle cx="12" cy="8" r="3"/><line x1="12" y1="11" x2="12" y2="16"/></svg>
-            </span>
-            <span id="posLabel">Dock</span>
-          </button>
+
+          <!-- Button 5: Target App Toggle -->
           <button class="app-toggle-btn" id="appToggleBtn" type="button" title="Hedef Uygulama Belirle">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             <span>App</span>
@@ -5506,6 +5985,212 @@
   post({cmd:"ready"});
   post({cmd:"get_mcp"});
 })();
+
+  /* ==========================================================================
+     High-End IDE Popover Logic (Reasoning, Autonomy, Multi-Provider Model Palette)
+     ========================================================================== */
+  window.selectedReasoning = "low";
+  window.selectedServiceTier = "standard";
+  window.selectedAutonomyMode = "full";
+  window.selectedModelId = "openai:gpt-6-astra";
+  window.selectedModelName = "GPT-6-Astra";
+
+  function closeAllLuxuryPopovers() {
+    var r = document.getElementById("reasoningTierPopover");
+    var a = document.getElementById("autonomyTierPopover");
+    var m = document.getElementById("modelPaletteModal");
+    if (r) r.style.display = "none";
+    if (a) a.style.display = "none";
+    if (m) m.style.display = "none";
+    var btns = document.querySelectorAll(".ide-popover-trigger");
+    btns.forEach(function(b) { b.classList.remove("active"); });
+  }
+
+  window.toggleReasoningPopover = function(e) {
+    if (e) e.stopPropagation();
+    var p = document.getElementById("reasoningTierPopover");
+    if (!p) return;
+    var isOpen = p.style.display === "block";
+    closeAllLuxuryPopovers();
+    if (!isOpen) {
+      p.style.display = "block";
+      var btn = document.getElementById("reasoningTriggerBtn");
+      if (btn) btn.classList.add("active");
+    }
+  };
+
+  window.toggleAutonomyPopover = function(e) {
+    if (e) e.stopPropagation();
+    var p = document.getElementById("autonomyTierPopover");
+    if (!p) return;
+    var isOpen = p.style.display === "block";
+    closeAllLuxuryPopovers();
+    if (!isOpen) {
+      p.style.display = "block";
+      var btn = document.getElementById("autonomyTriggerBtn");
+      if (btn) btn.classList.add("active");
+    }
+  };
+
+  window.toggleModelPalette = function(e) {
+    if (e) e.stopPropagation();
+    var p = document.getElementById("modelPaletteModal");
+    if (!p) return;
+    var isOpen = p.style.display === "flex";
+    closeAllLuxuryPopovers();
+    if (!isOpen) {
+      p.style.display = "flex";
+      var btn = document.getElementById("modelTriggerBtn");
+      if (btn) btn.classList.add("active");
+      var searchInput = document.getElementById("paletteSearchInput");
+      if (searchInput) {
+        setTimeout(function() { searchInput.focus(); }, 50);
+      }
+    }
+  };
+
+  // PHOTO 2 Handlers
+  window.selectReasoningOption = function(val, label, defaultTag, e) {
+    if (e) e.stopPropagation();
+    window.selectedReasoning = val;
+    var lbl = document.getElementById("reasoningTriggerLabel");
+    if (lbl) lbl.textContent = label;
+    document.querySelectorAll("#reasoningTierPopover .tier-item[data-reasoning]").forEach(function(el) {
+      if (el.getAttribute("data-reasoning") === val) {
+        el.classList.add("selected");
+      } else {
+        el.classList.remove("selected");
+      }
+    });
+    closeAllLuxuryPopovers();
+  };
+
+  window.selectServiceTier = function(tier, label, desc, e) {
+    if (e) e.stopPropagation();
+    window.selectedServiceTier = tier;
+    document.querySelectorAll("#reasoningTierPopover .tier-item[data-tier]").forEach(function(el) {
+      if (el.getAttribute("data-tier") === tier) {
+        el.classList.add("selected");
+      } else {
+        el.classList.remove("selected");
+      }
+    });
+    closeAllLuxuryPopovers();
+  };
+
+  // PHOTO 3 Handlers
+  window.selectAutonomyTier = function(mode, level, trust, label, e) {
+    if (e) e.stopPropagation();
+    window.selectedAutonomyMode = mode;
+    currentLevel = level;
+    window.trustModeActive = trust;
+    var lbl = document.getElementById("autonomyTriggerLabel");
+    if (lbl) lbl.textContent = label;
+    
+    var iconEl = document.getElementById("autonomyTriggerIcon");
+    if (iconEl) {
+      if (trust) {
+        iconEl.innerHTML = '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>';
+      } else if (level === 1) {
+        iconEl.innerHTML = '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>';
+      } else if (level === 2) {
+        iconEl.innerHTML = '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>';
+      } else {
+        iconEl.innerHTML = '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>';
+      }
+    }
+
+    document.querySelectorAll("#autonomyTierPopover .autonomy-card").forEach(function(el) {
+      if (el.getAttribute("data-mode") === mode) {
+        el.classList.add("selected");
+      } else {
+        el.classList.remove("selected");
+      }
+    });
+
+    post({ cmd: "set_level", level: level });
+    closeAllLuxuryPopovers();
+  };
+
+  // PHOTO 1 Handlers
+  window.selectPaletteModel = function(modelId, name, prov, e) {
+    if (e) e.stopPropagation();
+    window.selectedModelId = modelId;
+    window.selectedModelName = name;
+    var lbl = document.getElementById("modelTriggerLabel");
+    if (lbl) lbl.textContent = name;
+
+    document.querySelectorAll("#paletteModelList .palette-model-item").forEach(function(el) {
+      if (el.getAttribute("data-model") === modelId) {
+        el.classList.add("selected");
+      } else {
+        el.classList.remove("selected");
+      }
+    });
+
+    closeAllLuxuryPopovers();
+  };
+
+  window.filterByProvider = function(prov, e) {
+    if (e) e.stopPropagation();
+    document.querySelectorAll(".palette-sidebar .palette-provider-btn").forEach(function(b) {
+      if (b.getAttribute("data-prov") === prov) b.classList.add("active");
+      else b.classList.remove("active");
+    });
+
+    document.querySelectorAll("#paletteModelList .palette-model-item").forEach(function(item) {
+      if (prov === "all") {
+        item.style.display = "flex";
+      } else {
+        var itemProv = item.getAttribute("data-prov");
+        item.style.display = (itemProv === prov) ? "flex" : "none";
+      }
+    });
+  };
+
+  window.filterPaletteModels = function(query) {
+    var q = (query || "").toLowerCase().trim();
+    document.querySelectorAll("#paletteModelList .palette-model-item").forEach(function(item) {
+      var title = (item.querySelector(".palette-model-title") ? item.querySelector(".palette-model-title").textContent : "").toLowerCase();
+      var meta = (item.querySelector(".palette-model-meta") ? item.querySelector(".palette-model-meta").textContent : "").toLowerCase();
+      if (!q || title.indexOf(q) !== -1 || meta.indexOf(q) !== -1) {
+        item.style.display = "flex";
+      } else {
+        item.style.display = "none";
+      }
+    });
+  };
+
+  // Global click outside to dismiss luxury popovers
+  document.addEventListener("click", function(e) {
+    var target = e.target;
+    if (!target.closest(".luxury-floating-popover") && !target.closest(".ide-popover-trigger")) {
+      closeAllLuxuryPopovers();
+    }
+  });
+
+  // Global keyboard shortcuts for Photo 1 (Cmd+1..4)
+  document.addEventListener("keydown", function(e) {
+    if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
+      if (e.key === "1") {
+        selectPaletteModel("openai:gpt-6-astra", "GPT-6-Astra", "Codex");
+        e.preventDefault();
+      } else if (e.key === "2") {
+        selectPaletteModel("openai:gpt-5.6-terra", "GPT-5.6-Terra", "Codex");
+        e.preventDefault();
+      } else if (e.key === "3") {
+        selectPaletteModel("openai:gpt-5.6-luna", "GPT-5.6-Luna", "Codex");
+        e.preventDefault();
+      } else if (e.key === "4") {
+        selectPaletteModel("openai:gpt-5.6-sol", "GPT-5.6-Sol", "Codex");
+        e.preventDefault();
+      } else if (e.key === "5") {
+        selectPaletteModel("anthropic:claude-3-7-sonnet", "Claude 3.7 Sonnet", "Anthropic");
+        e.preventDefault();
+      }
+    }
+  });
+
 </script>
 
   <!-- MCP Configuration Modal -->
