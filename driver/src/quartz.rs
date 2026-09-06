@@ -98,6 +98,21 @@ impl std::fmt::Debug for QuartzBackend {
     }
 }
 
+/// Release events are allocated BEFORE any down event. Drop can therefore
+/// unwind a failed allocation, cancellation or panic without another fallible
+/// OS allocation. Events are released in reverse press order.
+struct InputRelease {
+    events: Vec<CGEvent>,
+}
+
+impl Drop for InputRelease {
+    fn drop(&mut self) {
+        for event in self.events.iter().rev() {
+            event.post(CGEventTapLocation::HID);
+        }
+    }
+}
+
 impl QuartzBackend {
     /// Build the backend, requiring Accessibility consent first.
     pub fn new() -> Result<Self, BackendError> {
@@ -160,13 +175,13 @@ impl QuartzBackend {
                 CGEvent::new_mouse_event(self.source.clone(), down, location, button)
                     .map_err(|()| event_err("mouse-down", at.x, at.y))?;
             down_event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
-            down_event.post(CGEventTapLocation::HID);
-            std::thread::sleep(Duration::from_millis(40));
-
             let up_event = CGEvent::new_mouse_event(self.source.clone(), up, location, button)
                 .map_err(|()| event_err("mouse-up", at.x, at.y))?;
             up_event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
-            up_event.post(CGEventTapLocation::HID);
+            let release = InputRelease { events: vec![up_event] };
+            down_event.post(CGEventTapLocation::HID);
+            std::thread::sleep(Duration::from_millis(40));
+            drop(release);
 
             if total > 1 && index + 1 < total {
                 std::thread::sleep(Duration::from_millis(60));
@@ -226,6 +241,38 @@ fn post_event_access() -> bool {
 }
 
 impl Backend for QuartzBackend {
+    fn owns_focused_modal(&self, pid: u32) -> Result<bool, BackendError> {
+        crate::ax::owns_focused_modal(pid)
+    }
+
+    fn release_inputs(&self) -> Result<(), BackendError> {
+        // Attempt every release even when allocating one fails. A failed
+        // Command release must not prevent releasing the mouse or Shift.
+        let mut errors: Vec<String> = Vec::new();
+        for keycode in [54, 55, 56, 60, 58, 61, 59, 62, 63] {
+            match CGEvent::new_keyboard_event(self.source.clone(), keycode, false) {
+                Ok(event) => {
+                    event.set_flags(CGEventFlags::empty());
+                    event.post(CGEventTapLocation::HID);
+                }
+                Err(()) => errors.push(format!("cannot release keycode {keycode}")),
+            }
+        }
+        let probe = CGEvent::new(self.source.clone())
+            .map_err(|()| BackendError("cannot locate cursor for input release".to_string()))?;
+        for (kind, button) in [
+            (CGEventType::LeftMouseUp, CGMouseButton::Left),
+            (CGEventType::RightMouseUp, CGMouseButton::Right),
+            (CGEventType::OtherMouseUp, CGMouseButton::Center),
+        ] {
+            match CGEvent::new_mouse_event(self.source.clone(), kind, probe.location(), button) {
+                Ok(event) => event.post(CGEventTapLocation::HID),
+                Err(()) => errors.push(format!("cannot release mouse {button:?}")),
+            }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(BackendError(errors.join("; "))) }
+    }
+
     fn current_position(&self) -> Result<Point, BackendError> {
         let event = CGEvent::new(self.source.clone())
             .map_err(|()| BackendError("cannot create a probe CGEvent".to_string()))?;
@@ -284,6 +331,10 @@ impl Backend for QuartzBackend {
             CGMouseButton::Left,
         )
         .map_err(|()| event_err("drag-down", from.x, from.y))?;
+        let up = CGEvent::new_mouse_event(
+            self.source.clone(), CGEventType::LeftMouseUp, location, CGMouseButton::Left,
+        ).map_err(|()| event_err("drag-up", from.x, from.y))?;
+        let release = InputRelease { events: vec![up] };
         down.post(CGEventTapLocation::HID);
 
         // The plan's first point is `from` (the button is already down there);
@@ -295,14 +346,6 @@ impl Backend for QuartzBackend {
                 // position before bailing, or the host is left with a stuck
                 // mouse-down (Law 5: reclaiming control must not strand the
                 // physical device in a half-drag state).
-                let up = CGEvent::new_mouse_event(
-                    self.source.clone(),
-                    CGEventType::LeftMouseUp,
-                    CGPoint::new(pos.x as f64, pos.y as f64),
-                    CGMouseButton::Left,
-                )
-                .map_err(|()| event_err("drag-up", pos.x, pos.y))?;
-                up.post(CGEventTapLocation::HID);
                 return Err(BackendError(
                     "cancelled by user (kill-switch) during drag".to_string(),
                 ));
@@ -315,19 +358,13 @@ impl Backend for QuartzBackend {
             )
             .map_err(|()| event_err("drag-move", pos.x, pos.y))?;
             dragged.post(CGEventTapLocation::HID);
+            release.events[0].set_location(CGPoint::new(pos.x as f64, pos.y as f64));
             if !wait.is_zero() {
                 std::thread::sleep(*wait);
             }
         }
 
-        let up = CGEvent::new_mouse_event(
-            self.source.clone(),
-            CGEventType::LeftMouseUp,
-            CGPoint::new(to.x as f64, to.y as f64),
-            CGMouseButton::Left,
-        )
-        .map_err(|()| event_err("drag-up", to.x, to.y))?;
-        up.post(CGEventTapLocation::HID);
+        drop(release);
         Ok(())
     }
 
@@ -353,28 +390,37 @@ impl Backend for QuartzBackend {
         let keycode = keycode_of(key)
             .ok_or_else(|| BackendError(format!("unsupported hotkey key {key:?}")))?;
         let mut flags = CGEventFlags::empty();
+        let mut release = InputRelease { events: Vec::new() };
         // Press each modifier with a real flagsChanged event first so the
         // HID state records the press (not just per-event flag labels).
         for modifier in modifiers {
+            if crate::hotkey::tripped() {
+                return Err(BackendError("cancelled during hotkey".to_string()));
+            }
+            let up = CGEvent::new_keyboard_event(
+                self.source.clone(), modifier_keycode(*modifier), false,
+            ).map_err(|()| BackendError("cannot allocate modifier release".to_string()))?;
+            up.set_flags(CGEventFlags::empty());
+            release.events.push(up);
             flags.insert(modifier_flag(*modifier));
             self.post_modifier_event(*modifier, true)?;
             std::thread::sleep(Duration::from_millis(20));
         }
         let down = CGEvent::new_keyboard_event(self.source.clone(), keycode, true)
             .map_err(|()| BackendError("failed to create key-down".to_string()))?;
-        down.set_flags(flags);
-        down.post(CGEventTapLocation::HID);
-        std::thread::sleep(Duration::from_millis(30));
         let up = CGEvent::new_keyboard_event(self.source.clone(), keycode, false)
             .map_err(|()| BackendError("failed to create key-up".to_string()))?;
         up.set_flags(flags);
-        up.post(CGEventTapLocation::HID);
+        release.events.push(up);
+        if crate::hotkey::tripped() {
+            return Err(BackendError("cancelled before hotkey key-down".to_string()));
+        }
+        down.set_flags(flags);
+        down.post(CGEventTapLocation::HID);
+        std::thread::sleep(Duration::from_millis(30));
         // Release the modifiers explicitly — this is the step that clears
         // the held-modifier state so later clicks are plain clicks.
-        for modifier in modifiers {
-            std::thread::sleep(Duration::from_millis(20));
-            self.post_modifier_event(*modifier, false)?;
-        }
+        drop(release);
         Ok(())
     }
 
@@ -428,12 +474,13 @@ impl Backend for QuartzBackend {
             // characters work, rather than guessing keycodes per char.
             let down = CGEvent::new_keyboard_event(self.source.clone(), 0, true)
                 .map_err(|()| BackendError("failed to create key-down".to_string()))?;
-            down.set_string(&String::from(c));
-            down.post(CGEventTapLocation::HID);
             let up = CGEvent::new_keyboard_event(self.source.clone(), 0, false)
                 .map_err(|()| BackendError("failed to create key-up".to_string()))?;
             up.set_string(&String::from(c));
-            up.post(CGEventTapLocation::HID);
+            let release = InputRelease { events: vec![up] };
+            down.set_string(&String::from(c));
+            down.post(CGEventTapLocation::HID);
+            drop(release);
             std::thread::sleep(Duration::from_millis(per_key));
         }
         Ok(())

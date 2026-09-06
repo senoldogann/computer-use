@@ -146,7 +146,10 @@ uv run python -m computeruse --goal "..." --model openai --real \
     --deadline-seconds 600 --max-tokens 200000 --max-cost 1.50
 
 # Python type-checks (strict) and tests
-uv sync --extra dev
+uv sync --dev
+# CUA code runs inside a memory-limited QuickJS/WASM interpreter, not Node's
+# host realm. Install its locked local dependency before using the REPL.
+npm ci --prefix src/computeruse/repl --ignore-scripts
 uv run pyright src/computeruse
 uv run pytest                              # requires the built driver (see above)
 uv run pytest --allow-missing-driver       # deliberately skip the driver-backed suite

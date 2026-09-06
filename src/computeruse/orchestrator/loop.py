@@ -3100,7 +3100,12 @@ class OodaRunner:
                     res = self.cua_repl.execute(code)
                     self._consecutive_search_misses = 0
                     status = "failed" if res.is_error else "returned"
-                    return f"call_tool {action.tool} {status}:\n{res.content}"
+                    detail = res.content
+                    if res.is_error:
+                        detail = "\n".join(part for part in (res.content, res.error) if part)
+                        if not detail:
+                            detail = "CUA execution failed without a diagnostic; inspect the bridge."
+                    return f"call_tool {action.tool} {status}:\n{detail}"
                 if self.mcp is None:
                     return (
                         "call_tool is unavailable: no MCP servers are configured. "

@@ -1,0 +1,8 @@
+{
+  "name": "computeruse-cua-sandbox",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "quickjs-emscripten": "0.32.0"
+  }
+}

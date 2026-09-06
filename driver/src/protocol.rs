@@ -19,6 +19,8 @@ pub enum Request {
     AppWindow(AppWindowParams),
     ListApps,
     HotkeyState,
+    ReleaseInputs,
+    OwnsFocusedModal(AppWindowParams),
     MouseMove(MouseMoveParams),
     MouseClick(MouseClickParams),
     MouseDrag(MouseDragParams),
@@ -207,6 +209,9 @@ pub enum Response {
         trusted: bool,
     },
     Ack,
+    OwnsFocusedModal {
+        owned: bool,
+    },
     HotkeyState {
         /// Whether the user pressed the global kill combo (Law 5.2).
         tripped: bool,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import selectors
 import subprocess
 import time
@@ -37,6 +38,7 @@ from computeruse.orchestrator.schemas import (
 )
 from computeruse.security.autonomy import (
     AutonomyLevel,
+    Risk,
     classify_risk,
     decide_permission,
 )
@@ -216,12 +218,27 @@ class CuaReplEngine:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            # The bridge does not need credentials or Node preload hooks.
+            env={key: value for key, value in os.environ.items()
+                 if key in {"PATH", "SYSTEMROOT", "LANG", "LC_ALL", "TMPDIR"}},
         )
 
         # Wait for the "ready" signal
         assert self._proc.stdout is not None
-        ready_line = self._proc.stdout.readline()
         try:
+            with selectors.DefaultSelector() as ready:
+                ready.register(self._proc.stdout, selectors.EVENT_READ)
+                if not ready.select(timeout=10):
+                    raise TimeoutError("CUA bridge did not become ready within 10s")
+            ready_line = self._proc.stdout.readline()
+            if not ready_line:
+                self._proc.wait(timeout=2)
+                assert self._proc.stderr is not None
+                diagnostic = self._proc.stderr.read()
+                raise RuntimeError(
+                    f"CUA bridge exited with status {self._proc.returncode}: {diagnostic}. "
+                    f"Install runtime with npm ci --prefix {BRIDGE_SCRIPT_PATH.parent} --ignore-scripts"
+                )
             data = json.loads(ready_line)
             if data.get("method") != "ready":
                 raise RuntimeError(f"Unexpected bridge startup output: {ready_line}")
@@ -235,13 +252,27 @@ class CuaReplEngine:
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=2.0)
-            except Exception:  # noqa: BLE001
+            except subprocess.TimeoutExpired:
                 self._proc.kill()
+                self._proc.wait(timeout=2.0)
             finally:
+                for stream in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
+                    if stream is not None:
+                        stream.close()
                 self._proc = None
 
     def execute(
         self, code: str, title: str | None = None, timeout_s: float = 60.0
+    ) -> CuaReplResult:
+        """Execute with cleanup covering startup, transport and callback failures."""
+        try:
+            return self._execute(code, title, timeout_s)
+        except BaseException:
+            self._emergency_reset()
+            raise
+
+    def _execute(
+        self, code: str, title: str | None, timeout_s: float
     ) -> CuaReplResult:
         """Execute a JavaScript snippet through the bridge and handle incoming RPCs."""
         self.start()
@@ -278,7 +309,15 @@ class CuaReplEngine:
 
                 line = self._proc.stdout.readline()
                 if not line:
-                    break
+                    self._proc.wait(timeout=2)
+                    assert self._proc.stderr is not None
+                    diagnostic = self._proc.stderr.read()
+                    error = f"CUA bridge exited with status {self._proc.returncode}: {diagnostic}"
+                    self._emergency_reset()
+                    return CuaReplResult(
+                        status="failed", duration_ms=int((time.monotonic() - start_time) * 1000),
+                        content="", error=error,
+                    )
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
@@ -290,6 +329,7 @@ class CuaReplEngine:
                 if msg_id == eval_id:
                     duration_ms = int((time.monotonic() - start_time) * 1000)
                     if "error" in msg:
+                        self._release_inputs()
                         return CuaReplResult(
                             status="failed",
                             duration_ms=duration_ms,
@@ -316,7 +356,8 @@ class CuaReplEngine:
                     result = self._dispatch_js_call(method, params)
                     resp = json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": result})
                 except Exception as exc:
-                    LOGGER.exception("Error executing bridge RPC %s", method)
+                    self._release_inputs()
+                    LOGGER.exception("Error executing bridge RPC", extra={"method": method})
                     resp = json.dumps(
                         {
                             "jsonrpc": "2.0",
@@ -346,47 +387,48 @@ class CuaReplEngine:
 
     def _emergency_reset(self) -> None:
         """Reset input states and recycle process on hang or timeout."""
-        if self.driver_client:
-            try:
-                self.driver_client.send(PressHotkey(type="press_hotkey", modifiers=[], key="Escape"))
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.debug("Emergency reset input dispatch failed: %s", exc)
-        self.stop()
-        self.start()
+        # Stop queued JS first. Escape is not a release and can dismiss a
+        # user's dialog; only explicit hardware-up events are safe here.
+        try:
+            self.stop()
+        finally:
+            self._release_inputs()
+
+    def _release_inputs(self) -> None:
+        """Release held hardware through the driver's independent cleanup RPC."""
+        if self.driver_client is not None:
+            self.driver_client.release_inputs()
 
     def _select_menu_item(self, app_name: str, path: list[str]) -> bool:
         """Select a macOS menu bar item natively via AppleScript System Events."""
         if not path:
-            return False
-        try:
-            reversed_path = list(reversed(path))
-            target_item = reversed_path[0]
-            hierarchy_parts: list[str] = []
-            for i, part in enumerate(reversed_path[1:]):
-                if i == 0:
-                    hierarchy_parts.append(f'of menu "{part}"')
-                else:
-                    hierarchy_parts.append(f'of menu item "{part}" of menu 1')
-
-            hierarchy = " ".join(hierarchy_parts)
-            script = (
-                f'tell application "System Events"\n'
-                f'    tell process "{app_name}"\n'
-                f'        click menu item "{target_item}" {hierarchy} of menu bar 1\n'
-                f'    end tell\n'
-                f'end tell'
+            raise ValueError("selectMenuItem requires a nonempty menu path")
+        # Fixed source, all app/menu strings are argv data, including quotes,
+        # backslashes and newlines. The root is a menu BAR item, not a menu item.
+        script = """on run argv
+    set appName to item 1 of argv
+    set menuName to item 2 of argv
+    tell application "System Events"
+        tell process appName
+            set targetControl to menu bar item menuName of menu bar 1
+            repeat with idx from 3 to count of argv
+                set itemName to item idx of argv
+                set targetControl to menu item itemName of menu 1 of targetControl
+            end repeat
+            click targetControl
+        end tell
+    end tell
+end run"""
+        proc = subprocess.run(
+            ["osascript", "-e", script, "--", app_name, *path],
+            capture_output=True, text=True, timeout=3.0, check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"selectMenuItem failed: app={app_name!r}, path={path!r}, "
+                f"status={proc.returncode}, stderr={proc.stderr!r}, stdout={proc.stdout!r}"
             )
-            proc = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-            )
-            return proc.returncode == 0
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("AppleScript selectMenuItem failed for %s (%s): %s", app_name, path, exc)
-            return False
+        return True
 
     def _crop_data_uri(self, region: Rect, *, padding: float) -> str:
         """A base64 PNG data URI of one region of the live screen.
@@ -466,7 +508,14 @@ class CuaReplEngine:
         is passed alongside.
         """
         name, bundle_id = self._frontmost_identity()
-        return app_evidence(app_name, name, bundle_id) is Evidence.CONFIRMED
+        if app_evidence(app_name, name, bundle_id) is Evidence.CONFIRMED:
+            return True
+        # A generic dialog role/title is NOT proof of ownership. The driver
+        # must trace its actual AX parent chain to the requested process.
+        if not hasattr(self.driver_client, "owns_focused_modal"):
+            return False
+        pid = self.driver_client.app_pid(app_name)
+        return isinstance(pid, int) and self.driver_client.owns_focused_modal(pid) is True
 
     def _frontmost_identity(self) -> tuple[str | None, str]:
         """The frontmost application's name and bundle id, in either shape.
@@ -511,6 +560,9 @@ class CuaReplEngine:
         """
         if self.driver_client is None:
             return
+        if (hasattr(self.driver_client, "hotkey_state")
+                and self.driver_client.hotkey_state() is True):
+            raise PermissionDeniedError("CUA stopped: the user triggered the emergency kill-switch")
         if self._frontmost_is(app_name):
             return
         try:
@@ -611,8 +663,18 @@ class CuaReplEngine:
 
         if elem_index is not None:
             idx = int(elem_index)
+            expected = tracker.get_historical_element(idx)
+            snap, win_title = self._get_app_snapshot(app_name)
+            tracker.refresh_state(snap, win_title)
+            self._ensure_app_active(app_name)
             elem = tracker.get_element_by_index(idx)
             if elem:
+                if expected is None or (elem.role, elem.title) != (expected.role, expected.title):
+                    raise ValueError(f"Element [{idx}] identity changed; re-observe {app_name!r}")
+                if role is not None and elem.role.removeprefix("AX") != role.removeprefix("AX"):
+                    raise ValueError(f"Element [{idx}] does not match expected role {role!r}")
+                if title is not None and elem.title != title:
+                    raise ValueError(f"Element [{idx}] does not match expected title {title!r}")
                 label = elem.title or elem.role
                 return elem.centre_x, elem.centre_y, label
 
@@ -626,7 +688,7 @@ class CuaReplEngine:
                     historical.title,
                 )
                 snap, win_title = self._get_app_snapshot(app_name)
-                tracker.render_state(snap, win_title)
+                tracker.refresh_state(snap, win_title)
                 healed = tracker.find_matching_element(historical.role, historical.title)
                 if healed:
                     LOGGER.info(
@@ -645,11 +707,16 @@ class CuaReplEngine:
 
         # Smart semantic locator: Match by query, title, or role
         if query is not None or title is not None or role is not None:
-            matched = tracker.find_element(role=role, title=title, query=query)
-            if not matched:
-                snap, win_title = self._get_app_snapshot(app_name)
-                tracker.render_state(snap, win_title)
-                matched = tracker.find_element(role=role, title=title, query=query)
+            snap, win_title = self._get_app_snapshot(app_name)
+            tracker.refresh_state(snap, win_title)
+            self._ensure_app_active(app_name)
+            matches = tracker.find_elements(role=role, title=title, query=query)
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Ambiguous locator in {app_name!r}: query={query!r}, "
+                    f"title={title!r}, role={role!r}; use a freshly observed index"
+                )
+            matched = matches[0] if matches else None
 
             if matched:
                 LOGGER.info(
@@ -684,7 +751,10 @@ class CuaReplEngine:
             return
 
         # Attempt to authorize via active capability grants
-        if self.grant_store is not None:
+        if (self.grant_store is not None
+                and decision == PermissionDecision.CONFIRM
+                and risk == Risk.DESTRUCTIVE
+                and self.autonomy_level in (AutonomyLevel.GUARDED, AutonomyLevel.FULL)):
             now = self.now_provider() if self.now_provider else datetime.now(UTC)
             all_grants = self.grant_store.grants()
             verdict = authorize(
@@ -756,6 +826,12 @@ class CuaReplEngine:
             app_name = str(params["app"])
             path_segments = cast(list[str], params.get("path", []))
             self._ensure_app_active(app_name)
+            if not path_segments:
+                raise ValueError("selectMenuItem requires a nonempty menu path")
+            self._check_security(
+                MouseClick(type="mouse_click", x=0, y=0, button="left", click_count=1),
+                app_name, " > ".join(path_segments),
+            )
             success = self._select_menu_item(app_name, path_segments)
             return {"success": success, "path": path_segments}
 
@@ -835,7 +911,7 @@ class CuaReplEngine:
             )
             if not elem:
                 snap, win_title = self._get_app_snapshot(app_name)
-                tracker.render_state(snap, win_title)
+                tracker.refresh_state(snap, win_title)
                 elem = tracker.find_element(
                     role=cast(str | None, params.get("role")),
                     title=cast(str | None, params.get("title")),
@@ -853,7 +929,7 @@ class CuaReplEngine:
             )
             if not elems:
                 snap, win_title = self._get_app_snapshot(app_name)
-                tracker.render_state(snap, win_title)
+                tracker.refresh_state(snap, win_title)
                 elems = tracker.find_elements(
                     role=cast(str | None, params.get("role")),
                     title=cast(str | None, params.get("title")),

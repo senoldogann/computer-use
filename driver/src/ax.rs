@@ -116,6 +116,39 @@ fn string_attribute(element: CFTypeRef, name: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Only a modal whose live AX ancestry reaches the requested pid may borrow
+/// that app's focus authority. Unrelated sheets and ambiguous chains fail shut.
+pub fn owns_focused_modal(pid: u32) -> Result<bool, BackendError> {
+    let system_ref = unsafe { AXUIElementCreateSystemWide() };
+    if system_ref.is_null() {
+        return Err(BackendError("cannot create system AX element".to_string()));
+    }
+    let system = unsafe { CFType::wrap_under_create_rule(system_ref) };
+    let Some(mut current) = copy_attribute(system.as_CFTypeRef(), "AXFocusedUIElement") else {
+        return Ok(false);
+    };
+    let mut modal = false;
+    for _ in 0..32 {
+        let role = string_attribute(current.as_CFTypeRef(), "AXRole").unwrap_or_default();
+        let subrole = string_attribute(current.as_CFTypeRef(), "AXSubrole").unwrap_or_default();
+        let modal_attribute = copy_attribute(current.as_CFTypeRef(), "AXModal")
+            .and_then(|value| value.downcast::<CFBoolean>())
+            .is_some_and(|flag| flag == CFBoolean::true_value());
+        modal |= role == "AXSheet" || role == "AXDialog"
+            || subrole == "AXDialog" || subrole == "AXSystemDialog" || modal_attribute;
+        let mut owner: i32 = 0;
+        let status = unsafe { AXUIElementGetPid(current.as_CFTypeRef(), &mut owner) };
+        if modal && status == AX_ERROR_SUCCESS && owner > 0 && owner as u32 == pid {
+            return Ok(true);
+        }
+        let Some(parent) = copy_attribute(current.as_CFTypeRef(), "AXParent") else {
+            return Ok(false);
+        };
+        current = parent;
+    }
+    Ok(false)
+}
+
 /// Read ``AXPosition``/``AXSize`` (wrapped AXValues) as a CGPoint/CGSize.
 fn point_attribute(element: CFTypeRef, name: &str) -> CGPoint {
     copy_attribute(element, name)

@@ -225,6 +225,16 @@ impl std::fmt::Display for BackendError {
 /// ``SimulatedBackend`` guards its fixture state with a mutex, ``QuartzBackend`` holds only the
 /// ``CGEventSource`` which is ``Sync``.
 pub trait Backend: Send + Sync {
+    /// Cleanup must remain callable after cancellation.
+    fn release_inputs(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Fail closed unless the real AX parent chain proves modal ownership.
+    fn owns_focused_modal(&self, _pid: u32) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// Returns the current cursor position in virtual pixels.
     fn current_position(&self) -> Result<Point, BackendError>;
 

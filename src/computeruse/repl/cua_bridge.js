@@ -1,423 +1,129 @@
 /**
- * CUA REPL Bridge (Node.js runtime worker)
- *
- * Exposes `globalThis.cua` matching OpenAI's Computer Use Agent API surface.
- * Communicates with the Python orchestrator over stdin/stdout line-delimited JSON-RPC.
+ * Trusted transport. Model code and CUA objects exist only in QuickJS/WASM.
+ * No Node functions, promises or object references cross the string-only ABI.
+ * Node vm contexts are deliberately not used as a security boundary.
  */
-
-const readline = require("readline");
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  terminal: false,
-});
-
+const readline = require("node:readline");
+const fs = require("node:fs");
+const path = require("node:path");
+const { getQuickJS } = require("quickjs-emscripten");
+const apiSource = fs.readFileSync(path.join(__dirname, "cua_api.js"), "utf8");
 let nextId = 1;
-const pendingRequests = new Map();
+let running = false;
+const pending = new Map();
+const write = (message) => process.stdout.write(JSON.stringify(message) + "\n");
 
-function sendRpc(method, params) {
-  return new Promise((resolve, reject) => {
-    const id = nextId++;
-    pendingRequests.set(id, { resolve, reject });
-    const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-    process.stdout.write(payload + "\n");
-  });
-}
-
-function handleIncomingLine(line) {
-  if (!line.trim()) return;
-  try {
-    const msg = JSON.parse(line);
-    // Response to a pending RPC sent by JS to Python
-    if (msg.id && pendingRequests.has(msg.id)) {
-      const { resolve, reject } = pendingRequests.get(msg.id);
-      pendingRequests.delete(msg.id);
-      if (msg.error) {
-        reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+async function runEval(QuickJS, callId, code) {
+  if (running) {
+    write({ id: callId, error: { message: "Concurrent evaluation refused" } });
+    return;
+  }
+  running = true;
+  const vm = QuickJS.newContext();
+  vm.runtime.setMemoryLimit(32 * 1024 * 1024);
+  vm.runtime.setMaxStackSize(256 * 1024);
+  const deadline = Date.now() + 60000;
+  vm.runtime.setInterruptHandler(() => Date.now() >= deadline);
+  let active = true;
+  const requests = new Set();
+  const timers = new Set();
+  const deferreds = new Set();
+  const pump = () => {
+    if (!active) return;
+    const jobs = vm.runtime.executePendingJobs();
+    if (jobs.error) {
+      const message = vm.dump(jobs.error);
+      jobs.error.dispose();
+      throw new Error(JSON.stringify(message));
+    }
+  };
+  const rpc = vm.newFunction("__hostRpc", (methodHandle, paramsHandle) => {
+    const method = vm.getString(methodHandle);
+    const params = JSON.parse(vm.getString(paramsHandle));
+    const deferred = vm.newPromise();
+    deferreds.add(deferred);
+    const settle = (response) => {
+      if (!active) return;
+      const value = vm.newString(JSON.stringify(response));
+      deferred.resolve(value);
+      value.dispose();
+      // Run only after QuickJS has returned from this native callback.
+      queueMicrotask(pump);
+    };
+    if (method === "sleep") {
+      const ms = params.ms;
+      if (!Number.isFinite(ms) || ms < 0 || ms > 60000) {
+        settle({ error: "sleep requires milliseconds between 0 and 60000" });
       } else {
-        resolve(msg.result);
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          settle({ result: null });
+        }, ms);
+        timers.add(timer);
       }
-      return;
+    } else {
+      const id = nextId++;
+      requests.add(id);
+      pending.set(id, settle);
+      write({ jsonrpc: "2.0", id, method, params });
     }
-
-    // Top-level command from Python to evaluate code
-    if (msg.method === "eval") {
-      runEval(msg.id, msg.params.code);
-    }
-  } catch (err) {
-    process.stderr.write(`Bridge parse error: ${err.message}\n`);
-  }
-}
-
-rl.on("line", handleIncomingLine);
-
-function parseTargetCoord(target) {
-  let elementIndex = null;
-  let x = null;
-  let y = null;
-  let query = null;
-  let role = null;
-  let title = null;
-
-  if (typeof target === "number") {
-    elementIndex = target;
-  } else if (typeof target === "string") {
-    query = target;
-    title = target;
-  } else if (Array.isArray(target) && target.length === 2) {
-    [x, y] = target;
-  } else if (target && typeof target === "object") {
-    elementIndex = target.elementIndex ?? target.index ?? null;
-    x = target.x ?? null;
-    y = target.y ?? null;
-    query = target.query ?? null;
-    role = target.role ?? null;
-    title = target.title ?? target.text ?? target.label ?? null;
-  }
-  return { elementIndex, x, y, query, role, title };
-}
-
-/**
- * One found element, plus the ability to photograph itself.
- *
- * `find()` used to answer with a bare record, so a model that wanted to *look*
- * at what it had found had to read the bounds back out, do rectangle
- * arithmetic in JavaScript and call `cropScreenshot` — or, far more often,
- * call `getScreenshot()` and pay for the whole display. `crop()` closes that
- * gap: the element already knows where it is.
- */
-class ElementHandle {
-  constructor(appName, record) {
-    Object.assign(this, record);
-    Object.defineProperty(this, "_appName", { value: appName, enumerable: false });
-  }
-
-  /**
-   * A base64 PNG data URI of just this element.
-   *
-   * `padding` (logical points, default 8) widens the crop so the element is
-   * shown with enough of its surroundings to be recognisable — a checkbox
-   * cropped to its own bounds is a square with no label.
-   */
-  async crop(options = {}) {
-    return await sendRpc("cropScreenshot", {
-      app: this._appName,
-      bounds: { x: this.x, y: this.y, width: this.width, height: this.height },
-      padding: options.padding ?? 8,
-    });
-  }
-
-  toJSON() {
-    const { x, y, width, height, role, title, value, index, focused } = this;
-    return { x, y, width, height, role, title, value, index, focused };
-  }
-}
-
-class AppTarget {
-  constructor(appId, appName, initialAXState) {
-    this.id = appId;
-    this.name = appName;
-    this._lastState = initialAXState || "";
-  }
-
-  async getAXState(options = {}) {
-    const res = await sendRpc("getAXState", {
-      app: this.name,
-      disableDiffing: !!options.disableDiffing,
-    });
-    this._lastState = res;
-    return res;
-  }
-
-  async find(target) {
-    const parsed = parseTargetCoord(target);
-    const record = await sendRpc("findElement", {
-      app: this.name,
-      ...parsed,
-    });
-    return record ? new ElementHandle(this.name, record) : null;
-  }
-
-  async findAll(target) {
-    const parsed = parseTargetCoord(target);
-    const records = await sendRpc("findAllElements", {
-      app: this.name,
-      ...parsed,
-    });
-    return (records || []).map((record) => new ElementHandle(this.name, record));
-  }
-
-  async hasElement(target) {
-    try {
-      const el = await this.find(target);
-      return !!el;
-    } catch {
-      return false;
-    }
-  }
-
-  async waitForElement(target, options = {}) {
-    const timeoutMs = options.timeoutMs ?? 5000;
-    const intervalMs = options.intervalMs ?? 150;
-    const startTime = Date.now();
-
-    while (Date.now() - startTime < timeoutMs) {
-      try {
-        const el = await this.find(target);
-        if (el) return el;
-      } catch {}
-      await cua.sleep(intervalMs);
-    }
-    throw new Error(
-      `Timed out waiting for element matching ${JSON.stringify(target)} in undefined after ${timeoutMs}ms`
-    );
-  }
-
-  async selectMenuItem(menuPath) {
-    const path = Array.isArray(menuPath)
-      ? menuPath
-      : String(menuPath).split(">").map((s) => s.trim()).filter(Boolean);
-
-    return await sendRpc("selectMenuItem", {
-      app: this.name,
-      path,
-    });
-  }
-
-  async findVisual(query) {
-    return await sendRpc("findVisualElement", {
-      app: this.name,
-      query: typeof query === "string" ? query : (query.query || query.text || ""),
-    });
-  }
-
-  async getWindowBounds() {
-    return await sendRpc("getWindowBounds", {
-      app: this.name,
-    });
-  }
-
-  async cropScreenshot(bounds, options = {}) {
-    return await sendRpc("cropScreenshot", {
-      app: this.name,
-      bounds,
-      padding: options.padding ?? 0,
-    });
-  }
-
-  async click(target, options = {}) {
-    const parsed = parseTargetCoord(target);
-
-    return await sendRpc("click", {
-      app: this.name,
-      ...parsed,
-      mouseButton: options.mouseButton || "left",
-      clickCount: options.clickCount || 1,
-    });
-  }
-
-  async doubleClick(target, options = {}) {
-    return await this.click(target, { ...options, clickCount: 2 });
-  }
-
-  async rightClick(target, options = {}) {
-    return await this.click(target, { ...options, mouseButton: "right" });
-  }
-
-  async drag(startTarget, endTarget, options = {}) {
-    const start = parseTargetCoord(startTarget);
-    const end = parseTargetCoord(endTarget);
-    return await sendRpc("drag", {
-      app: this.name,
-      startElementIndex: start.elementIndex,
-      startX: start.x,
-      startY: start.y,
-      endElementIndex: end.elementIndex,
-      endX: end.x,
-      endY: end.y,
-      durationMs: options.durationMs || 250,
-    });
-  }
-
-  async pressKey(key, modifiers = []) {
-    return await sendRpc("pressKey", {
-      app: this.name,
-      key,
-      modifiers,
-    });
-  }
-
-  async pressHotkey(modifiers, key) {
-    return await this.pressKey(key, modifiers);
-  }
-
-  async typeText(text) {
-    return await sendRpc("typeText", {
-      app: this.name,
-      text,
-    });
-  }
-
-  async paste(text, options = {}) {
-    return await sendRpc("paste", {
-      app: this.name,
-      text,
-      format: options.format || "text",
-    });
-  }
-
-  async setValue(elementIndex, value) {
-    return await sendRpc("setValue", {
-      app: this.name,
-      elementIndex,
-      value: String(value),
-    });
-  }
-
-  async scroll(target, direction = "down", pages = 1) {
-    const { elementIndex, x, y } = parseTargetCoord(target);
-    return await sendRpc("scroll", {
-      app: this.name,
-      elementIndex,
-      x,
-      y,
-      direction,
-      pages,
-    });
-  }
-
-  async getScreenshot() {
-    return await sendRpc("getScreenshot", {
-      app: this.name,
-    });
-  }
-}
-
-globalThis.cua = {
-  async getApp(appName) {
-    const res = await sendRpc("getApp", { app: appName });
-    return new AppTarget(res.id, res.name, res.initialAXState);
-  },
-
-  async listApps() {
-    return await sendRpc("listApps", {});
-  },
-
-  async getState() {
-    return await sendRpc("getState", {});
-  },
-
-  sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  },
-
-  wait(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  },
-
-  async transaction(actionFn, options = {}) {
-    const maxRetries = options.retries ?? 2;
-    const backoffMs = options.backoffMs ?? 150;
-    let attempt = 0;
-
-    while (attempt <= maxRetries) {
-      try {
-        return await actionFn();
-      } catch (err) {
-        attempt++;
-        if (attempt > maxRetries) {
-          if (options.rollbackAction === "escape") {
-            try { await sendRpc("pressKey", { key: "Escape" }); } catch {}
-          }
-          throw err;
-        }
-        await cua.sleep(backoffMs * attempt);
-      }
-    }
-  },
-};
-
-// Global shorthand aliases matching prompt examples
-globalThis.getApp = globalThis.cua.getApp;
-globalThis.sleep = globalThis.cua.sleep;
-globalThis.wait = globalThis.cua.wait;
-
-function prepareCode(code) {
-  const trimmed = code.trim();
-  if (!trimmed) return trimmed;
-
-  // If code already contains an explicit return, leave it untouched
-  if (/\breturn\b/.test(trimmed)) {
-    return trimmed;
-  }
-
-  // Strip trailing semicolons
-  let clean = trimmed.replace(/;+\s*$/, "");
-
-  // Find last semicolon or line break
-  const lastSemi = clean.lastIndexOf(";");
-  const lastNewline = clean.lastIndexOf("\n");
-  const cutIdx = Math.max(lastSemi, lastNewline);
-
-  const declRegex = /^(const|let|var|if|for|while|try|catch|throw|switch|class|function)\b/;
-
-  if (cutIdx === -1) {
-    if (!declRegex.test(clean)) {
-      return `return (${clean});`;
-    }
-    return clean;
-  }
-
-  const head = clean.slice(0, cutIdx + 1);
-  const tail = clean.slice(cutIdx + 1).trim();
-
-  if (tail && !declRegex.test(tail)) {
-    return `${head}\nreturn (${tail});`;
-  }
-
-  return clean;
-}
-
-async function runEval(callId, code) {
+    return deferred.handle;
+  });
+  vm.setProp(vm.global, "__hostRpc", rpc);
+  rpc.dispose();
   try {
-    const preparedCode = prepareCode(code);
-    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    let fn;
-
-    try {
-      fn = new AsyncFunction("cua", preparedCode);
-    } catch {
-      fn = new AsyncFunction("cua", code);
+    vm.unwrapResult(vm.evalCode(apiSource)).dispose();
+    const evaluated = vm.unwrapResult(vm.evalCode(
+      "evaluateCode(" + JSON.stringify(code) + ")"
+    ));
+    const finished = vm.resolvePromise(evaluated);
+    pump();
+    const result = await finished;
+    evaluated.dispose();
+    if (result.error) {
+      const error = vm.dump(result.error);
+      result.error.dispose();
+      throw new Error([error.name, error.message, error.stack].filter(Boolean).join("\n") || JSON.stringify(error));
     }
-
-    const evalResult = await fn(globalThis.cua);
-
-    let content = "";
-    if (typeof evalResult === "string") {
-      content = evalResult;
-    } else if (evalResult !== undefined && evalResult !== null) {
-      content = typeof evalResult === "object" ? JSON.stringify(evalResult) : String(evalResult);
-    }
-
-    const payload = JSON.stringify({
-      jsonrpc: "2.0",
-      id: callId,
-      result: { content },
-    });
-    process.stdout.write(payload + "\n");
-  } catch (err) {
-    const payload = JSON.stringify({
-      jsonrpc: "2.0",
-      id: callId,
-      error: {
-        code: -32603,
-        message: err.stack || err.message,
-      },
-    });
-    process.stdout.write(payload + "\n");
+    const content = vm.getString(result.value);
+    result.value.dispose();
+    write({ jsonrpc: "2.0", id: callId, result: { content } });
+  } catch (error) {
+    write({ jsonrpc: "2.0", id: callId, error: {
+      code: -32603, message: error.stack || error.message || String(error)
+    } });
+  } finally {
+    active = false;
+    for (const id of requests) pending.delete(id);
+    for (const timer of timers) clearTimeout(timer);
+    for (const deferred of deferreds) deferred.dispose();
+    vm.dispose();
+    running = false;
   }
 }
 
-// Signal readiness
-process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "ready" }) + "\n");
+getQuickJS().then((QuickJS) => {
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  rl.on("line", (line) => {
+    try {
+      const msg = JSON.parse(line);
+      if (msg.method === "eval") {
+        void runEval(QuickJS, msg.id, msg.params.code);
+      } else if (pending.has(msg.id)) {
+        const settle = pending.get(msg.id);
+        pending.delete(msg.id);
+        settle(msg.error ? { error: msg.error.message } : { result: msg.result });
+      } else {
+        throw new Error("Unrecognized bridge response id");
+      }
+    } catch (error) {
+      process.stderr.write(error.stack + "\n");
+      process.exitCode = 1;
+      rl.close();
+    }
+  });
+  write({ jsonrpc: "2.0", method: "ready" });
+}).catch((error) => {
+  process.stderr.write(error.stack + "\n");
+  process.exitCode = 1;
+});
