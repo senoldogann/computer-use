@@ -5,42 +5,53 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Computer Use</title>
 <style>
-  :root {
-    /* Claude Anthropic Signature Palette */
-    --accent: #D97757;                   /* Official Anthropic Orange / Terracotta */
-    --accent-hover: #E08365;
-    --accent-glow: rgba(217, 119, 87, 0.35);
-    --accent-gradient: linear-gradient(135deg, #E08365 0%, #D97757 50%, #C15F3C 100%);
+    :root {
+    /* iOS 18 / visionOS Liquid Glass Palette */
+    --glass-base: rgba(20, 20, 26, 0.58);
+    --glass-panel: rgba(28, 28, 38, 0.62);
+    --glass-card: rgba(255, 255, 255, 0.055);
+    --glass-card-hover: rgba(255, 255, 255, 0.095);
+    --glass-card-active: rgba(255, 255, 255, 0.14);
     
-    /* Warm Charcoal Dark Canvas */
-    --bg-base: #1A1916;                  /* Anthropic Warm Dark Base */
-    --surface: #22211D;                  /* Elevated Panel Surface */
-    --surface-hover: #2B2A25;
-    --surface-active: #34332D;
+    --glass-border: rgba(255, 255, 255, 0.16);
+    --glass-border-light: rgba(255, 255, 255, 0.28);
+    --glass-border-subtle: rgba(255, 255, 255, 0.08);
+
+    /* Apple Specular Edge Light & Depth */
+    --specular-rim: inset 0 1.5px 1.5px 0 rgba(255, 255, 255, 0.45);
+    --specular-deep: inset 0 -1.5px 1.5px 0 rgba(0, 0, 0, 0.35);
+    --liquid-glow: 0 24px 64px rgba(0, 0, 0, 0.60), 0 0 1px 1px rgba(255, 255, 255, 0.12);
+
+    /* Liquid Vibrant Accents */
+    --accent: #FF6B4A;                   /* Liquid Coral Orange */
+    --accent-hover: #FF8566;
+    --accent-glow: rgba(255, 107, 74, 0.40);
+    --accent-gradient: linear-gradient(135deg, #FF8566 0%, #FF6B4A 50%, #E64C2E 100%);
     
-    /* Subtle Warm Borders */
-    --border: #33312B;
-    --border-highlight: #45433B;
+    --bg-base: transparent;
+    --surface: rgba(255, 255, 255, 0.05);
+    --surface-hover: rgba(255, 255, 255, 0.09);
+    --surface-active: rgba(255, 255, 255, 0.14);
+    --border: rgba(255, 255, 255, 0.13);
+    --border-highlight: rgba(255, 255, 255, 0.25);
     --border-subtle: rgba(255, 255, 255, 0.07);
 
-    /* Typography */
-    --text-primary: #FAF9F5;             /* Claude Warm Ivory Paper White */
-    --text-secondary: #B0AEA5;           /* Claude Warm Mid Gray */
-    --text-tertiary: #75736B;            /* Muted Slate Gray */
+    --text-primary: #FFFFFF;
+    --text-secondary: rgba(235, 235, 245, 0.72);
+    --text-tertiary: rgba(235, 235, 245, 0.42);
 
-    /* Status & Accents */
-    --success: #788C5D;                  /* Anthropic Olive Green */
-    --success-glow: rgba(120, 140, 93, 0.35);
-    --warning: #D4A359;                  /* Anthropic Warm Amber */
-    --warning-glow: rgba(212, 163, 89, 0.30);
-    --error: #D05548;                    /* Coral Crimson */
-    --error-glow: rgba(208, 85, 72, 0.30);
-    --purple: #9D79BC;                   /* Anthropic Mauve */
-    --cyan: #6A9BCC;                     /* Anthropic Sky Blue */
+    --success: #30D158;                  /* Apple Emerald */
+    --success-glow: rgba(48, 209, 88, 0.38);
+    --warning: #FFD60A;                  /* Apple Vivid Amber */
+    --warning-glow: rgba(255, 214, 10, 0.38);
+    --error: #FF453A;                    /* Apple Red / Coral */
+    --error-glow: rgba(255, 69, 58, 0.40);
+    --purple: #BF5AF2;                   /* Apple Violet */
+    --cyan: #64D2FF;                     /* Apple Electric Cyan */
 
-    --radius-sm: 6px;
-    --radius-md: 10px;
-    --radius-lg: 16px;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 20px;
     --radius-pill: 999px;
   }
 
@@ -50,15 +61,18 @@
   body {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
     color: var(--text-primary);
-    background: var(--bg-base);
-    border-radius: var(--radius-lg);
+    background: var(--glass-base) !important;
+    backdrop-filter: blur(50px) saturate(210%) contrast(108%);
+    -webkit-backdrop-filter: blur(50px) saturate(210%);
+    border-radius: 22px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
     -webkit-user-select: none;
     user-select: none;
     position: relative;
-    border: 0.75px solid var(--border);
+    border: 0.75px solid var(--glass-border);
+    box-shadow: var(--specular-rim), var(--specular-deep), var(--liquid-glow);
   }
 
   body::after {
@@ -1387,6 +1401,292 @@
     from { opacity: 0; transform: translateY(3px); }
     to { opacity: 1; transform: translateY(0); }
   }
+
+  /* ==========================================================================
+     iOS 18 / visionOS Liquid Glass Components
+     ========================================================================== */
+
+  /* Panic Emergency Stop Button */
+  .panic-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(255, 69, 58, 0.18);
+    border: 0.75px solid rgba(255, 69, 58, 0.45);
+    color: #FF6961;
+    padding: 3.5px 9px;
+    border-radius: var(--radius-pill);
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 2px 8px rgba(255, 69, 58, 0.25), inset 0 1px 1px rgba(255, 255, 255, 0.35);
+    line-height: 1.2;
+  }
+  .panic-btn:hover {
+    background: rgba(255, 69, 58, 0.32);
+    border-color: rgba(255, 69, 58, 0.7);
+    color: #FFFFFF;
+    box-shadow: 0 4px 14px rgba(255, 69, 58, 0.45), inset 0 1px 1px rgba(255, 255, 255, 0.5);
+    transform: scale(1.02);
+  }
+  .panic-btn:active {
+    transform: scale(0.97);
+  }
+
+  /* Liquid Budget & Token Gauge */
+  .liquid-budget-gauge {
+    flex: 0 0 auto;
+    padding: 5px 14px 4px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 0.5px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .budget-track {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+    position: relative;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+  .budget-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #30D158 0%, #64D2FF 60%, #BF5AF2 100%);
+    border-radius: var(--radius-pill);
+    transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1), background 0.3s ease;
+    box-shadow: 0 0 8px rgba(48, 209, 88, 0.5);
+  }
+  .budget-fill.warn {
+    background: linear-gradient(90deg, #FFD60A 0%, #FF9F0A 100%);
+    box-shadow: 0 0 8px rgba(255, 214, 10, 0.5);
+  }
+  .budget-fill.danger {
+    background: linear-gradient(90deg, #FF9F0A 0%, #FF453A 100%);
+    box-shadow: 0 0 8px rgba(255, 69, 58, 0.6);
+  }
+  .budget-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 9px;
+    color: var(--text-tertiary);
+    font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+  }
+  .budget-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-secondary);
+  }
+  .pulse-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 6px var(--success-glow);
+    animation: statusPulse 1.4s infinite ease-in-out;
+  }
+
+  /* Visual Witness Lens Box */
+  .visual-witness-lens {
+    margin: 8px 12px 4px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 0.5px solid var(--glass-border);
+    border-radius: var(--radius-md);
+    backdrop-filter: blur(25px);
+    -webkit-backdrop-filter: blur(25px);
+    overflow: hidden;
+    box-shadow: var(--specular-rim), 0 4px 16px rgba(0, 0, 0, 0.25);
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .lens-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.04);
+    cursor: pointer;
+    border-bottom: 0.5px solid rgba(255, 255, 255, 0.06);
+    user-select: none;
+  }
+  .lens-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: 650;
+    color: var(--cyan);
+  }
+  .lens-coords {
+    font-family: ui-monospace, Menlo, Monaco, monospace;
+    font-size: 9.5px;
+    color: var(--text-secondary);
+  }
+  .lens-toggle-icon {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    transition: transform 0.2s ease;
+  }
+  .lens-body {
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .lens-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9.5px;
+  }
+  .lens-label { color: var(--text-tertiary); }
+  .lens-val { color: var(--text-primary); font-weight: 600; }
+  .lens-reticle-box {
+    position: relative;
+    height: 38px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 0.5px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .reticle-target {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(100, 210, 255, 0.12);
+    border: 0.5px solid rgba(100, 210, 255, 0.35);
+    color: var(--cyan);
+    font-size: 9.5px;
+    font-family: ui-monospace, Menlo, Monaco, monospace;
+  }
+  .reticle-crosshair {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 8px var(--cyan);
+  }
+
+  /* Model Tier Picker in Footer */
+  .model-picker-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.07);
+    border: 0.5px solid var(--glass-border);
+    border-radius: var(--radius-pill);
+    padding: 1.5px 6px 1.5px 7px;
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.15);
+  }
+  .model-pill-icon {
+    font-size: 10px;
+    color: var(--accent);
+  }
+  .model-select {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 9.5px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 10px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.5)' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right center;
+  }
+  .model-select option {
+    background: #1E1E24;
+    color: #FFFFFF;
+  }
+
+  /* Toolbar Glass Override */
+  .toolbar {
+    background: rgba(255, 255, 255, 0.04) !important;
+    backdrop-filter: blur(25px);
+    -webkit-backdrop-filter: blur(25px);
+    border-bottom: 0.5px solid var(--glass-border) !important;
+  }
+
+  /* Floating Segmented Tab Bar */
+  .tab-bar {
+    background: rgba(255, 255, 255, 0.05) !important;
+    margin: 8px 12px 6px 12px !important;
+    padding: 4px !important;
+    gap: 4px !important;
+    border-radius: var(--radius-pill) !important;
+    border: 0.5px solid var(--glass-border) !important;
+    backdrop-filter: blur(25px);
+    -webkit-backdrop-filter: blur(25px);
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12), 0 4px 16px rgba(0, 0, 0, 0.2) !important;
+  }
+  .tab-btn {
+    border-radius: var(--radius-pill) !important;
+    border: 0.5px solid transparent !important;
+    font-size: 11px !important;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  }
+  .tab-btn:hover {
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: #FFF !important;
+  }
+  .tab-btn.active {
+    background: rgba(255, 255, 255, 0.18) !important;
+    color: #FFFFFF !important;
+    border-color: rgba(255, 255, 255, 0.26) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), inset 0 1px 1.5px rgba(255, 255, 255, 0.45) !important;
+  }
+
+  /* Footer Glass */
+  footer {
+    background: rgba(255, 255, 255, 0.04) !important;
+    backdrop-filter: blur(25px);
+    -webkit-backdrop-filter: blur(25px);
+    border-top: 0.5px solid var(--glass-border) !important;
+  }
+
+  /* Input Liquid Glass Glow */
+  .text-input, .search-input {
+    background: rgba(255, 255, 255, 0.06) !important;
+    border: 0.5px solid var(--glass-border) !important;
+    border-radius: 10px !important;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.08) !important;
+    color: #FFFFFF !important;
+  }
+  .text-input:focus, .search-input:focus {
+    background: rgba(255, 255, 255, 0.09) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 12px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.2) !important;
+  }
+
+  /* Primary Action Button Glass Glow */
+  .btn-primary {
+    background: var(--accent-gradient) !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 16px var(--accent-glow), inset 0 1px 1.5px rgba(255, 255, 255, 0.5) !important;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  }
+  .btn-primary:hover {
+    box-shadow: 0 6px 20px var(--accent-glow), inset 0 1.5px 2px rgba(255, 255, 255, 0.6) !important;
+    transform: translateY(-1px);
+  }
+  .btn-primary:active {
+    transform: translateY(0);
+  }
+
 </style>
 </head>
 <body>
@@ -1406,6 +1706,10 @@
     </div>
 
     <div class="header-actions">
+      <button class="panic-btn" id="panicBtn" title="Acil Durdur (Emergency Freeze) - Ajanı anında dondur" onclick="emergencyPanicStop()">
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        <span>Acil Durdur</span>
+      </button>
       <div class="status-pill">
         <div class="status-dot ok" id="dot"></div>
         <span class="status-text" id="stLabel">Idle</span>
@@ -1431,6 +1735,17 @@
       </button>
     </div>
   </header>
+  <!-- Liquid Budget & Live OODA Gauge -->
+  <div class="liquid-budget-gauge" id="liquidBudgetGauge">
+    <div class="budget-track">
+      <div class="budget-fill" id="budgetFill"></div>
+    </div>
+    <div class="budget-meta">
+      <span class="budget-status"><span class="pulse-dot"></span> <span id="budgetStatusText">Canlı Ajan Hazır</span></span>
+      <span class="budget-val" id="budgetMetaVal">0 / 25,000 tok · 0.0s</span>
+    </div>
+  </div>
+
 
   <!-- Toast Notification Overlay -->
   <div id="toast" class="toast-notification">
@@ -1464,6 +1779,31 @@
 
   <!-- TAB 1: Live Agent -->
   <main class="tab-pane active" id="tabLive">
+
+    <!-- Canlı Görsel Odak Lensi (Set-of-Marks & Reticle) -->
+    <div class="visual-witness-lens" id="visualWitnessLens">
+      <div class="lens-header" onclick="toggleWitnessLens()">
+        <div class="lens-title">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2m10 0h2a2 2 0 0 1 2 2v2m0 10v2a2 2 0 0 1-2 2h-2m-10 0H5a2 2 0 0 1-2-2v-2"/></svg>
+          <span>Görsel Odak Lensi</span>
+        </div>
+        <span class="lens-coords" id="lensCoords">(Hazır)</span>
+        <span class="lens-toggle-icon" id="lensChevron">▾</span>
+      </div>
+      <div class="lens-body" id="lensBody">
+        <div class="lens-row">
+          <span class="lens-label">Aktif Hedef:</span>
+          <span class="lens-val" id="lensTargetInfo">Auto Focus (TextEdit / Chrome)</span>
+        </div>
+        <div class="lens-reticle-box">
+          <div class="reticle-target" id="reticleTarget">
+            <div class="reticle-crosshair"></div>
+            <span class="reticle-caption" id="reticleCaption">Fiziksel Eylem Koordinatı</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="log" role="log" aria-live="polite">
       <div class="empty-state" id="emptyHero">
         <div class="empty-icon">
@@ -1658,6 +1998,15 @@
       <div class="input-header">
         <label class="input-label" for="goal">Instruction / Goal</label>
         <div class="input-header-actions">
+          <div class="model-picker-pill" title="Yapay Zeka Modeli & Akıl Yürütme Katmanı">
+            <span class="model-pill-icon">⚡</span>
+            <select id="modelSelect" class="model-select" onchange="onModelSelected(this.value)">
+              <option value="openai:gpt-5.6-terra" selected>Terra (Dengeli)</option>
+              <option value="openai:gpt-5.6-luna">Luna (Hızlı)</option>
+              <option value="openai:gpt-5.6-sol">Sol (Amiral)</option>
+              <option value="openai">Auto (OpenAI)</option>
+            </select>
+          </div>
           <button class="autonomy-toggle-btn full" id="autonomyToggleBtn" type="button" title="Full Autonomy (Level 3): Rutin adımlarda izin istemeden otomatik ilerler">
             <span class="autonomy-icon" id="autonomyIcon">
               <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -1720,6 +2069,55 @@
 
 <script>
 (function(){
+
+  /* ----- iOS Liquid Glass Helpers & Handlers ---------------------------- */
+  window.emergencyPanicStop = function() {
+    post({ cmd: "stop" });
+    showToast("🚨 Acil Durdurma! Ajan anında donduruldu.");
+    var bStatus = document.getElementById("budgetStatusText");
+    if (bStatus) bStatus.textContent = "Acil Durduruldu";
+  };
+
+  window.toggleWitnessLens = function() {
+    var body = document.getElementById("lensBody");
+    var chev = document.getElementById("lensChevron");
+    if (!body) return;
+    if (body.style.display === "none") {
+      body.style.display = "flex";
+      if (chev) chev.textContent = "▾";
+    } else {
+      body.style.display = "none";
+      if (chev) chev.textContent = "▸";
+    }
+  };
+
+  window.onModelSelected = function(val) {
+    try { localStorage.setItem("cu_selected_model", val); } catch(e){}
+    var label = val.replace("openai:", "");
+    showToast("Model seçildi: " + label);
+  };
+
+  // Restore saved model on load
+  try {
+    var savedModel = localStorage.getItem("cu_selected_model");
+    if (savedModel && document.getElementById("modelSelect")) {
+      document.getElementById("modelSelect").value = savedModel;
+    }
+  } catch(e){}
+
+  function updateWitnessLensUI(actType, x, y) {
+    var lens = document.getElementById("visualWitnessLens");
+    if (!lens) return;
+    var coords = document.getElementById("lensCoords");
+    if (coords && x !== undefined && y !== undefined) {
+      coords.textContent = "(" + x + ", " + y + ")";
+    }
+    var cap = document.getElementById("reticleCaption");
+    if (cap) {
+      cap.textContent = actType + (x !== undefined ? " @ (" + x + "," + y + ")" : "");
+    }
+  }
+
   var goal = document.getElementById("goal");
   var app = document.getElementById("app");
   var appField = document.getElementById("appField");
@@ -2239,12 +2637,32 @@
       statsElapsed.innerHTML = CLOCK_ICON + ' <span>' + Math.round(window._lastElapsedS) + 's</span>';
     }
     if (c) { window._lastCalls = parseInt(c, 10) || 0; }
+    // Update liquid budget progress bar
+    var budgetMaxTokens = 25000;
+    var pct = Math.min(100, Math.round(((window._lastTokens || 0) / budgetMaxTokens) * 100));
+    var fillEl = document.getElementById("budgetFill");
+    if (fillEl) {
+      fillEl.style.width = pct + "%";
+      if (pct > 80) fillEl.className = "budget-fill danger";
+      else if (pct > 50) fillEl.className = "budget-fill warn";
+      else fillEl.className = "budget-fill";
+    }
+    var bMeta = document.getElementById("budgetMetaVal");
+    if (bMeta) {
+      bMeta.textContent = (window._lastTokens || 0).toLocaleString("tr-TR") + " / 25,000 tok · " + Math.round(window._lastElapsedS || 0) + "s";
+    }
+    var bStatus = document.getElementById("budgetStatusText");
+    if (bStatus) {
+      bStatus.textContent = "Çalışıyor (Adım " + (currentRunRecord ? currentRunRecord.steps : 1) + ")";
+    }
   }
 
   function submit(){
     var g = goal.value.trim();
     if(!g) return;
     var m = {cmd:"run", goal:g, level:currentAutonomyLevel, trust:trustMode, mcp:window._mcpEnabled};
+    var mSel = document.getElementById("modelSelect");
+    if (mSel && mSel.value) { m.model = mSel.value; }
     var a = app.value.trim();
     if(a) m.app = a;
 
@@ -2608,6 +3026,9 @@
     }
 
     saveStoredTotals(totals);
+    if (typeof parsed === "object" && parsed !== null) {
+      updateWitnessLensUI(actType, parsed.x, parsed.y);
+    }
     recordSessionEvent("Action", stepLabel + ": " + actType + " " + detail.replace(/<[^>]+>/g, ""), String(actionPayload));
 
     // Reference pattern: an executed step line with its tool icon, the

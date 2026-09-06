@@ -33,10 +33,11 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageRep, NSColor,
     NSImage, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSWindow, NSWindowButton,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSVisualEffectView, NSVisualEffectMaterial, NSVisualEffectBlendingMode, NSVisualEffectState,
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
 use objc2_core_graphics::CGContext;
-use objc2_foundation::{NSString, NSInteger, NSTimer, NSURL};
+use objc2_foundation::{NSNumber, NSString, NSInteger, NSTimer, NSURL};
 use objc2_web_kit::{
     WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView,
     WKWebViewConfiguration,
@@ -355,8 +356,10 @@ pub fn run() -> ! {
     );
     let menu_icon = menu_icon(mtm);
     let panel = build_panel(mtm);
+    let effect = build_effect_view(mtm);
     let webview = build_webview(mtm);
-    panel.setContentView(Some(&webview));
+    effect.addSubview(&webview);
+    panel.setContentView(Some(&effect));
     PANEL_PTR.store(
         (&*panel as *const NSWindow).cast_mut().cast(),
         core::sync::atomic::Ordering::SeqCst,
@@ -668,6 +671,19 @@ fn activate_app() {
 // WKWebView construction + UI messaging
 // ---------------------------------------------------------------------------
 
+fn build_effect_view(mtm: MainThreadMarker) -> Retained<NSVisualEffectView> {
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
+    let effect = NSVisualEffectView::initWithFrame(
+        NSVisualEffectView::alloc(mtm),
+        frame,
+    );
+    effect.setMaterial(NSVisualEffectMaterial::HUDWindow);
+    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    effect.setState(NSVisualEffectState::Active);
+    effect.setWantsLayer(true);
+    effect
+}
+
 fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
     // SAFETY: standard AppKit/WebKit object graph; the config and controller
     // are owned for the webview's lifetime here.
@@ -680,6 +696,12 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
         let _: () = controller.addScriptMessageHandler_name(ProtocolObject::from_ref(&*bridge), &name);
         let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
         let webview = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
+
+        // KVC: disable opaque default background so native NSVisualEffectView vibrancy and CSS glass show through
+        let false_val = NSNumber::numberWithBool(false);
+        let key = NSString::from_str("drawsBackground");
+        let _: () = msg_send![&*webview, setValue: &*false_val, forKey: &*key];
+
         let html = NSString::from_str(include_str!("../assets/menu.html"));
         let base = NSURL::fileURLWithPath(&NSString::from_str("/"));
         webview.loadHTMLString_baseURL(&html, Some(&base));
@@ -856,7 +878,13 @@ fn handle_script_message(message: &WKScriptMessage) {
             if let Some(mcp) = value.get("mcp").and_then(serde_json::Value::as_bool) {
                 MCP_ENABLED.store(mcp, core::sync::atomic::Ordering::SeqCst);
             }
-            run_agent(&goal, app.as_deref(), level, trust);
+            let model = value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            run_agent(&goal, app.as_deref(), level, trust, model.as_deref());
         }
         Some("set_level") => {
             if let Some(level) = value.get("level").and_then(serde_json::Value::as_u64) {
@@ -1119,6 +1147,7 @@ fn agent_args(
     level: u8,
     mcp: bool,
     trust: bool,
+    model: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -1130,7 +1159,7 @@ fn agent_args(
         "--real".to_string(),
         // Never let a real host silently fall into the demo provider.
         "--model".to_string(),
-        "openai".to_string(),
+        model.filter(|m| !m.is_empty()).unwrap_or("openai").to_string(),
         "--driver".to_string(),
         driver_bin.to_string(),
         "--socket".to_string(),
@@ -1154,7 +1183,7 @@ fn agent_args(
     args
 }
 
-fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool) {
+fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool, model: Option<&str>) {
     TRUST_MODE.store(trust, core::sync::atomic::Ordering::SeqCst);
     // Guard: never double-run while one is in flight.
     let already = SHARED.lock().unwrap().child_pid.is_some();
@@ -1211,7 +1240,7 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool) {
     let mcp = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
     // `trust` arrives as a run_agent parameter; see signature.
     let trust = TRUST_MODE.load(core::sync::atomic::Ordering::SeqCst);
-    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp, trust));
+    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp, trust, model));
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
     cmd.env("OPENAI_API_KEY", key.expect("checked above"));
@@ -1643,7 +1672,7 @@ mod tests {
 
     #[test]
     fn agent_always_uses_the_real_model() {
-        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true, false);
+        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true, false, None);
         assert!(
             argv.windows(2).any(|w| w == ["--model", "openai"]),
             "launcher must pass --model openai, never the demo provider"
@@ -1654,7 +1683,7 @@ mod tests {
     #[test]
     fn agent_passes_required_flags_and_target_app() {
         let argv =
-            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false, false);
+            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false, false, None);
         for required in ["--goal", "--real", "--model", "--driver", "--socket", "--store"] {
             assert!(
                 argv.iter().any(|a| a == required),
@@ -1663,6 +1692,22 @@ mod tests {
         }
         assert!(argv.windows(2).any(|w| w == ["--app", "Google Chrome"]));
         assert!(!argv.iter().any(|a| a == "--mcp"), "must not pass --mcp when disabled");
+    }
+
+    #[test]
+    fn agent_respects_custom_model_selection() {
+        let argv = args(
+            "open notes",
+            None,
+            "/bin/driver",
+            "/tmp/x.sock",
+            "/tmp/store",
+            3,
+            false,
+            false,
+            Some("openai:gpt-5.6-luna"),
+        );
+        assert!(argv.windows(2).any(|w| w == ["--model", "openai:gpt-5.6-luna"]));
     }
 
     #[test]
