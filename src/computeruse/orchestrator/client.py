@@ -193,6 +193,7 @@ class ActuationClient:
         retry_delay_seconds: float = 0.2,
         recv_timeout_seconds: float = 10.0,
         recover: Callable[[], None] | None = None,
+        recover_unresponsive: Callable[[], None] | None = None,
     ) -> None:
         self._socket_path = socket_path
         self._connect_retries = connect_retries
@@ -205,6 +206,8 @@ class ActuationClient:
         # something has to be allowed to bring it back. ``None`` keeps the old
         # behaviour for callers that attach to a driver they do not own.
         self._recover = recover
+        self._recover_unresponsive = recover_unresponsive or recover
+        self._consecutive_timeouts = 0
         self._sock: socket.socket | None = None
         # Persistent read buffer: a single `recv()` may carry *two* response
         # lines (or a partial line). Keeping leftover bytes here (instead of a
@@ -676,17 +679,34 @@ class ActuationClient:
                 if not isinstance(parsed, dict):
                     self._reset_stream()
                     raise DriverRpcError(method=method, driver_message="driver response is not a dict")
+                self._consecutive_timeouts = 0
                 return cast(dict[str, object], parsed)
             self._scan_pos = len(self._buf)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._reset_stream()
+                self._consecutive_timeouts += 1
+                if self._recover_unresponsive is not None and self._consecutive_timeouts >= 1:
+                    LOGGER.warning("actuation driver did not answer within deadline; triggering unresponsive recovery")
+                    try:
+                        self._recover_unresponsive()
+                    except Exception as rec_exc:  # noqa: BLE001
+                        LOGGER.warning("unresponsive recovery failed: %s", rec_exc)
+                    self._consecutive_timeouts = 0
                 raise DriverTimeoutError(method, timeout_seconds)
             sock.settimeout(remaining)
             try:
                 chunk = sock.recv(1 << 20)
             except TimeoutError as exc:
                 self._reset_stream()
+                self._consecutive_timeouts += 1
+                if self._recover_unresponsive is not None and self._consecutive_timeouts >= 1:
+                    LOGGER.warning("actuation driver recv timed out; triggering unresponsive recovery")
+                    try:
+                        self._recover_unresponsive()
+                    except Exception as rec_exc:  # noqa: BLE001
+                        LOGGER.warning("unresponsive recovery failed: %s", rec_exc)
+                    self._consecutive_timeouts = 0
                 raise DriverTimeoutError(method, timeout_seconds) from exc
             except OSError as exc:
                 self._reset_stream()

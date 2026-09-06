@@ -430,6 +430,12 @@ def _looks_like_a_command(text: str, commands: frozenset[str]) -> bool:
     """
     lowered = text.lower()
     for line in lowered.splitlines():
+        # Compound commands separated by ;, &&, ||, |
+        subcommands = re.split(r"[;&|]+", line)
+        for subcmd in subcommands:
+            first_sub = subcmd.strip().split()
+            if first_sub and intent_words(first_sub[0]) & commands:
+                return True
         leading = intent_words(line)
         first = line.strip().split()
         if first and intent_words(first[0]) & commands:

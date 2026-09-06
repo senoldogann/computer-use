@@ -20,8 +20,8 @@ async function runEval(QuickJS, callId, code) {
   }
   running = true;
   const vm = QuickJS.newContext();
-  vm.runtime.setMemoryLimit(32 * 1024 * 1024);
-  vm.runtime.setMaxStackSize(256 * 1024);
+  vm.runtime.setMemoryLimit(64 * 1024 * 1024);
+  vm.runtime.setMaxStackSize(512 * 1024);
   const deadline = Date.now() + 60000;
   vm.runtime.setInterruptHandler(() => Date.now() >= deadline);
   let active = true;
@@ -71,6 +71,10 @@ async function runEval(QuickJS, callId, code) {
   });
   vm.setProp(vm.global, "__hostRpc", rpc);
   rpc.dispose();
+
+  let finalContent = null;
+  let evalError = null;
+
   try {
     vm.unwrapResult(vm.evalCode(apiSource)).dispose();
     const evaluated = vm.unwrapResult(vm.evalCode(
@@ -85,24 +89,48 @@ async function runEval(QuickJS, callId, code) {
       result.error.dispose();
       throw new Error([error.name, error.message, error.stack].filter(Boolean).join("\n") || JSON.stringify(error));
     }
-    const content = vm.getString(result.value);
+    finalContent = vm.getString(result.value);
     result.value.dispose();
-    write({ jsonrpc: "2.0", id: callId, result: { content } });
   } catch (error) {
-    write({ jsonrpc: "2.0", id: callId, error: {
-      code: -32603, message: error.stack || error.message || String(error)
-    } });
+    evalError = error;
   } finally {
     active = false;
     for (const id of requests) pending.delete(id);
     for (const timer of timers) clearTimeout(timer);
-    for (const deferred of deferreds) deferred.dispose();
-    vm.dispose();
+    for (const deferred of deferreds) {
+      if (deferred.alive) deferred.dispose();
+    }
+    try {
+      vm.runtime.executePendingJobs();
+    } catch {}
+    try {
+      vm.dispose();
+    } catch (disposeError) {
+      if (!evalError) evalError = disposeError;
+    }
     running = false;
+  }
+
+  if (evalError) {
+    write({
+      jsonrpc: "2.0",
+      id: callId,
+      error: {
+        code: -32603,
+        message: evalError.stack || evalError.message || String(evalError),
+      },
+    });
+  } else {
+    write({ jsonrpc: "2.0", id: callId, result: { content: finalContent } });
   }
 }
 
 getQuickJS().then((QuickJS) => {
+  if (typeof QuickJS.module?._malloc === "function" && typeof QuickJS.module?._free === "function") {
+    // Warm up linear WebAssembly memory to 64MB so mid-evaluation growth never corrupts QuickJS GC
+    const ptr = QuickJS.module._malloc(64 * 1024 * 1024);
+    QuickJS.module._free(ptr);
+  }
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   rl.on("line", (line) => {
     try {

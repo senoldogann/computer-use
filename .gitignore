@@ -21,6 +21,9 @@ driver/target/
 
 # Runtime sockets
 *.sock
+# A literal "--socket-path" socket file appears at the repo root when the
+# driver is spawned without its flag value; never source.
+--socket-path
 
 # Secrets — the OpenAI key lives in ~/.computeruse/env or a local .env,
 # and neither may ever reach the repository.

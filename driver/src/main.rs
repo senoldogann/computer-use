@@ -206,7 +206,7 @@ fn execute(req: Request, backend: &dyn Backend) -> Response {
         Request::Health => {
             #[cfg(target_os = "macos")]
             let trusted = if backend.is_real() {
-                actuation_driver::ax::trusted()
+                actuation_driver::ax::trusted() && actuation_driver::hotkey::is_listener_armed()
             } else {
                 true
             };

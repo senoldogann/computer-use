@@ -197,6 +197,9 @@ fn build_tree(
         // Drop the ubiquitous "AX" prefix so roles read "Button", "Window".
         .map(|r| r.trim_start_matches("AX").to_string())
         .unwrap_or_default();
+    let subrole = string_attribute(element, "AXSubrole")
+        .map(|r| r.trim_start_matches("AX").to_string())
+        .unwrap_or_default();
     let node_is_web = in_web || role == "WebArea";
     // Many apps (Chrome's omnibox included) leave AXTitle empty and put the
     // human label in AXDescription; fall back so the element still has a
@@ -291,6 +294,7 @@ fn build_tree(
 
     HostElement {
         role,
+        subrole,
         title,
         value,
         focused,

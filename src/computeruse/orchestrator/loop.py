@@ -1762,7 +1762,7 @@ class OodaRunner:
                 decision,
                 outcome,
                 verdict=None,
-                error=None if finished else state.last_error,
+                error=state.last_error if (not finished or getattr(outcome.action, "status", None) != "success") else None,
             )
             return state, finished, stop_batch
 
@@ -2364,7 +2364,12 @@ class OodaRunner:
         reading a sign-in screen are all fine, and stopping those would make
         the agent unable to even report what it is looking at.
         """
-        if not isinstance(action, (TypeText, ClipboardPaste)):
+        is_typing_action = isinstance(action, (TypeText, ClipboardPaste)) or (
+            isinstance(action, PressHotkey)
+            and len(action.key) == 1
+            and not any(m in action.modifiers for m in ("command", "control"))
+        )
+        if not is_typing_action:
             return
         if not self._observation.asks_for_credential:
             return
@@ -2743,10 +2748,13 @@ class OodaRunner:
         # Terminal decisions are a fresh control boundary: repetition
         # diagnostics are useful while selecting an action, but must not
         # survive a valid completion decision.
+        terminal_error = self._last_error or (
+            action.summary if action.status != "success" else None
+        )
         state = replace(
             state,
             completed_steps=state.completed_steps + (step_label,),
-            last_error=self._last_error,
+            last_error=terminal_error,
             skill=self._skill,
         )
         # Phase 3: when executing a hierarchical plan, a ``finish`` means the
@@ -3023,6 +3031,7 @@ class OodaRunner:
         if self.quiet_type is None:
             return False
         if not isinstance(action, (TypeText, ClipboardPaste)):
+            return False
             return False
         if not action.text:
             return False

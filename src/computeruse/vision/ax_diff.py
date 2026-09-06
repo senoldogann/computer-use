@@ -270,6 +270,21 @@ class AXStateTracker:
         matches = self.find_elements(role=role, title=title, query=query)
         return matches[0] if matches else None
 
+    def find_element_at(self, x: int, y: int) -> IndexedNode | None:
+        """Find the most specific (smallest area) actionable element enclosing (x, y)."""
+        candidates: list[IndexedNode] = []
+        for elem in self.current_index_map.values():
+            if elem.x <= x <= (elem.x + elem.width) and elem.y <= y <= (elem.y + elem.height):
+                # Filter out generic root containers so clicking empty window space is ungrounded
+                norm_role = elem.role.removeprefix("AX").casefold()
+                if norm_role not in {"window", "sheet", "dialog", "group"}:
+                    candidates.append(elem)
+        if not candidates:
+            return None
+        # Most specific descendant has the smallest bounding box area
+        candidates.sort(key=lambda e: (e.width * e.height, -e.index))
+        return candidates[0]
+
     def refresh_state(self, root: AXElement, window_title: str) -> None:
         """Refresh actuation identity without consuming the model-visible diff."""
         observed = index_accessible_elements(root, start_index=0)

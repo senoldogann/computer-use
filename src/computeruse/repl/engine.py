@@ -26,6 +26,7 @@ from typing import Any, Literal, cast
 
 from computeruse.orchestrator.client import OCR_MAX_LINES, OCR_MIN_CONFIDENCE
 from computeruse.orchestrator.evidence import Evidence, app_evidence
+from computeruse.orchestrator.loop import CredentialEntryRefused
 from computeruse.orchestrator.schemas import (
     Action,
     AgentTurn,
@@ -48,7 +49,7 @@ from computeruse.security.permissions import (
     PermissionDecision,
     PermissionDeniedError,
 )
-from computeruse.vision.ax import AXElement
+from computeruse.vision.ax import AXElement, asks_for_a_credential
 from computeruse.vision.ax_diff import AXStateTracker
 from computeruse.vision.capture import (
     ScreenCapture,
@@ -680,14 +681,17 @@ end run"""
                     else:
                         title = app_name
                     return snap, title
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     LOGGER.warning("ax_snapshot failed for pid %s: %s", pid, exc)
+                    raise WindowBoundsUnavailableError(
+                        f"Accessibility tree could not be read for {app_name!r} (pid {pid}): {exc}"
+                    ) from exc
 
-        # Fallback simulated root
-        return (
-            AXElement(role="Window", title=app_name, width=800, height=600),
-            app_name,
-        )
+            raise WindowBoundsUnavailableError(
+                f"Application {app_name!r} is not running or has no accessibility windows"
+            )
+
+        raise WindowBoundsUnavailableError("Actuation driver is not connected")
 
     def _resolve_target_point(
         self,
@@ -774,7 +778,22 @@ end run"""
                 f"Could not find element matching query={query!r}, title={title!r}, role={role!r} in '{app_name}'."
             )
 
-        return x, y, None
+        if x is not None and y is not None:
+            try:
+                snap, win_title = self._get_app_snapshot(app_name)
+                tracker.refresh_state(snap, win_title)
+                matched = tracker.find_element_at(int(x), int(y))
+                if matched:
+                    LOGGER.info(
+                        "Hit-test resolved (%d, %d) -> [%d] (%s %s)",
+                        x, y, matched.index, matched.title, matched.role,
+                    )
+                    return x, y, matched.title or matched.role
+            except WindowBoundsUnavailableError:
+                pass
+            return x, y, None
+
+        return None, None, None
 
     def _check_security(
         self, action: Action, app_name: str, target_label: str | None = None
@@ -785,7 +804,25 @@ end run"""
             sub_goal=f"CUA REPL execute in {app_name}",
             action=action,
         )
+        # Fail-closed credential guard for typing/pasting/keystroke entry
+        if isinstance(action, (TypeText, ClipboardPaste)) or (
+            isinstance(action, PressHotkey)
+            and len(action.key) == 1
+            and not any(m in action.modifiers for m in ("command", "control"))
+        ):
+            try:
+                snap, _ = self._get_app_snapshot(app_name)
+                if asks_for_a_credential(snap):
+                    raise CredentialEntryRefused(
+                        f"{action.type} refused: a password or secure text field is on screen. "
+                        "Agent never types credentials."
+                    )
+            except WindowBoundsUnavailableError:
+                pass
+
         risk = classify_risk(turn, target_label=target_label)
+        if target_label is None and isinstance(action, (MouseClick, MouseDrag)) and risk == Risk.NONE:
+            risk = Risk.ROUTINE
         decision = decide_permission(self.autonomy_level, risk)
 
         if decision == PermissionDecision.ALLOW:
@@ -831,8 +868,11 @@ end run"""
             self._ensure_app_active(app_name)
             tracker = self._get_tracker(app_name)
             if not tracker.last_nodes:
-                snap, win_title = self._get_app_snapshot(app_name)
-                state_text = tracker.render_state(snap, win_title)
+                try:
+                    snap, win_title = self._get_app_snapshot(app_name)
+                    state_text = tracker.render_state(snap, win_title)
+                except WindowBoundsUnavailableError:
+                    state_text = f"## Computer Use\nWindow: \"{app_name}\", App: {app_name} (AX unavailable).\n"
             else:
                 lines = [
                     "## Computer Use",
@@ -856,10 +896,13 @@ end run"""
             self._ensure_app_active(app_name)
             disable_diff = params.get("disableDiffing", False)
             tracker = self._get_tracker(app_name)
-            snap, win_title = self._get_app_snapshot(app_name)
-            state_text = tracker.render_state(
-                snap, win_title, disable_diffing=disable_diff
-            )
+            try:
+                snap, win_title = self._get_app_snapshot(app_name)
+                state_text = tracker.render_state(
+                    snap, win_title, disable_diffing=disable_diff
+                )
+            except WindowBoundsUnavailableError:
+                state_text = f"## Computer Use\nWindow: \"{app_name}\", App: {app_name} (AX unavailable).\n" 
             self._last_content = state_text
             return state_text
 
@@ -1152,9 +1195,13 @@ end run"""
 
         if method == "setValue":
             app_name = params["app"]
-            self._ensure_app_active(app_name)
             elem_index = params["elementIndex"]
             value = params["value"]
+            # Pre-validate security and credentials before any focus or typing side effects
+            _, _, target_label = self._resolve_target_point(app_name, elem_index=elem_index)
+            type_action = TypeText(type="type_text", text=str(value))
+            self._check_security(type_action, app_name, target_label)
+            self._ensure_app_active(app_name)
             # Click to focus, select all, then type
             self._dispatch_js_call(
                 "click", {"app": app_name, "elementIndex": elem_index}

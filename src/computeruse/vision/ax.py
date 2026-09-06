@@ -56,6 +56,7 @@ class AXElement(BaseModel):
     """One node of the host accessibility tree (validated driver payload)."""
 
     role: str
+    subrole: str = ""
     title: str = ""
     # AXValue: the element's current text content (text fields, sliders).
     # Empty when absent or empty. Lets the orchestrator verify that typed or
@@ -229,6 +230,21 @@ def focused_text_value(root: AXElement) -> str | None:
 #: its value is not, which is what makes it a reliable signal that the screen
 #: is asking for a credential.
 SECURE_FIELD_ROLE: Final[str] = "SecureTextField"
+SECURE_FIELD_ROLES: Final[frozenset[str]] = frozenset(
+    {"SecureTextField", "AXSecureTextField", "NSSecureTextField"}
+)
+
+
+def is_secure_field(node: AXElement) -> bool:
+    """Is this element a password / redacted text field (pure)?"""
+    subrole = (node.subrole or "").strip().lower()
+    role = (node.role or "").strip().lower()
+    return (
+        node.role in SECURE_FIELD_ROLES
+        or node.subrole in SECURE_FIELD_ROLES
+        or "secure" in subrole
+        or "secure" in role
+    )
 
 
 def asks_for_a_credential(root: AXElement) -> bool:
@@ -248,7 +264,7 @@ def asks_for_a_credential(root: AXElement) -> bool:
     """
 
     def walk(node: AXElement) -> bool:
-        if node.role == SECURE_FIELD_ROLE:
+        if is_secure_field(node):
             return True
         return any(walk(child) for child in node.children)
 

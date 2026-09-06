@@ -160,7 +160,9 @@ def extract_facts_from_run(
     ``model_dump`` so every attribute access is type-safe (Law 6.2).
     """
     facts: list[SemanticEntry] = []
-    app_slug = "".join(ch if ch.isalnum() else "-" for ch in app.lower()).strip("-") or "app"
+    # ascii_slug, not isalnum: isalnum keeps non-ASCII letters the entry_id
+    # pattern rejects (see computeruse.slug).
+    app_slug = ascii_slug(app, max_chars=60) or "app"
     for i, action in enumerate(steps):
         desc = step_descriptions[i] if i < len(step_descriptions) else ""
         if not desc or len(desc) < 3:

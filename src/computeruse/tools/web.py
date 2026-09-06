@@ -103,6 +103,23 @@ def html_to_text(html: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Ensure HTTP redirect destinations are re-evaluated against SSRF boundaries."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: object,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if not _is_fetchable_url(newurl):
+            raise WebError(f"redirect target {newurl!r} refused: forbidden destination")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)  # type: ignore[arg-type]
+
+
 def _get(url: str) -> str:
     """One GET, decoded as text, with typed failures and transient retry."""
     last_error: Exception | None = None
@@ -110,9 +127,11 @@ def _get(url: str) -> str:
         try:
             request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             context = ssl.create_default_context()
-            with urllib.request.urlopen(
-                request, timeout=REQUEST_TIMEOUT_SECONDS, context=context
-            ) as response:
+            opener = urllib.request.build_opener(
+                SafeRedirectHandler(),
+                urllib.request.HTTPSHandler(context=context),
+            )
+            with opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 raw = response.read()
                 charset = response.headers.get_content_charset() or "utf-8"
             return raw.decode(charset, errors="replace")
@@ -135,6 +154,8 @@ def _get(url: str) -> str:
 
 def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True when an address is internal and must never be fetched (pure)."""
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return _is_blocked_address(addr.ipv4_mapped)
     return (
         addr.is_private
         or addr.is_loopback

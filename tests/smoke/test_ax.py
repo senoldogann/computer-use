@@ -38,12 +38,18 @@ def test_ax_snapshot_wire_shape() -> None:
 
 
 def test_ax_snapshot_omitted_max_nodes_uses_driver_default() -> None:
-    """Clients that predate the node budget must keep working (wire-back-compat)."""
+    """Clients that predate the node budget must keep working (wire-back-compat).
+
+    Omitting max_nodes returns the whole fixture, proving the driver default
+    is not a truncation (distinct from the small-budget test below).
+    """
     payload = rpc_call({"method": "ax_snapshot", "params": {"pid": APP_PID, "max_depth": 8}})
     assert payload.get("ok") == "ax_snapshot"
     root = payload.get("root")
     assert isinstance(root, dict)
     assert root.get("role") == "Application"
+    window = root["children"][0]
+    assert len(window["children"]) == 5
 
 
 def test_ax_snapshot_node_budget_bounds_payload() -> None:

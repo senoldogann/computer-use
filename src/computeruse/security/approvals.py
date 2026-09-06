@@ -44,7 +44,7 @@ from computeruse.slug import ascii_slug
 
 LOGGER: Final = logging.getLogger(__name__)
 
-ApprovalDecision = Literal["pending", "approved", "denied"]
+ApprovalDecision = Literal["pending", "approved", "denied", "consumed"]
 
 #: IDs become filenames, so they must never climb out of the directory.
 ID_PATTERN: Final = r"^[a-z0-9][a-z0-9._-]*$"
@@ -189,6 +189,16 @@ def decided(
     )
 
 
+def consumed(request: ApprovalRequest, *, now: datetime) -> ApprovalRequest:
+    """Record that an approved action has been executed and its token consumed (pure)."""
+    return request.model_copy(
+        update={
+            "decision": "consumed",
+            "decided_at": now,
+        }
+    )
+
+
 class ApprovalRequiredError(RuntimeError):
     """A run reached an action only a human may authorise, and none was there.
 
@@ -273,6 +283,22 @@ class ApprovalQueue:
         answered = decided(request, approved=approved, now=now)
         path.write_text(answered.model_dump_json(indent=2) + "\n", encoding="utf-8")
         return answered
+
+    def consume(self, request_id: str, *, now: datetime) -> ApprovalRequest:
+        """Consume an approved request once executed so it cannot be re-used."""
+        path = _safe_id_path(self._directory, request_id)
+        if not path.is_file():
+            raise KeyError(f"no approval request {request_id!r} in {self._directory}")
+        request = ApprovalRequest.model_validate(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        if request.decision != "approved":
+            raise ValueError(
+                f"cannot consume approval request {request_id!r}: current decision is {request.decision!r}"
+            )
+        used = consumed(request, now=now)
+        path.write_text(used.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        return used
 
 
 def now_utc() -> datetime:

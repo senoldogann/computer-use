@@ -29,10 +29,10 @@ LOGGER: Final = logging.getLogger(__name__)
 from computeruse.memory.schemas import Episode, EpisodeOutcome
 from computeruse.orchestrator.schemas import Action
 from computeruse.skills.distiller import Trajectory, signature_of
+from computeruse.slug import ascii_slug
 
 # Episodic memory reuses the distiller's canonical flow-signature so de-dup is
-# identical across tiers. Refactored to this alias for a single named source.
-_flow_signature = signature_of
+# identical across tiers.
 
 
 def signature_from_trace(
@@ -42,7 +42,7 @@ def signature_from_trace(
     step_targets: tuple[str, ...] = (),
 ) -> str:
     """Compute the canonical flow signature from an app + action list."""
-    return _flow_signature(
+    return signature_of(
         Trajectory(
             app=app,
             description="",
@@ -111,7 +111,9 @@ def _default_episode_id(app: str) -> str:
     Timestamps sort lexically, so ``episodes()`` oldest-first ordering (which
     relies on id order) stays correct across sessions.
     """
-    slug = "".join(ch if ch.isalnum() else "-" for ch in app.lower()).strip("-")
+    # ascii_slug, not isalnum: isalnum keeps non-ASCII letters (ü/ç/ğ) that the
+    # Episode id pattern rejects, so a Turkish app name died at record time.
+    slug = ascii_slug(app, max_chars=60)
     # Lowercased so the id matches the Episode id pattern ([a-z0-9._-]); the
     # "T" separator otherwise trips the validator.
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f").lower()

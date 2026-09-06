@@ -54,6 +54,14 @@ static KILL_TRIPPED: AtomicBool = AtomicBool::new(false);
 /// only ever written by the listener thread that owns the tap.
 static TAP_PORT: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
+/// Whether the kill-hotkey listener is actively running and armed.
+static TAP_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Query whether the kill-hotkey listener is actively installed and armed.
+pub fn is_listener_armed() -> bool {
+    TAP_ARMED.load(Ordering::SeqCst)
+}
+
 /// Pure: does a key event (keycode + modifier flags) match the kill combo?
 ///
 /// The combo is Command+Shift+Escape. ``contains`` allows *extra* modifier
@@ -149,19 +157,19 @@ fn rearm_tap() {
 /// than the crate's ``with_enabled`` helper, because re-arming a disabled tap
 /// needs the tap's mach port and ``with_enabled`` never lets go of it.
 pub fn spawn_listener() {
-    std::thread::spawn(|| {
-        let tap = match CGEventTap::new(
-            CGEventTapLocation::Session,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            vec![
-                CGEventType::KeyDown,
-                // Not keystrokes — the two ways macOS tells a callback its tap
-                // has been switched off. Without them in the mask the
-                // notification is never delivered and the tap stays dead.
-                CGEventType::TapDisabledByTimeout,
-                CGEventType::TapDisabledByUserInput,
-            ],
+    std::thread::Builder::new()
+        .name("kill-hotkey-listener".to_string())
+        .spawn(|| {
+            let tap = match CGEventTap::new(
+                CGEventTapLocation::Session,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                // Only normal key events are valid in the event mask.
+                // Out-of-band disable notifications (TapDisabledByTimeout and
+                // TapDisabledByUserInput) are delivered by macOS to the callback
+                // regardless of mask, and attempting to put them in the bitmask
+                // shifts 1 << 0xFFFFFFFE which causes overflow in debug builds.
+                vec![CGEventType::KeyDown],
             |_proxy, etype, event| {
                 // The decision itself is pure (`handle_tap_event_type`); the
                 // arms below only perform the side effects it selects.
@@ -198,11 +206,13 @@ pub fn spawn_listener() {
                 eprintln!(
                     "[driver] kill-hotkey tap failed to install (grant Accessibility consent?)"
                 );
+                TAP_ARMED.store(false, Ordering::SeqCst);
                 return;
             }
         };
         let Ok(source) = tap.mach_port().create_runloop_source(0) else {
             eprintln!("[driver] kill-hotkey run-loop source creation failed");
+            TAP_ARMED.store(false, Ordering::SeqCst);
             return;
         };
         // Published before the loop starts, so the first disable notification
@@ -213,10 +223,13 @@ pub fn spawn_listener() {
         );
         CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
         tap.enable();
+        TAP_ARMED.store(true, Ordering::SeqCst);
         // Blocks until the process exits; `tap` stays alive for the duration,
         // which is what keeps the port in TAP_PORT valid.
         CFRunLoop::run_current();
-    });
+        TAP_ARMED.store(false, Ordering::SeqCst);
+    })
+    .expect("failed to spawn kill-hotkey listener thread");
 }
 
 #[cfg(all(test, target_os = "macos"))]

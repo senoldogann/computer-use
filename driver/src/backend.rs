@@ -109,6 +109,9 @@ pub struct FocusedWindow {
 pub struct HostElement {
     /// AX role without the ``AX`` prefix (e.g. ``Button``, ``Window``).
     pub role: String,
+    /// AX subrole without the ``AX`` prefix (e.g. ``SecureTextField``).
+    #[serde(default)]
+    pub subrole: String,
     pub title: String,
     /// AXValue: the element's current text content (text fields, sliders).
     /// Lets the orchestrator verify that typed/pasted text actually landed in
@@ -386,6 +389,7 @@ fn simulated_ax_tree(focused: Option<usize>, address_value: &str) -> HostElement
             let is_address = index == ADDRESS_FIELD_INDEX;
             HostElement {
                 role: role.to_string(),
+                subrole: String::new(),
                 // The address field's title mirrors its value on a real
                 // browser, and the orchestrator's AXValue witness reads the
                 // value — so both must follow what was typed or pasted.
@@ -402,6 +406,7 @@ fn simulated_ax_tree(focused: Option<usize>, address_value: &str) -> HostElement
         .collect::<Vec<_>>();
     let mut window_children = vec![HostElement {
         role: "Toolbar".to_string(),
+        subrole: String::new(),
         title: String::new(),
         value: String::new(),
         focused: false,
@@ -414,6 +419,7 @@ fn simulated_ax_tree(focused: Option<usize>, address_value: &str) -> HostElement
     window_children.extend(children);
     HostElement {
         role: "Application".to_string(),
+        subrole: String::new(),
         title: "Safari".to_string(),
         value: String::new(),
         focused: false,
@@ -423,6 +429,7 @@ fn simulated_ax_tree(focused: Option<usize>, address_value: &str) -> HostElement
         height: 0.0,
         children: vec![HostElement {
             role: "Window".to_string(),
+            subrole: String::new(),
             title: "Safari".to_string(),
             value: String::new(),
             focused: false,
@@ -1029,6 +1036,7 @@ mod node_budget_tests {
     fn leaf(role: &str, title: &str) -> HostElement {
         HostElement {
             role: role.to_string(),
+            subrole: String::new(),
             title: title.to_string(),
             value: String::new(),
             focused: false,
@@ -1086,6 +1094,7 @@ mod node_budget_tests {
             .collect();
         let window = HostElement {
             role: "Window".to_string(),
+            subrole: String::new(),
             title: String::new(),
             value: String::new(),
             focused: false,
@@ -1100,6 +1109,7 @@ mod node_budget_tests {
                 leaf("Button", "Reload"),
                 HostElement {
                     role: "WebArea".to_string(),
+                    subrole: String::new(),
                     title: String::new(),
                     value: String::new(),
                     focused: false,
@@ -1130,6 +1140,7 @@ mod node_budget_tests {
     fn truncate_nodes_with_tiny_budget_stops_early_no_stubs() {
         let window = HostElement {
             role: "Window".to_string(),
+            subrole: String::new(),
             title: String::new(),
             value: String::new(),
             focused: false,

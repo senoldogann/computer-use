@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from computeruse.orchestrator.schemas import Action, ActivateApp
+from computeruse.orchestrator.schemas import Action, ActivateApp, CallTool
 from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition
 from computeruse.slug import ascii_slug
 
@@ -250,6 +250,7 @@ _SEMANTIC_KEYS: frozenset[str] = frozenset(
         "click_count",
         "skill_id",
         "app",
+        "tool",
     }
 )
 
@@ -268,7 +269,22 @@ def _semantic_params(action: Action) -> str:
     data.pop("type", None)
     kept = {k: data[k] for k in _SEMANTIC_KEYS if k in data and k not in _COORDINATE_KEYS}
     rendered: list[str] = []
+    if isinstance(action, CallTool):
+        rendered.append(f"tool={action.tool}")
+        if "code" in action.arguments:
+            code = str(action.arguments["code"])
+            calls = re.findall(r"\b(click|typeText|pressKey|drag|setValue|scroll|navigate)\s*\(\s*['\"]?([^'\"\)\n]+)", code)
+            if calls:
+                sig_calls = ";".join(f"{m}:{_abstract_dynamic(t.strip())}" for m, t in calls[:4])
+                rendered.append(f"calls={sig_calls}")
+            else:
+                rendered.append(f"code_len={len(code)}")
+        elif action.arguments:
+            sorted_args = sorted((k, _abstract_dynamic(str(v)[:40])) for k, v in action.arguments.items() if k not in _COORDINATE_KEYS)
+            rendered.append(f"args={sorted_args}")
     for key in sorted(kept):
+        if key == "tool":
+            continue
         value = kept[key]
         if isinstance(value, str):
             value = _abstract_dynamic(value)

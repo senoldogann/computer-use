@@ -46,7 +46,15 @@ from typing import Final, Literal, cast
 
 from pydantic import BaseModel, Field
 
-from computeruse.orchestrator.schemas import Action, CallTool, ClipboardPaste, TypeText
+from computeruse.orchestrator.schemas import (
+    Action,
+    CallTool,
+    ClipboardPaste,
+    MouseClick,
+    MouseDrag,
+    PressHotkey,
+    TypeText,
+)
 from computeruse.security.autonomy import (
     DESTRUCTIVE_FAMILIES,
     SHELL_FAMILY,
@@ -193,15 +201,35 @@ def action_verbs(action: Action, *, sub_goal: str, target_label: str | None) -> 
     classifier's separate rule for them: ``rm -rf`` is not a verb a button
     shows, and delegating it is a different decision from delegating deletion.
     """
-    subject = sub_goal.lower()
-    if target_label:
-        subject = f"{subject} {target_label}".lower()
-    if isinstance(action, CallTool):
-        subject = f"{subject} {action.tool}".lower()
-    words = intent_words(subject)
-    found = {
-        family for family, markers in DESTRUCTIVE_FAMILIES.items() if words & markers
-    }
+    found: set[str] = set()
+
+    # Destructive shortcuts (e.g. Cmd+Backspace or Cmd+Delete)
+    if isinstance(action, PressHotkey):
+        is_destructive_key = (
+            action.key.lower() in {"delete", "backspace"}
+            and any(m in action.modifiers for m in ("command", "control"))
+        )
+        if is_destructive_key:
+            found.add("delete")
+
+    # For pointer actions (clicks/drags), verbs come strictly from the target control
+    # rather than the model's unverified freeform sub_goal narration.
+    if isinstance(action, (MouseClick, MouseDrag)):
+        if target_label:
+            words = intent_words(target_label.lower())
+            for family, markers in DESTRUCTIVE_FAMILIES.items():
+                if words & markers:
+                    found.add(family)
+    else:
+        subject = sub_goal.lower()
+        if target_label:
+            subject = f"{subject} {target_label}".lower()
+        if isinstance(action, CallTool):
+            subject = f"{subject} {action.tool}".lower()
+        words = intent_words(subject)
+        for family, markers in DESTRUCTIVE_FAMILIES.items():
+            if words & markers:
+                found.add(family)
     if isinstance(action, (TypeText, ClipboardPaste, CallTool)):
         # The payload is inspected for command words the same way the guard
         # inspects it; a grant for "shell" is what covers those.

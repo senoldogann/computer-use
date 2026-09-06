@@ -477,6 +477,7 @@ class Agent:
             self._config.socket_path,
             connect_retries=self._config.connect_retries,
             recover=self._config.driver_recover,
+            recover_unresponsive=self._config.driver_recover,
         ) as client:
             # OBSERVE precondition: when the caller named a specific app,
             # bring it forward before any probe — otherwise the focused
