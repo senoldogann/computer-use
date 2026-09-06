@@ -86,6 +86,7 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.mission import (
     DEFAULT_MAX_ATTEMPTS,
+    Mission,
     MissionStore,
     mission_blocked,
     mission_finished,
@@ -971,6 +972,11 @@ def _run_autonomous_session(
     # execute() of the same run — run_autonomously strictly pairs one propose
     # with its execute, so a plain holder is enough: no queue, no lookup.
     pending_claim: dict[str, ClaimedTask | None] = {"claim": None}
+    # The mission this run resumes, when propose() picked unfinished work.
+    # Same holder pattern and the same guarantee: one propose, one execute.
+    # Carrying the record itself (not its id) is what stops the resumed run
+    # from opening a *second* mission for work that already has one.
+    pending_mission: dict[str, Mission | None] = {"mission": None}
     # Operator orders handled this session. A freshly distilled skill carries
     # the goal's exact text as its description, so without this the next
     # propose() would re-run the order through the "unproven" step — and on a
@@ -1057,8 +1063,22 @@ def _run_autonomous_session(
         # The mission is opened *before* the run, so a session killed
         # mid-action still leaves a record that this work was started and how
         # far it got. Its attempt is spent here for the same reason.
+        # Resuming means spending that attempt on the mission that already
+        # exists. Opening a new one for work propose() found in the store made
+        # the record unbounded: the original stayed at one attempt forever, so
+        # ``resumable`` re-proposed it every session while each session filed
+        # another timestamped copy. Measured on one goal: three missions
+        # (132119, 142119, 142120), an attempt ceiling of three that nothing
+        # ever reached, and the sub-goal progress each run recorded written to
+        # a record the next run did not read.
+        resumed = pending_mission["mission"]
+        pending_mission["mission"] = None
         mission = mission_started(
-            new_mission(goal=proposal.goal, app=proposal.app, plan=None, now=now_utc()),
+            resumed
+            if resumed is not None
+            else new_mission(
+                goal=proposal.goal, app=proposal.app, plan=None, now=now_utc()
+            ),
             now_utc(),
         )
         missions.save(mission)
@@ -1219,6 +1239,7 @@ def _run_autonomous_session(
         for mission in open_work:
             if mission.goal in waiting:
                 continue
+            pending_mission["mission"] = mission
             return GoalProposal(
                 goal=remaining_goal(mission),
                 app=mission.app,

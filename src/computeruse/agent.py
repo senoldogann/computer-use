@@ -451,6 +451,10 @@ class Agent:
                     description=trajectory.description,
                     steps=trajectory.steps,
                     step_descriptions=trajectory.step_descriptions,
+                    # Part of the flow signature, so the episode has to carry
+                    # it: dropping it here would make the stored signature and
+                    # the recomputed one disagree, and de-dup joins on that.
+                    step_targets=trajectory.step_targets,
                     outcome=outcome,
                     retrospective=retrospective,
                     # The join key to this run's UsageRecord: without it a

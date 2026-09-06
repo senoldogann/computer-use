@@ -100,6 +100,7 @@ from computeruse.skills.registry import RelevanceMatch
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.tools import WebError, fetch_page
 from computeruse.vision.ax import (
+    element_identity,
     summaries_to_image_space,
     summaries_within,
     summary_covering,
@@ -689,6 +690,32 @@ def target_element_label(action: Action, observation: Observation) -> str | None
     return summary_label(line)
 
 
+def target_element_identity(action: Action, observation: Observation) -> str:
+    """The accessibility identity of the element a positional action hits (pure).
+
+    :func:`target_element_label` answers "what would pressing this do", for the
+    safety guard. This answers "which control was this", for memory: the flow
+    signature drops coordinates so UI drift cannot fork one workflow into many
+    skills, and that left it unable to tell two workflows of the same *shape*
+    apart. ``Button "Save"`` and ``Button "Delete"`` are what makes "save a
+    draft" a different flow from "delete a draft".
+
+    Reads the same logical-point summaries and the same target point as the
+    label does, so the two always describe the same element.
+
+    ``""`` — not ``None`` — when nothing is known, because the signature treats
+    an unknown target as "this step says nothing about identity" and must not
+    be handed a sentinel it would hash.
+    """
+    target = target_point_of(action)
+    if target is None:
+        return ""
+    line = summary_covering(observation.raw_ui_elements, target.x, target.y)
+    if line is None:
+        return ""
+    return element_identity(line) or ""
+
+
 def verification_region(target: Point, *, size: float = 48.0) -> Rect:
     """A square region (logical points) centred on an action's target.
 
@@ -1219,6 +1246,15 @@ class OodaRunner:
         # runner never leaks history between goals.
         self._executed: list[Action] = []
         self._sub_goals: list[str] = []
+        # Accessibility identity of what each executed step acted on, aligned
+        # with ``_executed``. Recorded per step rather than recomputed later
+        # because the answer only exists while that step's observation is the
+        # current one — the screen has moved on by the time the run ends.
+        self._step_targets: list[str] = []
+        # The identity the action now being actuated aimed at, read from the
+        # pre-action observation. Reset per action so a tool call can never
+        # inherit the previous click's target.
+        self._acted_target: str = ""
         # The skill mounted by RETRIEVE in the current run (Law 3.2).
         self._skill: SkillDefinition | None = None
         self._working_app: str | None = None
@@ -1284,6 +1320,8 @@ class OodaRunner:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
         self._executed = []
         self._sub_goals = []
+        self._step_targets = []
+        self._acted_target = ""
         self._fresh_ax = None
         self._skill = None
         self._playbook = None
@@ -1725,6 +1763,11 @@ class OodaRunner:
         # the flow signature (every workflow would end with "finish").
         self._executed.append(outcome.action)
         self._sub_goals.append(decision.sub_goal or outcome.step_label)
+        # Only a physical action has a target on screen; a tool call or a wait
+        # contributes an empty identity, which the signature ignores entirely.
+        self._step_targets.append(
+            self._acted_target if outcome.route == "physical" else ""
+        )
         if outcome.route == "physical":
             # Live step visibility: a real run takes seconds per LLM decision,
             # and a silent terminal reads as "nothing is happening". Log every
@@ -1836,6 +1879,7 @@ class OodaRunner:
         a contradiction has already raised by then.
         """
         expectation = expectation_for(action)
+        self._acted_target = ""
         # The quiet path is tried BEFORE the focus gate, not after. That gate
         # exists because a synthetic click goes to whatever is frontmost, so it
         # brings the target app forward first — which is precisely what the
@@ -1876,6 +1920,10 @@ class OodaRunner:
         before_ui = self._observation.raw_ui_elements
         before_content = self._observation.content
         before_window = self._observation.window
+        # Read *before* the host is touched: afterwards the control may have
+        # moved, been replaced, or taken the screen with it. This is the only
+        # moment the answer to "which element is this action aimed at" exists.
+        self._acted_target = target_element_identity(action, self._observation)
 
         if not quiet:
             self._execute_physical(action)
@@ -2802,6 +2850,7 @@ class OodaRunner:
                 description=state.goal,
                 steps=tuple(self._executed),
                 step_descriptions=tuple(self._sub_goals),
+                step_targets=tuple(self._step_targets),
             ),
             outcome,
             retrospective,

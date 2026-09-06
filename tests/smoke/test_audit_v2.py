@@ -107,7 +107,9 @@ def test_known_signatures_reads_only_signature_field(tmp_path: Path, caplog: pyt
     # A second file with an intact signature but a corrupt *body* (steps are
     # garbage) — full deserialization would reject it; the light read must not.
     (tmp_path / "z-partial.json").write_text(
-        json.dumps({"signature": "flow.second", "steps": "not-a-list"}),
+        json.dumps(
+            {"signature": "flow.second", "steps": "not-a-list", "outcome": "success"}
+        ),
         encoding="utf-8",
     )
     # A third file that is not JSON at all: skipped with a warning (G4).
@@ -116,6 +118,49 @@ def test_known_signatures_reads_only_signature_field(tmp_path: Path, caplog: pyt
         signatures = store.known_signatures()
     assert signatures == {episode.signature, "flow.second"}
     assert any("skipping unreadable episode" in record.message for record in caplog.records)
+
+
+def test_a_failed_run_does_not_block_the_run_that_finally_works(tmp_path: Path) -> None:
+    """De-dup counts successes, not attempts.
+
+    Every terminal run leaves an episode, failures included (Law 4.1). While
+    ``known_signatures`` returned all of them, a flow that failed once was
+    filed as "already known" — so the later run that finally got it right came
+    back ``duplicate`` from the distiller and never became a skill. The store
+    learned nothing precisely from the workflows hard enough to fail first.
+    """
+    store = EpisodicStore(tmp_path)
+    steps = (MouseClick(type="mouse_click", x=1, y=1),)
+    failed = episode_from_trace(
+        app="Numbers", description="d", steps=steps, outcome="failure"
+    )
+    store.record(failed)
+    assert store.known_signatures() == set(), (
+        "a failed run's signature blocks the successful re-run from distilling"
+    )
+
+    # A finish the completion auditor never accepted is excluded for the same
+    # reason it is excluded from distillation: nothing confirmed it happened.
+    forced = episode_from_trace(
+        app="Numbers",
+        description="d",
+        steps=steps,
+        outcome="success",
+        forced_completion=True,
+        episode_id="numbers.forced",
+    )
+    store.record(forced)
+    assert store.known_signatures() == set()
+
+    verified = episode_from_trace(
+        app="Numbers",
+        description="d",
+        steps=steps,
+        outcome="success",
+        episode_id="numbers.verified",
+    )
+    store.record(verified)
+    assert store.known_signatures() == {verified.signature}
 
 
 # --- G5: the monitor's sliding window is bounded (deque, not pop(0)) --------

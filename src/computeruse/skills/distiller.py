@@ -28,6 +28,12 @@ class Trajectory:
     steps: tuple[Action, ...]
     tags: tuple[str, ...] = ()
     step_descriptions: tuple[str, ...] = ()
+    #: Accessibility identity of the element each step acted on, positionally
+    #: aligned with ``steps``; ``""`` where the run could not tell. This is the
+    #: *only* run-stable answer to "what did the click hit" — coordinates drift
+    #: and the step description is the model's prose — so it is what keeps two
+    #: different workflows from sharing one signature (see :func:`signature_of`).
+    step_targets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -86,15 +92,33 @@ def signature_of(trajectory: Trajectory) -> str:
     operands (typed or pasted text) and natural-language step descriptions
     (intent) vary across runs of one parametric workflow, so they are excluded
     from the hash.
+
+    Dropping the coordinates left the hash with nothing to say about *what* a
+    click hit, and the action sequence alone does not distinguish two workflows
+    that happen to have the same shape. Measured: "save a draft" and "delete a
+    draft" — a click into the document, then a click on a toolbar button — hash
+    identically, so the second is filed as a duplicate of the first and never
+    becomes a skill. ``step_targets`` is the missing witness: the accessibility
+    identity (``Button "Save"``) of the element each step acted on, which is
+    stable across runs of one workflow in a way a pixel position is not.
+
+    A step whose target is unknown contributes no ``target`` key at all rather
+    than an empty one, so a trajectory recorded without accessibility data
+    hashes exactly as it did before this field existed — old episodes on disk
+    keep the signature they were stored with, and de-dup against them still
+    works.
     """
+    targets = trajectory.step_targets
     flow: list[dict[str, str]] = []
-    for step in trajectory.steps:
-        flow.append(
-            {
-                "type": step.type,
-                "params": _semantic_params(step),
-            }
-        )
+    for index, step in enumerate(trajectory.steps):
+        entry: dict[str, str] = {
+            "type": step.type,
+            "params": _semantic_params(step),
+        }
+        target = targets[index] if index < len(targets) else ""
+        if target:
+            entry["target"] = _abstract_dynamic(target)
+        flow.append(entry)
     payload = json.dumps(
         {"app": trajectory.app, "flow": flow}, sort_keys=True, separators=(",", ":")
     )

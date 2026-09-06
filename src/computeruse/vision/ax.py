@@ -423,6 +423,35 @@ def summary_label(summary: str) -> str | None:
     return label if label and label != "(untitled)" else None
 
 
+#: Greedy on the title for the same reason :data:`_SUMMARY_LABEL` is, so the
+#: two never disagree about where an element's title ends.
+_SUMMARY_IDENTITY: Final = re.compile(r'^(\S+ ".*") at \(')
+
+
+def element_identity(summary: str) -> str | None:
+    """The run-stable identity of one summarised element (pure).
+
+    The line reads ``Button "Save" at (100,200) 80x24 value="x" (focused)``;
+    this returns ``Button "Save"``. Everything the regex drops is the part that
+    moves between two runs of the same workflow: the rect drifts when a window
+    is repositioned, ``value`` is the field's contents rather than the field,
+    and the focus marker follows whatever the user last clicked.
+
+    What is left is what makes a click on Save a different act from a click on
+    Delete. The de-duplication signature deliberately excludes coordinates
+    (:func:`computeruse.skills.distiller.signature_of`), and without an identity
+    to put in their place two clicks are two clicks: "save the draft" and
+    "delete the draft" — both a click into the document then a click on a
+    toolbar button — hashed identically, so the second was filed as a duplicate
+    of the first and never learned.
+
+    ``None`` when the line carries no identity fragment (the truncation note),
+    which callers must read as "no information", never as "nothing was there".
+    """
+    match = _SUMMARY_IDENTITY.match(summary)
+    return match.group(1) if match is not None else None
+
+
 def summaries_within(summaries: tuple[str, ...], frame: Rect) -> tuple[str, ...]:
     """Keep only the elements whose centre lies on a given display (pure).
 

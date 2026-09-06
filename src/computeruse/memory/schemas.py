@@ -29,6 +29,15 @@ class Episode(BaseModel):
     step_descriptions: tuple[str, ...] = Field(
         default=(), description="Per-step intent descriptions."
     )
+    # Accessibility identity of the element each step acted on, aligned with
+    # ``steps``. Part of the flow signature, so it has to be persisted: an
+    # episode that dropped it would recompute a *different* signature than the
+    # one it was stored with, and de-dup joins the two tiers on that value.
+    # Defaulted for the same reason ``run_id`` is — records written before this
+    # field existed must keep validating, and they hash exactly as they did.
+    step_targets: tuple[str, ...] = Field(
+        default=(), description="Per-step accessibility target identities."
+    )
     outcome: EpisodeOutcome
     # A short retrospective: why it succeeded or what went wrong (Law 4.1's
     # "failure retrospectives"). Optional for compactness on success paths.
