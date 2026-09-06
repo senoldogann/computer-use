@@ -196,7 +196,11 @@ def test_a_quiet_predicate_does_not_silence_the_shake_monitor() -> None:
 
     def cursor() -> CursorSample:
         # Alternating x: the reversal pattern a hand shaking the mouse makes.
-        sample = CursorSample(x=100 if len(samples) % 2 else 0, y=0, time=float(len(samples)))
+        # Twenty milliseconds apart, because the detector now requires the
+        # burst to be *rapid* — a reversal per second is someone working.
+        sample = CursorSample(
+            x=100 if len(samples) % 2 else 0, y=0, time=len(samples) * 0.02
+        )
         samples.append(sample)
         return sample
 
@@ -209,3 +213,52 @@ def test_a_quiet_predicate_does_not_silence_the_shake_monitor() -> None:
 
     assert samples, "the monitor must be polled even when the predicate is quiet"
     assert tripped, "a shaken cursor must trip the switch"
+
+
+# --- the contract the detector documents, now actually enforced -------------
+
+
+def test_reversals_spread_over_minutes_are_not_a_shake() -> None:
+    """"Rapid" is part of the promise, and it was never checked.
+
+    ``CursorSample.time`` was carried and never read, so fourteen reversals
+    spread across thirteen minutes read exactly like a burst. Someone nudging
+    their mouse now and then over a long session would have had the machine
+    taken back from the agent for no reason.
+    """
+    slow = [
+        CursorSample(x=100.0 if i % 2 else 0.0, y=0.0, time=float(i * 60))
+        for i in range(14)
+    ]
+    assert not is_mouse_shake(slow, min_reversals=6)
+
+
+def test_an_agent_clicking_between_two_targets_is_not_a_shake() -> None:
+    """The false positive that would have made this channel unusable.
+
+    An agent alternating between two controls a few seconds apart produces a
+    clean reversal every step. Wired up against the old detector, the run
+    would have killed itself doing ordinary work — which is a worse failure
+    than the channel being switched off, and is why fixing the detector comes
+    before wiring it.
+    """
+    clicks = [
+        CursorSample(x=200.0 if i % 2 else 900.0, y=400.0, time=float(i * 3))
+        for i in range(14)
+    ]
+    assert not is_mouse_shake(clicks, min_reversals=6)
+
+
+def test_a_fast_traverse_that_ends_somewhere_else_is_not_a_shake() -> None:
+    """"Bounded" is the other half: a shake comes back, a reach does not.
+
+    Reversals alone cannot tell a hand jiggling in place from one crossing the
+    desk with a wobble, so the net displacement is measured against the
+    distance actually travelled.
+    """
+    traverse: list[CursorSample] = []
+    x = 0.0
+    for i in range(20):
+        x += 100.0 if i % 2 == 0 else -20.0  # wobbles, but marches right
+        traverse.append(CursorSample(x=x, y=0.0, time=i * 0.02))
+    assert not is_mouse_shake(traverse, min_reversals=6)

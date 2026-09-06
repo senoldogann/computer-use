@@ -28,24 +28,69 @@ class CursorSample:
     time: float
 
 
-def is_mouse_shake(samples: Sequence[CursorSample], *, min_reversals: int = 6) -> bool:
+#: How long the burst may span. A human shaking the mouse does it in well
+#: under a second; anything slower is someone using their computer.
+SHAKE_WINDOW_S: Final[float] = 1.0
+
+#: How far the cursor may end up from where it started, as a fraction of the
+#: distance it actually travelled. A shake comes back; a purposeful traverse
+#: does not. Generous, because a real shake drifts across the desk.
+SHAKE_MAX_NET_RATIO: Final[float] = 0.34
+
+
+def is_mouse_shake(
+    samples: Sequence[CursorSample],
+    *,
+    min_reversals: int = 6,
+    window_s: float = SHAKE_WINDOW_S,
+    max_net_ratio: float = SHAKE_MAX_NET_RATIO,
+) -> bool:
     """Pure detector: is a rapid, bounded back-and-forth motion present?
 
     A human taking over by forcing the mouse side to side produces a *burst of
     direction reversals* within a short window while the net displacement stays
     small. A false positive is an escape hatch tripped for the user — control
     is yanked away mid-workflow — so false positives (a few reversals from
-    normal work) must be rare: we require a generous reversal count all
-    happening inside the window.
+    normal work) must be rare.
+
+    All three clauses of that sentence are now actually checked. Two of them
+    were not: ``CursorSample.time`` was carried and never read, and the net
+    displacement was never computed. Measured against the old code — fourteen
+    reversals spread over *thirteen minutes* returned True, and so did an
+    agent clicking alternately between two targets three seconds apart, which
+    is ordinary work. A kill switch that trips on its own operator is worse
+    than one that is switched off, which is the state this channel was
+    actually in.
 
     Args:
         samples: timestamped cursor positions, oldest first.
         min_reversals: number of sign changes that qualifies as a shake.
+        window_s: reversals only count inside this span, measured back from
+            the newest sample. This is the "rapid" in the contract.
+        max_net_ratio: how far the cursor may finish from where it started, as
+            a fraction of the path it travelled. This is the "bounded".
 
     Returns:
-        True if the trace shows enough oscillatory reversals.
+        True if the trace shows enough oscillatory reversals, quickly, without
+        going anywhere.
     """
     if len(samples) < min_reversals + 1:
+        return False
+    # Only the tail matters: a burst is recent by definition, and letting old
+    # samples contribute is how minutes of ordinary work added up to a shake.
+    newest = samples[-1].time
+    samples = [sample for sample in samples if newest - sample.time <= window_s]
+    if len(samples) < min_reversals + 1:
+        return False
+    travelled = sum(
+        abs(samples[i + 1].x - samples[i].x) + abs(samples[i + 1].y - samples[i].y)
+        for i in range(len(samples) - 1)
+    )
+    if travelled <= 0.0:
+        return False
+    net = abs(samples[-1].x - samples[0].x) + abs(samples[-1].y - samples[0].y)
+    if net > max_net_ratio * travelled:
+        # It went somewhere. Someone reaching across the screen reverses too.
         return False
 
     # Direction along x and y is checked separately; a shake on either axis
