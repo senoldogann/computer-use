@@ -6,75 +6,73 @@
 <title>Computer Use</title>
 <style>
     :root {
-    /* iOS 18 / visionOS Liquid Glass Palette */
-    --glass-base: rgba(20, 20, 26, 0.58);
-    --glass-panel: rgba(28, 28, 38, 0.62);
-    --glass-card: rgba(255, 255, 255, 0.055);
-    --glass-card-hover: rgba(255, 255, 255, 0.095);
-    --glass-card-active: rgba(255, 255, 255, 0.14);
+    /* Synara Warm Dark Obsidian Design Tokens */
+    --synara-bg: #121110;
+    --synara-surface: #1B1A19;
+    --synara-elevated: #242322;
+    --synara-hover: #252422;
+    --synara-border: #252422;
+    --synara-border-subtle: #1C1B1A;
+    --synara-border-highlight: #383632;
+
+    --synara-text-primary: #F5F4F2;
+    --synara-text-secondary: #AAA8A3;
+    --synara-text-tertiary: #75736E;
+
+    --synara-accent: #FFB17F;
+    --synara-accent-hover: #FFC49E;
+    --synara-accent-glow: rgba(255, 177, 127, 0.28);
+    --synara-accent-subtle: rgba(255, 177, 127, 0.12);
+
+    /* System Mappings */
+    --accent: #FFB17F;
+    --accent-hover: #FFC49E;
+    --accent-glow: rgba(255, 177, 127, 0.28);
+    --accent-gradient: linear-gradient(180deg, #FFB17F 0%, #E69866 100%);
     
-    --glass-border: rgba(255, 255, 255, 0.16);
-    --glass-border-light: rgba(255, 255, 255, 0.28);
-    --glass-border-subtle: rgba(255, 255, 255, 0.08);
+    --bg-base: #121110;
+    --surface: #1B1A19;
+    --surface-hover: #252422;
+    --surface-active: #242322;
+    --border: #252422;
+    --border-highlight: #383632;
+    --border-subtle: #1C1B1A;
 
-    /* Apple Specular Edge Light & Depth */
-    --specular-rim: inset 0 1.5px 1.5px 0 rgba(255, 255, 255, 0.45);
-    --specular-deep: inset 0 -1.5px 1.5px 0 rgba(0, 0, 0, 0.35);
-    --liquid-glow: 0 24px 64px rgba(0, 0, 0, 0.60), 0 0 1px 1px rgba(255, 255, 255, 0.12);
+    --text-primary: #F5F4F2;
+    --text-secondary: #AAA8A3;
+    --text-tertiary: #75736E;
 
-    /* Cohesive Apple macOS & visionOS Liquid Glass Palette */
-    --accent: #007AFF;                   /* Apple System Blue */
-    --accent-hover: #268FFF;
-    --accent-glow: rgba(0, 122, 255, 0.35);
-    --accent-gradient: linear-gradient(180deg, #007AFF 0%, #0062D2 100%);
-    
-    --bg-base: transparent;
-    --surface: rgba(255, 255, 255, 0.05);
-    --surface-hover: rgba(255, 255, 255, 0.09);
-    --surface-active: rgba(255, 255, 255, 0.14);
-    --border: rgba(255, 255, 255, 0.12);
-    --border-highlight: rgba(255, 255, 255, 0.24);
-    --border-subtle: rgba(255, 255, 255, 0.07);
-
-    --text-primary: #FFFFFF;
-    --text-secondary: rgba(235, 235, 245, 0.75);
-    --text-tertiary: rgba(235, 235, 245, 0.45);
-
-    --success: #30D158;                  /* Apple Emerald */
-    --success-glow: rgba(48, 209, 88, 0.35);
-    --warning: #FFD60A;                  /* Apple Vivid Amber */
-    --warning-glow: rgba(255, 214, 10, 0.35);
-    --error: #FF453A;                    /* Apple Red */
-    --error-glow: rgba(255, 69, 58, 0.35);
-    --purple: #007AFF;                   /* Cohesive Accent */
-    --cyan: #5AC8FA;                     /* Soft Apple Sky */
+    --success: #34D399;
+    --success-glow: rgba(52, 211, 153, 0.25);
+    --warning: #FBBF24;
+    --warning-glow: rgba(251, 191, 36, 0.25);
+    --error: #F87171;
+    --error-glow: rgba(248, 113, 113, 0.25);
+    --purple: #FFB17F;
+    --cyan: #FFB17F;
 
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 20px;
     --radius-pill: 999px;
   }
-
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
   html, body { height: 100%; width: 100%; }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
-    color: var(--text-primary);
-    background: var(--glass-base) !important;
-    backdrop-filter: blur(50px) saturate(210%) contrast(108%);
-    -webkit-backdrop-filter: blur(50px) saturate(210%);
-    border-radius: 22px;
+    font-family: -apple-system, BlinkMacSystemFont, "Geist", "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+    color: var(--synara-text-primary);
+    background: #121110 !important;
+    border-radius: 20px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
     -webkit-user-select: none;
     user-select: none;
     position: relative;
-    border: 0.75px solid var(--glass-border);
-    box-shadow: var(--specular-rim), var(--specular-deep), var(--liquid-glow);
+    border: 0.75px solid #252422;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.75), 0 0 1px 1px rgba(255, 177, 127, 0.12);
   }
-
   body::after {
     content: "";
     position: absolute;
@@ -1655,81 +1653,277 @@
     color: #FFFFFF;
   }
 
-  /* Toolbar Glass Override */
+  /* Synara Header Toolbar */
   .toolbar {
-    background: rgba(255, 255, 255, 0.04) !important;
-    backdrop-filter: blur(25px);
-    -webkit-backdrop-filter: blur(25px);
-    border-bottom: 0.5px solid var(--glass-border) !important;
+    background: #121110 !important;
+    border-bottom: 0.5px solid #252422 !important;
+  }
+  .mark {
+    background: linear-gradient(135deg, #FFB17F 0%, #E69866 100%) !important;
+  }
+  .mark svg {
+    color: #121110 !important;
+  }
+  .app-name {
+    color: #F5F4F2 !important;
+    font-weight: 600;
+  }
+  .app-subtitle {
+    color: #AAA8A3 !important;
+  }
+  .status-pill, .stat-pill {
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    color: #AAA8A3 !important;
+  }
+  .status-text {
+    color: #AAA8A3 !important;
+  }
+  .icon-btn {
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    color: #AAA8A3 !important;
+  }
+  .icon-btn:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+    border-color: #383632 !important;
   }
 
-  /* Floating Segmented Tab Bar */
+  /* Synara Segmented Tab Bar */
   .tab-bar {
-    background: rgba(255, 255, 255, 0.05) !important;
+    background: #1B1A19 !important;
     margin: 8px 12px 6px 12px !important;
-    padding: 4px !important;
+    padding: 3.5px !important;
     gap: 4px !important;
     border-radius: var(--radius-pill) !important;
-    border: 0.5px solid var(--glass-border) !important;
-    backdrop-filter: blur(25px);
-    -webkit-backdrop-filter: blur(25px);
-    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12), 0 4px 16px rgba(0, 0, 0, 0.2) !important;
+    border: 0.5px solid #252422 !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
   }
   .tab-btn {
     border-radius: var(--radius-pill) !important;
     border: 0.5px solid transparent !important;
     font-size: 11px !important;
-    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+    color: #AAA8A3 !important;
+    transition: all 0.15s ease !important;
   }
   .tab-btn:hover {
-    background: rgba(255, 255, 255, 0.08) !important;
-    color: #FFF !important;
+    background: #252422 !important;
+    color: #F5F4F2 !important;
   }
   .tab-btn.active {
-    background: rgba(255, 255, 255, 0.18) !important;
-    color: #FFFFFF !important;
-    border-color: rgba(255, 255, 255, 0.26) !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), inset 0 1px 1.5px rgba(255, 255, 255, 0.45) !important;
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+    border-color: #383632 !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35) !important;
   }
 
-  /* Footer Glass */
+  /* Synara Telemetry Subhead */
+  .telemetry-strip {
+    background: #121110 !important;
+    border-bottom: 0.5px solid #252422 !important;
+    color: #AAA8A3 !important;
+  }
+
+  /* Synara Cards & Containers */
+  .metric-card, .action-metrics-card, .history-card, .mcp-item, .skill-card {
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    color: #F5F4F2 !important;
+  }
+  .metric-card:hover, .history-card:hover, .mcp-item:hover, .skill-card:hover {
+    background: #252422 !important;
+    border-color: #383632 !important;
+  }
+  .metric-num {
+    color: #F5F4F2 !important;
+  }
+  .metric-lbl, .action-metric-label {
+    color: #AAA8A3 !important;
+  }
+  .action-metric-value {
+    color: #F5F4F2 !important;
+  }
+  .action-metric-row:not(:last-child) {
+    border-bottom: 0.5px solid #252422 !important;
+  }
+  .chip {
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    color: #AAA8A3 !important;
+  }
+  .chip:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+    border-color: #383632 !important;
+  }
+  .chip svg {
+    color: #FFB17F !important;
+  }
+
+  /* Step Feed & Live Log */
+  #log {
+    background: #121110 !important;
+  }
+  .step-card {
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    border-radius: 8px !important;
+    margin-bottom: 4px !important;
+  }
+  .step-card:hover {
+    background: #252422 !important;
+    border-color: #383632 !important;
+  }
+
+  /* Synara Footer & Inputs */
   footer {
-    background: rgba(255, 255, 255, 0.04) !important;
-    backdrop-filter: blur(25px);
-    -webkit-backdrop-filter: blur(25px);
-    border-top: 0.5px solid var(--glass-border) !important;
+    background: #121110 !important;
+    border-top: 0.5px solid #252422 !important;
   }
-
-  /* Input Liquid Glass Glow */
   .text-input, .search-input {
-    background: rgba(255, 255, 255, 0.06) !important;
-    border: 0.5px solid var(--glass-border) !important;
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
     border-radius: 10px !important;
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.08) !important;
-    color: #FFFFFF !important;
+    color: #F5F4F2 !important;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4) !important;
+  }
+  .text-input::placeholder, .search-input::placeholder {
+    color: #75736E !important;
   }
   .text-input:focus, .search-input:focus {
-    background: rgba(255, 255, 255, 0.09) !important;
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 12px var(--accent-glow), inset 0 1px 1px rgba(255, 255, 255, 0.2) !important;
+    background: #242322 !important;
+    border-color: #FFB17F !important;
+    box-shadow: 0 0 0 2px rgba(255, 177, 127, 0.25) !important;
   }
 
-  /* Primary Action Button Glass Glow */
+  /* Synara Signature CTA Button (#FFB17F with #121110 typography) */
   .btn-primary {
-    background: linear-gradient(180deg, #007AFF 0%, #0062D2 100%) !important;
-    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    background: linear-gradient(180deg, #FFB17F 0%, #E69866 100%) !important;
+    color: #121110 !important;
+    font-weight: 700 !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.3) !important;
     border-radius: 10px !important;
-    box-shadow: 0 4px 14px rgba(0, 122, 255, 0.35), inset 0 1px 1.5px rgba(255, 255, 255, 0.5) !important;
+    box-shadow: 0 3px 12px rgba(255, 177, 127, 0.35) !important;
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
   }
-  .btn-primary:hover {
-    box-shadow: 0 6px 20px var(--accent-glow), inset 0 1.5px 2px rgba(255, 255, 255, 0.6) !important;
-    transform: translateY(-1px);
+  .btn-primary span {
+    color: #121110 !important;
   }
-  .btn-primary:active {
-    transform: translateY(0);
+  .btn-primary svg {
+    stroke: #121110 !important;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #FFC49E 0%, #FFB17F 100%) !important;
+    box-shadow: 0 4px 18px rgba(255, 177, 127, 0.5) !important;
+  }
+  .kbd-badge {
+    background: rgba(18, 17, 16, 0.22) !important;
+    color: #121110 !important;
+    border: 0.5px solid rgba(18, 17, 16, 0.25) !important;
   }
 
+  /* Synara Control Toggles (Night & Day Contrast) */
+  .autonomy-toggle-btn.full {
+    background: #FFB17F !important;
+    color: #121110 !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    box-shadow: 0 2px 8px rgba(255, 177, 127, 0.4) !important;
+  }
+  .autonomy-toggle-btn.full .autonomy-icon svg { fill: #121110 !important; }
+
+  .autonomy-toggle-btn.guarded {
+    background: #1B1A19 !important;
+    color: #AAA8A3 !important;
+    border: 0.5px solid #252422 !important;
+    box-shadow: none !important;
+  }
+  .autonomy-toggle-btn.guarded .autonomy-icon svg { fill: #AAA8A3 !important; }
+  .autonomy-toggle-btn.guarded:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+  }
+
+  .mcp-toggle-btn.on {
+    background: #FFB17F !important;
+    color: #121110 !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    box-shadow: 0 2px 8px rgba(255, 177, 127, 0.4) !important;
+  }
+  .mcp-toggle-btn.on .mcp-icon svg { stroke: #121110 !important; }
+
+  .mcp-toggle-btn.off {
+    background: #1B1A19 !important;
+    color: #AAA8A3 !important;
+    border: 0.5px solid #252422 !important;
+    box-shadow: none !important;
+  }
+  .mcp-toggle-btn.off .mcp-icon svg { stroke: #AAA8A3 !important; }
+  .mcp-toggle-btn.off:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+  }
+
+  .trust-toggle-btn.on {
+    background: #34D399 !important;
+    color: #121110 !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+    box-shadow: 0 2px 8px rgba(52, 211, 153, 0.4) !important;
+  }
+  .trust-toggle-btn.on svg { stroke: #121110 !important; }
+
+  .trust-toggle-btn.off {
+    background: #1B1A19 !important;
+    color: #AAA8A3 !important;
+    border: 0.5px solid #252422 !important;
+    box-shadow: none !important;
+  }
+  .trust-toggle-btn.off svg { stroke: #AAA8A3 !important; }
+  .trust-toggle-btn.off:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+  }
+
+  .pos-toggle-btn {
+    background: #1B1A19 !important;
+    color: #AAA8A3 !important;
+    border: 0.5px solid #252422 !important;
+  }
+  .pos-toggle-btn:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+  }
+
+  .app-toggle-btn {
+    background: #1B1A19 !important;
+    color: #AAA8A3 !important;
+    border: 0.5px solid #252422 !important;
+  }
+  .app-toggle-btn.active {
+    background: #FFB17F !important;
+    color: #121110 !important;
+    border: 0.5px solid rgba(255, 255, 255, 0.35) !important;
+  }
+  .app-toggle-btn:hover {
+    background: #252422 !important;
+    color: #F5F4F2 !important;
+  }
+
+  .model-picker-pill {
+    background: #1B1A19 !important;
+    border: 0.5px solid #252422 !important;
+    color: #F5F4F2 !important;
+  }
+  .model-pill-icon {
+    color: #FFB17F !important;
+  }
+  .model-select {
+    color: #F5F4F2 !important;
+  }
+  .model-select option {
+    background: #1B1A19 !important;
+    color: #F5F4F2 !important;
+  }
 </style>
 </head>
 <body>
