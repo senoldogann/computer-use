@@ -445,10 +445,25 @@ class CuaReplEngine:
         end tell
     end tell
 end run"""
-        proc = subprocess.run(
-            ["osascript", "-e", script, "--", app_name, *path],
-            capture_output=True, text=True, timeout=3.0, check=False,
-        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", script, "--", app_name, *path],
+                capture_output=True, text=True, timeout=3.0, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # A timeout here is almost never a slow menu. System Events needs
+            # its own Automation consent — a different grant from the
+            # Accessibility one the driver already holds — and without it
+            # osascript blocks on a TCC prompt nobody is there to answer.
+            # Measured on this host: the call hung for the full timeout and
+            # said nothing about why, which reads as "that menu is not there"
+            # and sends the model hunting a menu that is sitting right in
+            # front of it.
+            raise RuntimeError(
+                f"selectMenuItem timed out: app={app_name!r}, path={path!r}. "
+                "System Events Automation consent is probably not granted "
+                "(System Settings > Privacy & Security > Automation)"
+            ) from exc
         if proc.returncode != 0:
             raise RuntimeError(
                 f"selectMenuItem failed: app={app_name!r}, path={path!r}, "
