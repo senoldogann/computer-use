@@ -1658,15 +1658,22 @@ fn pixel_icon(_mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
 /// (Law 6). The plane polygon is the exact shape of the SVG in menu.html
 /// (``M5 4.5 20 12 5 19.5 8.6 12z`` in 24-space) scaled ×1.5 into 36-space.
 fn icon_pixel(x: f64, y: f64) -> (u8, u8, u8, f64) {
-    const EMERALD: (u8, u8, u8) = (80, 165, 116);
-    // Paper-airplane outline (even-odd filled) in 36-space: nose at the
-    // right, wing tips top-left / bottom-left, fold at left-centre. Y grows
-    // *down* in bitmap pixels, matching the SVG's y-down viewBox.
-    const PLANE: [(f64, f64); 4] = [(7.5, 6.75), (30.0, 18.0), (7.5, 29.25), (12.9, 18.0)];
-    if in_polygon(x, y, &PLANE) {
-        (255, 255, 255, 1.0)
+    // Synara warm apricot squircle with obsidian dark cursor pointer
+    const APRICOT: (u8, u8, u8) = (255, 177, 127);
+    const OBSIDIAN: (u8, u8, u8) = (18, 17, 16);
+    const CURSOR: [(f64, f64); 7] = [
+        (10.0, 8.0),
+        (10.0, 26.0),
+        (15.0, 21.0),
+        (20.0, 27.0),
+        (23.0, 25.0),
+        (18.0, 19.0),
+        (25.0, 19.0),
+    ];
+    if in_polygon(x, y, &CURSOR) {
+        (OBSIDIAN.0, OBSIDIAN.1, OBSIDIAN.2, 1.0)
     } else if in_rrect(x, y, 2.0, 2.0, 33.0, 33.0, 8.0) {
-        (EMERALD.0, EMERALD.1, EMERALD.2, 1.0)
+        (APRICOT.0, APRICOT.1, APRICOT.2, 1.0)
     } else {
         (0, 0, 0, 0.0)
     }
@@ -1751,13 +1758,11 @@ mod tests {
 
     #[test]
     fn menu_icon_is_sea_blue_squircle_with_white_paper_airplane() {
-        // Nose of the plane (right-centre): white glyph on the squircle.
-        assert_eq!(icon_pixel(29.0, 18.0), (255, 255, 255, 1.0));
-        // Top wing tip: still inside the plane's outline.
-        assert_eq!(icon_pixel(9.0, 8.0), (255, 255, 255, 1.0));
-        // A squircle corner away from the glyph: emerald green #50A574 (80, 165, 116), opaque.
+        // Center of the cursor pointer: obsidian glyph on the squircle.
+        assert_eq!(icon_pixel(12.0, 14.0), (18, 17, 16, 1.0));
+        // A squircle corner away from the glyph: warm apricot #FFB17F (255, 177, 127), opaque.
         let (r, g, b, a) = icon_pixel(6.0, 30.0);
-        assert_eq!((r, g, b), (80, 165, 116));
+        assert_eq!((r, g, b), (255, 177, 127));
         assert_eq!(a, 1.0);
         // Outside the squircle (top-left corner): fully transparent.
         assert_eq!(icon_pixel(1.0, 1.0), (0, 0, 0, 0.0));

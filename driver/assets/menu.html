@@ -2538,6 +2538,59 @@
     transition: opacity 0.22s ease-out, transform 0.22s ease-out;
   }
 
+
+  /* Floating Glass Witness Lens Popover */
+  .witness-lens-popover {
+    position: absolute;
+    top: 50px;
+    right: 14px;
+    width: 310px;
+    background: rgba(27, 26, 25, 0.94);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 0.5px solid #383632;
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65);
+    z-index: 1000;
+    overflow: hidden;
+    animation: popoverFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .lens-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: #161514;
+    border-bottom: 0.5px solid #252422;
+  }
+  .lens-popover-header .lens-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11px;
+    font-weight: 650;
+    color: #F5F4F2;
+  }
+  .lens-close-btn {
+    background: transparent;
+    border: none;
+    color: #AAA8A3;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .lens-close-btn:hover {
+    color: #F5F4F2;
+    background: #252422;
+  }
+  .witness-lens-popover .lens-body {
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
 </style>
 </head>
 <body class="compact-mode">
@@ -2545,9 +2598,9 @@
   <!-- Header Bar -->
   <header class="toolbar">
     <div class="brand-group">
-      <div class="mark">
-        <svg viewBox="0 0 24 24" fill="currentColor">
-          <path d="M12 2C12.4 7.2 16.8 11.6 22 12C16.8 12.4 12.4 16.8 12 22C11.6 16.8 7.2 12.4 2 12C7.2 11.6 11.6 7.2 12 2Z"/>
+      <div class="mark" title="Computer Use Cursor">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="#121110" stroke="#121110" stroke-width="1.5" stroke-linejoin="round">
+          <polygon points="3 3 10.07 19.97 12.58 12.58 19.97 10.07 3 3"/>
         </svg>
       </div>
       <div class="brand-text">
@@ -2573,6 +2626,9 @@
         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         <span id="statElapsedVal">0s</span>
       </div>
+      <button class="icon-btn" id="lensHeaderBtn" title="Görsel Odak Lensi / Set-of-Marks Reticle" onclick="toggleWitnessLensModal()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2m10 0h2a2 2 0 0 1 2 2v2m0 10v2a2 2 0 0 1-2 2h-2m-10 0H5a2 2 0 0 1-2-2v-2"/></svg>
+      </button>
       <button class="icon-btn" id="copyBtn" title="Tüm logları kopyala / Copy session logs" onclick="copySessionLogs()">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -2631,29 +2687,7 @@
   <!-- TAB 1: Live Agent -->
   <main class="tab-pane active" id="tabLive">
 
-    <!-- Canlı Görsel Odak Lensi (Set-of-Marks & Reticle) -->
-    <div class="visual-witness-lens" id="visualWitnessLens">
-      <div class="lens-header" onclick="toggleWitnessLens()">
-        <div class="lens-title">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2m10 0h2a2 2 0 0 1 2 2v2m0 10v2a2 2 0 0 1-2 2h-2m-10 0H5a2 2 0 0 1-2-2v-2"/></svg>
-          <span>Görsel Odak Lensi</span>
-        </div>
-        <span class="lens-coords" id="lensCoords">(Hazır)</span>
-        <span class="lens-toggle-icon" id="lensChevron">▸</span>
-      </div>
-      <div class="lens-body" id="lensBody" style="display:none;">
-        <div class="lens-row">
-          <span class="lens-label">Aktif Hedef:</span>
-          <span class="lens-val" id="lensTargetInfo">Auto Focus (TextEdit / Chrome)</span>
-        </div>
-        <div class="lens-reticle-box">
-          <div class="reticle-target" id="reticleTarget">
-            <div class="reticle-crosshair"></div>
-            <span class="reticle-caption" id="reticleCaption">Fiziksel Eylem Koordinatı</span>
-          </div>
-        </div>
-      </div>
-    </div>
+
 
     <div id="log" role="log" aria-live="polite">
       <div class="empty-state" id="emptyHero">
@@ -2895,11 +2929,8 @@
     <div class="input-wrapper" id="composerWrapper">
       <!-- Compact Pill Bar Brand Header (visible only in compact-mode) -->
       <div class="compact-brand-group" id="compactBrandGroup">
-        <svg class="compact-asterisk" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFB17F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="12" y1="2" x2="12" y2="22"/>
-          <line x1="2" y1="12" x2="22" y2="12"/>
-          <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
-          <line x1="4.93" y1="19.07" x2="19.07" y2="4.93"/>
+        <svg class="compact-cursor-icon" width="16" height="16" viewBox="0 0 24 24" fill="#FFB17F" stroke="#FFB17F" stroke-width="1.5" stroke-linejoin="round">
+          <polygon points="3 3 10.07 19.97 12.58 12.58 19.97 10.07 3 3"/>
         </svg>
         <div class="compact-v-divider"></div>
       </div>
@@ -5129,6 +5160,14 @@
     });
   }
 
+  
+  window.toggleWitnessLensModal = function() {
+    var p = document.getElementById("witnessLensPopover");
+    if (!p) return;
+    var isHidden = p.style.display === "none" || !p.style.display;
+    p.style.display = isHidden ? "block" : "none";
+  };
+
   post({cmd:"ready"});
   post({cmd:"get_mcp"});
 })();
@@ -5151,5 +5190,33 @@
       </form>
     </div>
   </div>
+
+  <!-- Floating Glass Witness Lens Popover (Summonable anytime from header) -->
+  <div class="witness-lens-popover" id="witnessLensPopover" style="display:none;">
+    <div class="lens-popover-header">
+      <div class="lens-title">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#FFB17F" stroke-width="2.2"><circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2m10 0h2a2 2 0 0 1 2 2v2m0 10v2a2 2 0 0 1-2 2h-2m-10 0H5a2 2 0 0 1-2-2v-2"/></svg>
+        <span>Görsel Odak & Hassasiyet Lensi</span>
+      </div>
+      <button class="lens-close-btn" onclick="toggleWitnessLensModal()">✕</button>
+    </div>
+    <div class="lens-body">
+      <div class="lens-row">
+        <span class="lens-label">Aktif Hedef:</span>
+        <span class="lens-val" id="lensTargetInfo">Auto Focus (TextEdit / Chrome)</span>
+      </div>
+      <div class="lens-row">
+        <span class="lens-label">Koordinat:</span>
+        <span class="lens-val" id="lensCoords">(Hazır)</span>
+      </div>
+      <div class="lens-reticle-box">
+        <div class="reticle-target" id="reticleTarget">
+          <div class="reticle-crosshair"></div>
+          <span class="reticle-caption" id="reticleCaption">Fiziksel Eylem Koordinatı</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>
