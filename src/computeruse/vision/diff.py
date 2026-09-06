@@ -64,6 +64,19 @@ class Verification:
 
     @property
     def changed(self) -> bool:
+        """Did anything at all move in the region?
+
+        Deliberately merges CHANGED and NOISE, and is therefore the *wrong*
+        question for action verification. :func:`verdict` promises callers they
+        may treat noise as changed or not "per their policy"; this property
+        takes that choice away, and the verification path took it as a
+        confirmation — so a region wholly replaced by an animation vouched for
+        a click that never landed, outranking even a direct denial.
+
+        Verification switches on ``verdict.kind`` instead. Use this only where
+        the honest question really is "did the pixels move", never as evidence
+        that a particular action caused the movement.
+        """
         return self.verdict.kind in (ChangeKind.CHANGED, ChangeKind.NOISE)
 
 

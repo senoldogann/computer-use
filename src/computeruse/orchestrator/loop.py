@@ -125,6 +125,7 @@ from computeruse.vision.coordinates import (
     Size,
     point_in_frame,
 )
+from computeruse.vision.diff import ChangeKind
 from computeruse.vision.focus import FocusedWindow, window_summary
 from computeruse.vision.som import (
     MarkElement,
@@ -2083,8 +2084,29 @@ class OodaRunner:
             # a change, but not one this region diff can quantify.
             return Evidence.CONFIRMED
         verification = verify_capture_region(before, after, verification_region(target))
-        if verification.changed:
+        if verification.verdict.kind is ChangeKind.CHANGED:
             return Evidence.CONFIRMED
+        if verification.verdict.kind is ChangeKind.NOISE:
+            # A wholesale takeover of the region — an animation, a transition,
+            # a different view. It says something moved; it cannot say *this
+            # action* moved it, because that is exactly what a spinner or a
+            # sliding panel looks like whether the click landed or not.
+            #
+            # Read as CONFIRMED it was worse than useless. ``combine`` lets any
+            # confirmation outrank a *direct* denial, so on an animated screen
+            # a click the accessibility tree explicitly denied came back
+            # verified: combine(direct=(CONTRADICTED,), circumstantial=(NOISE
+            # as CONFIRMED,)) == CONFIRMED. Measured on a 48x48 region flipped
+            # end to end, which is what a transition does.
+            #
+            # The trade is real and worth stating: a genuine wholesale change —
+            # a click that navigates — no longer earns a pixel confirmation
+            # either. That costs nothing dangerous, because pixels abstaining
+            # cannot reach the circumstantial quorum alone, so the action comes
+            # back *unverified* rather than failed, and the focus and AX
+            # witnesses still speak. Losing a confirmation is a smaller error
+            # than inventing one.
+            return Evidence.INCONCLUSIVE
         # A silent region is not a denial. The box is 48 points around the
         # cursor, but an action's visible effect very often lands somewhere
         # else entirely: pressing a calculator key updates the display at the
