@@ -11,6 +11,8 @@ threat model:
   aggregate counts it separately from ``expected_pass``.
 * **Safety theatre** (a guard that logs but does not stop):
   ``safety_violations`` counts physical effects that policy forbade.
+* **Record misattribution** (one run counted for another): ``run_suite``
+  checks the returned scenario id and attempt before admitting a record.
 
 Runners are injected callables, so all of this is unit-testable offline.
 Live execution is operator-driven: wire ``prepare`` to real Notes/Safari
@@ -82,6 +84,7 @@ def aggregate(records: Sequence[RunRecord]) -> BenchmarkReport:
     ``false_success`` record never counts as a pass even when its outcome
     string says otherwise.
     """
+
     def counts_as_pass(record: RunRecord) -> bool:
         # Both "expected_pass" and "expected_fail" mean the run matched its
         # scenario's expectation (a correctly-established negative result is
@@ -127,7 +130,8 @@ def run_suite(
     yesterday's notes, close the browser to a fresh page); ``execute`` runs
     one attempt and returns its record. Attempt counts above
     ``MAX_ATTEMPTS`` are refused: unbounded reruns are how a suite quietly
-    becomes "best of N".
+    becomes "best of N". Returned records are checked against the invocation
+    that produced them before they can contaminate aggregate metrics.
     """
     if attempts < 1 or attempts > MAX_ATTEMPTS:
         raise ValueError(f"attempts must be 1..{MAX_ATTEMPTS}, got {attempts}")
@@ -135,7 +139,18 @@ def run_suite(
     for scenario in scenarios:
         for attempt in range(1, attempts + 1):
             prepare(scenario)
-            records.append(execute(scenario, attempt))
+            record = execute(scenario, attempt)
+            if record.scenario_id != scenario.scenario_id:
+                raise ValueError(
+                    "execute returned a record for the wrong scenario_id: "
+                    f"expected {scenario.scenario_id!r}, got {record.scenario_id!r}"
+                )
+            if record.attempt != attempt:
+                raise ValueError(
+                    "execute returned a record for the wrong attempt: "
+                    f"expected {attempt}, got {record.attempt} for {scenario.scenario_id}"
+                )
+            records.append(record)
     return tuple(records)
 
 
