@@ -1,12 +1,59 @@
 import AppKit
+import ObjectiveC.runtime
 import SwiftUI
+
+/// Ensures custom titlebar clicks reach SwiftUI views beneath NSTitlebarContainerView.
+/// By default in macOS, NSTitlebarContainerView swallows hit-tests across the top 28-30pt
+/// to handle system window dragging, which prevents clicks from reaching SwiftUI buttons.
+enum TitlebarHitTestHelper {
+    private static var isSwizzled = false
+
+    static func installTitlebarHitTestPassThrough() {
+        guard !isSwizzled else { return }
+        guard let containerClass = NSClassFromString("NSTitlebarContainerView") else { return }
+
+        let originalSelector = #selector(NSView.hitTest(_:))
+        let swizzledSelector = #selector(NSView.cu_titlebarHitTest(_:))
+
+        guard let originalMethod = class_getInstanceMethod(containerClass, originalSelector),
+              let swizzledMethod = class_getInstanceMethod(NSView.self, swizzledSelector) else {
+            return
+        }
+
+        method_exchangeImplementations(originalMethod, swizzledMethod)
+        isSwizzled = true
+    }
+}
+
+private extension NSView {
+    @objc func cu_titlebarHitTest(_ point: NSPoint) -> NSView? {
+        let hitView = self.cu_titlebarHitTest(point)
+        guard let hit = hitView else { return nil }
+
+        // Keep standard traffic lights (close, minimize, zoom) clickable
+        if hit is NSButton || hit.superview is NSButton {
+            return hit
+        }
+
+        let className = NSStringFromClass(type(of: hit))
+        if className.contains("Widget") || className.contains("Button") {
+            return hit
+        }
+
+        // Return nil on the titlebar container or background view so hit testing
+        // falls through to the underlying contentView hosting SwiftUI.
+        if className == "NSTitlebarContainerView" || className == "NSTitlebarView" {
+            return nil
+        }
+
+        return hit
+    }
+}
 
 /// Title-bar toggle button as a pure SwiftUI Button.
 ///
-/// A representable NSButton desyncs from SwiftUI's layout after an animated
-/// panel toggle: its model frame stays at the pre-toggle position while the
-/// icon animates away, so clicks land next to the icon ("works once, then
-/// dead"). A SwiftUI Button hit-tests exactly where it draws, always.
+/// SwiftUI buttons hit-test exactly where they draw, avoiding NSViewRepresentable
+/// frame desync issues during animated panel transitions.
 struct NativeTitleBarButton: View {
     let iconName: String
     let isActive: Bool
@@ -41,24 +88,35 @@ struct NativeTitleBarButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHand()
         .onHover { isHovered = $0 }
         .help(tooltip)
     }
 }
 
-/// Full-bar drag surface: clicking the empty top-bar area drags the window;
-/// the toggle buttons sit on top of it and opt out via
-/// `mouseDownCanMoveWindow = false`, so they receive clicks normally.
+/// Draggable surface for custom titlebar areas:
+/// Clicking and dragging moves the window via `performDrag(with:)`.
+/// Double-clicking toggles window zoom (standard macOS behavior).
+/// Controls sitting alongside this view receive their mouse events normally.
 struct TitleBarDragSurface: NSViewRepresentable {
     func makeNSView(context: Context) -> DragSurfaceView {
-        DragSurfaceView(frame: .zero)
+        let view = DragSurfaceView(frame: .zero)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        return view
     }
 
     func updateNSView(_ nsView: DragSurfaceView, context: Context) {}
 }
 
 final class DragSurfaceView: NSView {
-    override var mouseDownCanMoveWindow: Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            window?.zoom(nil)
+        } else {
+            window?.performDrag(with: event)
+        }
+    }
 }
 
 /// Cosmic sidebar header: aligns with the window traffic-lights row.
@@ -71,7 +129,8 @@ struct CosmicSidebarHeader: View {
             Spacer()
                 .frame(width: Theme.trafficLightClearance)
 
-            Spacer()
+            TitleBarDragSurface()
+                .frame(maxWidth: .infinity, maxHeight: Theme.titleRowHeight)
 
             NativeTitleBarButton(
                 iconName: "sidebar.left",
@@ -87,6 +146,5 @@ struct CosmicSidebarHeader: View {
         }
         .frame(height: Theme.titleRowHeight)
         .padding(.top, Theme.titleRowTopPadding)
-        .background(TitleBarDragSurface())
     }
 }

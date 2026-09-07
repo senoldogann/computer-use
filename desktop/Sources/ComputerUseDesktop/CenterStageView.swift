@@ -43,7 +43,7 @@ struct CenterStageView: View {
 
     /// Single top row shared by the whole window chrome:
     /// traffic-light clearance & left-sidebar toggle on the left, breadcrumbs in the middle,
-    /// and right-panel toggle on the far right.
+    /// draggable empty space, and right-panel toggle on the far right.
     private var topBar: some View {
         HStack(spacing: 8) {
             if !panelsStore.isSidebarVisible {
@@ -63,21 +63,26 @@ struct CenterStageView: View {
                 .frame(width: 28, height: 28)
             }
 
-            Text(Theme.workspaceName)
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(Theme.textMuted)
+            HStack(spacing: 8) {
+                Text(Theme.workspaceName)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Theme.textMuted.opacity(0.6))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted.opacity(0.6))
 
-            Text(truncatedTaskTitle)
-                .font(.system(size: 12.5))
-                .foregroundStyle(Theme.textPrimary)
-                .fontWeight(.medium)
-                .lineLimit(1)
+                Text(truncatedTaskTitle)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Theme.textPrimary)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+            }
 
-            Spacer()
+            // Draggable space across the center of the top bar: empty area moves window,
+            // buttons stay completely separate and receive all mouse events.
+            TitleBarDragSurface()
+                .frame(maxWidth: .infinity, maxHeight: Theme.titleRowHeight)
 
             if runStore.isRunning && runStore.runningThreadID == threadsStore.selectedThreadID {
                 Text("Level \(state.autonomyLevel.cliLevel) · Trust \(state.trustMode ? "ON" : "OFF") · Verify \(state.verifyEnabled ? "ON" : "OFF")")
@@ -112,9 +117,6 @@ struct CenterStageView: View {
         .padding(.horizontal, 12)
         .frame(height: Theme.titleRowHeight)
         .padding(.top, Theme.titleRowTopPadding)
-        // Drag surface behind the buttons: empty bar space moves the window,
-        // the toggle buttons themselves stay clickable.
-        .background(TitleBarDragSurface())
     }
 
     private var emptyState: some View {

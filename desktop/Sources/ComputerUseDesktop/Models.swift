@@ -248,6 +248,7 @@ final class WindowChromeView: NSView {
 
     func apply() {
         guard let window else { return }
+        TitlebarHitTestHelper.installTitlebarHitTestPassThrough()
         guard !window.titlebarAppearsTransparent || window.titleVisibility != .hidden
             || !window.styleMask.contains(.fullSizeContentView) || window.isOpaque
             || window.backgroundColor != .clear else { return }

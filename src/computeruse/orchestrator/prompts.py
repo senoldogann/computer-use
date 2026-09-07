@@ -189,6 +189,10 @@ ACTION_CONTRACT: Final[str] = (
     "     goal from the CURRENT screenshot alone, and take its first step.\n"
     "   - Unexpected states (dialogs, popups, login screens, wrong focus, loading delays) are normal.\n"
     "     Stop following your previous plan and re-plan from the new visible state.\n"
+    "   - When POPUP DIALOGS are listed above, resolve them BEFORE any task action: click the\n"
+    "     accept/consent/continue control (or reject/close when that is the sensible path) using\n"
+    "     its mark number — never try to reach content a dialog covers. A sign-in dialog you\n"
+    "     cannot complete should be closed or dismissed, not filled in. Re-observe, then continue.\n"
     "   - The macOS menu bar (y near the top edge) is permanent system UI, not an open popup. Do not spam Escape.\n"
     "   - If unexpected tabs appear, a click opened a background tab instead of navigating: close it with\n"
     "     Cmd+W and return to the original tab.\n"
@@ -323,6 +327,23 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # Law 2 OBSERVE: what the host currently shows, so the model grounds
         # its next coordinate on the real active window (ADR-2).
         observed.append(ObservedSection(f"Active window: {state.active_window}"))
+    if state.dialog_notes:
+        # Consent walls, cookie banners and sign-in sheets are invisible
+        # obstacles: the model plans a click on page content the overlay
+        # covers, the click lands on the dialog instead, and the recovery
+        # ladder burns the run's budget re-aiming at something it was never
+        # told existed. Naming the dialog and its controls — which lead the
+        # numbered AX list below — turns the obstacle into the easiest action
+        # on screen.
+        observed.append(
+            ObservedSection(
+                "POPUP DIALOGS DETECTED ON SCREEN — resolve these FIRST (their controls "
+                "are the leading numbered elements in the AX list below; accept/consent/"
+                "continue to proceed, or reject/close when that keeps the goal on track), "
+                "then continue the task:",
+                state.dialog_notes,
+            )
+        )
     if state.ui_elements:
         # ADR-2 AX grounding: real element coordinates from the host's
         # accessibility tree, each at its centre point. Exact for native UI

@@ -9,6 +9,9 @@ struct ComputerUseDesktopApp: App {
         // Load OPENAI_API_KEY from ~/.computeruse/env into the process environment
         Self.loadEnvFile()
 
+        // Enable click-through on macOS hiddenTitleBar chrome so custom buttons receive clicks
+        TitlebarHitTestHelper.installTitlebarHitTestPassThrough()
+
         // Lock window appearance to dark
         NSApp?.appearance = NSAppearance(named: .darkAqua)
     }

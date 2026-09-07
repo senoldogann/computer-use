@@ -308,6 +308,11 @@ class AxProbeResult:
     #: answer gates a keystroke, so it must not depend on an element having
     #: survived the summary budget.
     asks_for_credential: bool = False
+    #: One line per modal / consent-style dialog detected in the tree, naming
+    #: the dialog and its controls. Rendered to the model so a cookie wall or
+    #: sign-in sheet stops being an invisible obstacle: the agent is told the
+    #: overlay exists and that its controls lead the numbered element list.
+    dialog_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -339,6 +344,11 @@ class WorkingState:
     # opens from Cmd+click or similar) and to decide whether to close or
     # switch tabs. Empty for non-browser apps or when no probe is configured.
     open_tabs: tuple[str, ...] = ()
+    # Popup / consent dialogs detected on the observed screen, one short line
+    # per dialog (kind, label, control titles). Rendered before the AX list so
+    # the model resolves overlays FIRST instead of clicking through them at
+    # the page content behind.
+    dialog_notes: tuple[str, ...] = ()
     # Law 3.2: the skill definition mounted into active context (Stage 2 —
     # full instructions on demand). None until the RETRIEVE step mounts a
     # scan match or the provider explicitly emits ``load_skill``.
@@ -1077,6 +1087,10 @@ class Observation:
     marks: tuple[MarkElement, ...] = ()
     #: A password box is on screen; typing is refused while it is (Law 5).
     asks_for_credential: bool = False
+    #: One line per modal / consent-style dialog detected on this screen, so
+    #: an overlay survives probe failures exactly like the password-box flag:
+    #: losing sight of a consent wall must not read as "the wall is gone".
+    dialog_notes: tuple[str, ...] = ()
 
     @property
     def app_name(self) -> str | None:
@@ -2698,6 +2712,7 @@ class OodaRunner:
         # Carried forward with the rest of the perception when a probe fails:
         # losing sight of a password box must not read as "there isn't one".
         asks_for_credential = previous.asks_for_credential
+        dialog_notes = previous.dialog_notes
         carried = self._fresh_ax
         self._fresh_ax = None
         # Recorded so the observe log can say where the reading came from: a
@@ -2715,6 +2730,7 @@ class OodaRunner:
             content = carried.content
             open_tabs = carried.open_tabs
             asks_for_credential = carried.asks_for_credential
+            dialog_notes = carried.dialog_notes
             self._ax_probe_failures = 0
         elif self.ax_probe is not None:
             try:
@@ -2724,6 +2740,7 @@ class OodaRunner:
                 content = ax_result.content
                 open_tabs = ax_result.open_tabs
                 asks_for_credential = ax_result.asks_for_credential
+                dialog_notes = ax_result.dialog_notes
             except Exception as exc:
                 if self._ax_probe_warned:
                     LOGGER.debug("ui-element probe still failing: %s", exc)
@@ -2786,6 +2803,7 @@ class OodaRunner:
             raw_ui_elements=raw_ui_elements,
             content=content,
             open_tabs=open_tabs,
+            dialog_notes=dialog_notes,
             signature=signature,
             # Marks come from the *logical* summaries: a resolved mark is a
             # click in screen points, and the model's [N] indices line up
@@ -2800,6 +2818,7 @@ class OodaRunner:
             active_window=active_window,
             ui_elements=ui_elements,
             open_tabs=open_tabs,
+            dialog_notes=dialog_notes,
             screenshot_b64=screenshot_b64 if self.vision_enabled else None,
             observed_trail=_extend_trail(
                 state.observed_trail, window, content, TRAIL_MAX_ENTRIES
