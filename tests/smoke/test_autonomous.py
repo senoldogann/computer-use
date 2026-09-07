@@ -8,11 +8,9 @@ and it proposes goals from memory rather than from imagination.
 
 from __future__ import annotations
 
-import random
 from pathlib import Path
 
 from computeruse.autonomous import (
-    GoalProposal,
     MachineActivity,
     SessionLimits,
     machine_is_idle,
@@ -22,6 +20,7 @@ from computeruse.autonomous import (
 )
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.orchestrator.schemas import MouseClick
+from computeruse.scheduler import GoalProposal, make_proposal
 from computeruse.skills.registry import SkillRegistry
 from computeruse.skills.schemas import SkillDefinition
 
@@ -29,6 +28,19 @@ from computeruse.skills.schemas import SkillDefinition
 def _activity(x: float, app: str = "Finder") -> MachineActivity:
     """A sample from a driver too old to report the system idle clock."""
     return MachineActivity(cursor=(x, 0.0), frontmost=app, idle_seconds=None)
+
+
+def _proposal(goal: str) -> GoalProposal:
+    """Ground session-loop fixtures without repeating provenance boilerplate."""
+    return make_proposal(
+        goal=goal,
+        app=None,
+        source_type="episode_retry",
+        source_id=f"fixture-{goal}",
+        confidence=0.75,
+        expected_cost=None,
+        reason="test fixture",
+    )
 
 
 def test_a_still_machine_is_idle_and_a_moving_one_is_not() -> None:
@@ -113,7 +125,7 @@ def test_nothing_in_memory_means_nothing_to_do(tmp_path: Path) -> None:
     proposal = propose_goal(
         SkillRegistry(tmp_path / "skills"),
         EpisodicStore(tmp_path / "episodes"),
-        rng=random.Random(0),
+        usage=(),
         exclude=frozenset(),
     )
     assert proposal is None
@@ -128,11 +140,12 @@ def test_a_broken_skill_is_chosen_first(tmp_path: Path) -> None:
     proposal = propose_goal(
         skills,
         EpisodicStore(tmp_path / "episodes"),
-        rng=random.Random(0),
+        usage=(),
         exclude=frozenset(),
     )
     assert proposal is not None
-    assert "chrome.broken" in proposal.reason
+    assert proposal.source_type == "skill_repair"
+    assert proposal.source_id == "chrome.broken"
     assert proposal.app == "Google Chrome"
 
 
@@ -143,22 +156,20 @@ def test_a_failed_episode_is_chosen_before_re_running_a_success(
     skills = SkillRegistry(tmp_path / "skills")
     skills.save(_skill("chrome.unproven", uses=1, wins=1))
     episodes = EpisodicStore(tmp_path / "episodes")
-    episodes.record(
-        episode_from_trace(
-            app="Finder",
-            description="empty the downloads folder listing",
-            steps=(MouseClick(type="mouse_click", x=1, y=1),),
-            step_descriptions=("click",),
-            outcome="failure",
-            retrospective="never found the folder",
-        )
+    failed = episode_from_trace(
+        app="Finder",
+        description="empty the downloads folder listing",
+        steps=(MouseClick(type="mouse_click", x=1, y=1),),
+        step_descriptions=("click",),
+        outcome="failure",
+        retrospective="never found the folder",
     )
-    proposal = propose_goal(
-        skills, episodes, rng=random.Random(0), exclude=frozenset()
-    )
+    episodes.record(failed)
+    proposal = propose_goal(skills, episodes, usage=(), exclude=frozenset())
     assert proposal is not None
     assert proposal.goal == "empty the downloads folder listing"
-    assert "failed" in proposal.reason
+    assert proposal.source_type == "episode_retry"
+    assert proposal.source_id == failed.episode_id
 
 
 def test_an_unproven_skill_is_the_last_resort(tmp_path: Path) -> None:
@@ -169,15 +180,16 @@ def test_an_unproven_skill_is_the_last_resort(tmp_path: Path) -> None:
     proposal = propose_goal(
         skills,
         EpisodicStore(tmp_path / "episodes"),
-        rng=random.Random(0),
+        usage=(),
         exclude=frozenset(),
     )
     assert proposal is not None
     assert isinstance(proposal, GoalProposal)
-    assert "chrome.unproven" in proposal.reason
+    assert proposal.source_type == "skill_validation"
+    assert proposal.source_id == "chrome.unproven"
 
 
-# --- exclusion filters the pools before the die is cast -----------------------
+# --- exclusion filters candidates before ranking -----------------------------
 
 
 def _failed_episode(description: str):
@@ -192,19 +204,14 @@ def _failed_episode(description: str):
 
 
 def test_an_excluded_unproven_skill_leaves_its_pool_mate(tmp_path: Path) -> None:
-    """Filtering must happen before rng.choice, not after.
-
-    Rolling first and rejecting afterwards would discard the survivor along
-    with the excluded candidate whenever the die lands wrong — an early end
-    to a session that still had work.
-    """
+    """Filtering happens before ranking so a valid peer cannot disappear."""
     skills = SkillRegistry(tmp_path / "skills")
     skills.save(_skill("chrome.done", uses=1, wins=1))
     skills.save(_skill("chrome.next", uses=1, wins=1))
     proposal = propose_goal(
         skills,
         EpisodicStore(tmp_path / "episodes"),
-        rng=random.Random(0),
+        usage=(),
         exclude={"do the thing for chrome.done"},
     )
     assert proposal is not None
@@ -215,12 +222,14 @@ def test_an_excluded_failure_leaves_its_pool_mate(tmp_path: Path) -> None:
     skills = SkillRegistry(tmp_path / "skills")
     episodes = EpisodicStore(tmp_path / "episodes")
     episodes.record(_failed_episode("first lost task"))
-    episodes.record(_failed_episode("second lost task"))
+    second = _failed_episode("second lost task")
+    episodes.record(second)
     proposal = propose_goal(
-        skills, episodes, rng=random.Random(0), exclude={"first lost task"}
+        skills, episodes, usage=(), exclude={"first lost task"}
     )
     assert proposal is not None
     assert proposal.goal == "second lost task"
+    assert proposal.source_id == second.episode_id
 
 
 def test_an_excluded_demoted_skill_leaves_its_pool_mate(tmp_path: Path) -> None:
@@ -230,21 +239,21 @@ def test_an_excluded_demoted_skill_leaves_its_pool_mate(tmp_path: Path) -> None:
     proposal = propose_goal(
         skills,
         EpisodicStore(tmp_path / "episodes"),
-        rng=random.Random(0),
+        usage=(),
         exclude={"do the thing for chrome.old"},
     )
     assert proposal is not None
-    assert "chrome.older" in proposal.reason
+    assert proposal.source_id == "chrome.older"
 
 
 def test_a_fully_excluded_pool_means_nothing_to_do(tmp_path: Path) -> None:
-    """None must mean the pools are genuinely empty — never an unlucky roll."""
+    """None means the candidate set is genuinely empty."""
     skills = SkillRegistry(tmp_path / "skills")
     skills.save(_skill("chrome.only", uses=1, wins=1))
     proposal = propose_goal(
         skills,
         EpisodicStore(tmp_path / "episodes"),
-        rng=random.Random(0),
+        usage=(),
         exclude={"do the thing for chrome.only"},
     )
     assert proposal is None
@@ -261,8 +270,7 @@ def test_the_machine_is_waited_for_before_work_is_chosen() -> None:
     run_autonomously(
         SessionLimits(max_runs=1, idle_seconds=2, rest_seconds=0),
         observe=lambda: order.append("observe") or _activity(5),
-        propose=lambda: order.append("propose")
-        or GoalProposal(goal="g", app=None, reason="r"),
+        propose=lambda: order.append("propose") or _proposal("g"),
         execute=lambda _p: order.append("execute"),
         stop=lambda: False,
         sleep=lambda _s: None,
@@ -282,7 +290,7 @@ def test_a_failing_run_ends_that_goal_not_the_session() -> None:
     done = run_autonomously(
         SessionLimits(max_runs=3, idle_seconds=2, rest_seconds=0),
         observe=lambda: _activity(5),
-        propose=lambda: GoalProposal(goal=f"g{len(attempts)}", app=None, reason="r"),
+        propose=lambda: _proposal(f"g{len(attempts)}"),
         execute=execute,
         stop=lambda: False,
         sleep=lambda _s: None,
@@ -310,7 +318,7 @@ def test_the_run_count_is_a_hard_ceiling() -> None:
     done = run_autonomously(
         SessionLimits(max_runs=2, idle_seconds=2, rest_seconds=0),
         observe=lambda: _activity(5),
-        propose=lambda: GoalProposal(goal="g", app=None, reason="r"),
+        propose=lambda: _proposal("g"),
         execute=lambda p: executed.append(p.goal),
         stop=lambda: False,
         sleep=lambda _s: None,
@@ -331,7 +339,7 @@ def test_a_user_returning_to_the_machine_ends_the_session() -> None:
     done = run_autonomously(
         SessionLimits(max_runs=3, idle_seconds=2, rest_seconds=0),
         observe=observe,
-        propose=lambda: GoalProposal(goal="g", app=None, reason="r"),
+        propose=lambda: _proposal("g"),
         execute=lambda p: executed.append(p.goal),
         stop=lambda: ticks["n"] > 10,
         sleep=lambda _s: None,
