@@ -15,142 +15,120 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: audit/completion-auditor-fail-closed-2026-09-07
-      - name: Apply exact completion-boundary patch
+      - name: Apply structurally bounded completion patch
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
           def replace_once(path: str, old: str, new: str) -> None:
               p = Path(path)
               text = p.read_text(encoding="utf-8")
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f"{path}: expected exactly one match, got {count}")
+                  raise SystemExit(f"{path}: expected exactly one literal match, got {count}")
               p.write_text(text.replace(old, new, 1), encoding="utf-8")
 
+          def regex_once(path: str, pattern: str, replacement: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              changed, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE | re.DOTALL)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one regex match, got {count}: {pattern}")
+              p.write_text(changed, encoding="utf-8")
+
           replace_once(
               "src/computeruse/orchestrator/loop.py",
-              '''STALEMATE_RETROSPECTIVE: Final[str] = (
-              "Görev tamamlanamadı: ekran kanıtı doğrulanamadı ve auditor reddetti."
-          )''',
-              '''STALEMATE_RETROSPECTIVE: Final[str] = (
-              "Görev tamamlanamadı: tamamlanma kanıtı bağımsız olarak doğrulanamadı."
-          )''',
+              'STALEMATE_RETROSPECTIVE: Final[str] = (\n    "Görev tamamlanamadı: ekran kanıtı doğrulanamadı ve auditor reddetti."\n)',
+              'STALEMATE_RETROSPECTIVE: Final[str] = (\n    "Görev tamamlanamadı: tamamlanma kanıtı bağımsız olarak doğrulanamadı."\n)',
           )
 
           replace_once(
               "src/computeruse/orchestrator/loop.py",
               '''            except Exception as exc:  # noqa: BLE001
-                          self._forced_finish = True
-                          LOGGER.warning("completion audit unavailable: %s", exc)
-                          return None
-                      if verdict.satisfied:
-                          LOGGER.info("ooda completion audited (after recovery): %s", verdict.evidence)
-                          return None''',
+                self._forced_finish = True
+                LOGGER.warning("completion audit unavailable: %s", exc)
+                return None
+            if verdict.satisfied:
+                LOGGER.info("ooda completion audited (after recovery): %s", verdict.evidence)
+                return None''',
               '''            except Exception as exc:  # noqa: BLE001
-                          self._forced_finish = True
-                          self._stalemate_rejected = True
-                          LOGGER.warning(
-                              "completion audit unavailable after bounded retries: %s", exc
-                          )
-                          return None
-                      if not verdict.evidence.strip():
-                          verdict = CompletionVerdict(
-                              satisfied=False,
-                              evidence="completion auditor returned no evidence",
-                          )
-                      if verdict.satisfied:
-                          LOGGER.info("ooda completion audited (after recovery): %s", verdict.evidence)
-                          return None''',
+                self._forced_finish = True
+                self._stalemate_rejected = True
+                LOGGER.warning(
+                    "completion audit unavailable after bounded retries: %s", exc
+                )
+                return None
+            if not verdict.evidence.strip():
+                verdict = CompletionVerdict(
+                    satisfied=False,
+                    evidence="completion auditor returned no evidence",
+                )
+            if verdict.satisfied:
+                LOGGER.info("ooda completion audited (after recovery): %s", verdict.evidence)
+                return None''',
           )
 
-          replace_once(
+          regex_once(
               "src/computeruse/orchestrator/loop.py",
+              r'''        try:\n            verdict = self\.completion_check\(state, finish\.summary\)\n        except Exception as exc:  # noqa: BLE001 - the auditor must never kill a run\n.*?            return None\n        if verdict\.satisfied:\n            LOGGER\.info\("ooda completion audited: %s", verdict\.evidence\)\n            return None''',
               '''        try:
-                      verdict = self.completion_check(state, finish.summary)
-                  except Exception as exc:  # noqa: BLE001 - the auditor must never kill a run
-                      # The run continues — an unreachable auditor must not fail work that
-                      # may well be finished. But it was *not* verified, and saying so is
-                      # the whole point: the distill gate reads this flag, so leaving it
-                      # unset let a provider outage turn every claimed success into a
-                      # distilled skill. Measured: forced_finish=false with the auditor
-                      # raising on every call. That is the memory poisoning P0-1 closed,
-                      # reached by a second door.
-                      self._forced_finish = True
-                      LOGGER.warning("completion audit unavailable: %s", exc)
-                      return None
-                  if verdict.satisfied:
-                      LOGGER.info("ooda completion audited: %s", verdict.evidence)
-                      return None''',
-              '''        try:
-                      verdict = self.completion_check(state, finish.summary)
-                  except Exception as exc:  # noqa: BLE001 - verification failure is recoverable
-                      self._rejected_finishes += 1
-                      evidence = f"completion audit unavailable: {type(exc).__name__}: {exc}"
-                      LOGGER.warning("completion audit unavailable: %s", exc)
-                      return (
-                          "completion check could not verify this finish: "
-                          f"{evidence} "
-                          "The success claim is unverified. Continue only if another action can "
-                          "produce observable evidence; otherwise emit finish with status "
-                          "\"failed\" and explain the verification outage."
-                      )
-                  if not verdict.evidence.strip():
-                      verdict = CompletionVerdict(
-                          satisfied=False,
-                          evidence="completion auditor returned no evidence",
-                      )
-                  if verdict.satisfied:
-                      LOGGER.info("ooda completion audited: %s", verdict.evidence)
-                      return None''',
+            verdict = self.completion_check(state, finish.summary)
+        except Exception as exc:  # noqa: BLE001 - verification failure is recoverable
+            self._rejected_finishes += 1
+            evidence = f"completion audit unavailable: {type(exc).__name__}: {exc}"
+            LOGGER.warning("completion audit unavailable: %s", exc)
+            return (
+                "completion check could not verify this finish: "
+                f"{evidence} "
+                "The success claim is unverified. Continue only if another action can "
+                "produce observable evidence; otherwise emit finish with status "
+                "\"failed\" and explain the verification outage."
+            )
+        if not verdict.evidence.strip():
+            verdict = CompletionVerdict(
+                satisfied=False,
+                evidence="completion auditor returned no evidence",
+            )
+        if verdict.satisfied:
+            LOGGER.info("ooda completion audited: %s", verdict.evidence)
+            return None''',
           )
 
-          replace_once(
+          regex_once(
               "src/computeruse/orchestrator/prompts.py",
-              '''    A malformed reply raises :class:`InvalidDecisionError`. The caller treats
-              that as "the auditor could not answer" and accepts the finish rather than
-              blocking it: a broken checker must never trap a run that genuinely
-              completed. Refusing to *guess* a verdict here is what keeps that policy
-              decision in one place instead of buried in a parser default.''',
+              r'''    A malformed reply raises :class:`InvalidDecisionError`\. The caller treats\n.*?    decision in one place instead of buried in a parser default\.''',
               '''    A malformed reply raises :class:`InvalidDecisionError`. Completion is a
-              verification boundary, so a missing boolean or missing evidence is never
-              replaced with a guessed verdict. The loop handles an unavailable checker as
-              a bounded recoverable verification failure and ultimately fails closed.''',
+    verification boundary, so a missing boolean or missing evidence is never
+    replaced with a guessed verdict. The loop handles an unavailable checker as
+    a bounded recoverable verification failure and ultimately fails closed.''',
           )
 
-          replace_once(
+          regex_once(
               "src/computeruse/orchestrator/prompts.py",
+              r'''    evidence = typed\.get\("evidence"\)\n    return CompletionVerdict\(\n        satisfied=satisfied,\n        evidence=evidence if isinstance\(evidence, str\) and evidence else "\(no evidence given\)",\n    \)''',
               '''    evidence = typed.get("evidence")
-                  return CompletionVerdict(
-                      satisfied=satisfied,
-                      evidence=evidence if isinstance(evidence, str) and evidence else "(no evidence given)",
-                  )''',
-              '''    evidence = typed.get("evidence")
-                  if not isinstance(evidence, str) or not evidence.strip():
-                      raise InvalidDecisionError(
-                          cause="'evidence' must be a non-empty string",
-                          hint='"evidence" must state the independent observation supporting the verdict',
-                      )
-                  return CompletionVerdict(satisfied=satisfied, evidence=evidence.strip())''',
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise InvalidDecisionError(
+            cause="'evidence' must be a non-empty string",
+            hint='"evidence" must state the independent observation supporting the verdict',
+        )
+    return CompletionVerdict(satisfied=satisfied, evidence=evidence.strip())''',
           )
 
-          replace_once(
+          regex_once(
               "tests/smoke/test_prompts.py",
-              '''    # Missing evidence still parses — the verdict is the load-bearing field.
-                  assert parse_completion('{"satisfied": false}').evidence
-                  for bad in ('{"satisfied": "yes"}', "{}", "not json at all"):
-                      with pytest.raises(InvalidDecisionError):
-                          parse_completion(bad)''',
+              r'''    # Missing evidence still parses — the verdict is the load-bearing field\.\n    assert parse_completion\('\{"satisfied": false\}'\)\.evidence\n    for bad in \('\{"satisfied": "yes"\}', "\{\}", "not json at all"\):\n        with pytest\.raises\(InvalidDecisionError\):\n            parse_completion\(bad\)''',
               '''    # Evidence is load-bearing too: a verdict without an observation is not an audit.
-                  for bad in (
-                      '{"satisfied": false}',
-                      '{"satisfied": "yes"}',
-                      "{}",
-                      "not json at all",
-                  ):
-                      with pytest.raises(InvalidDecisionError):
-                          parse_completion(bad)''',
+    for bad in (
+        '{"satisfied": false}',
+        '{"satisfied": "yes"}',
+        "{}",
+        "not json at all",
+    ):
+        with pytest.raises(InvalidDecisionError):
+            parse_completion(bad)''',
           )
           PY
 
