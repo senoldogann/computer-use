@@ -162,8 +162,8 @@ from computeruse.vision.apps import extract_goal_app, infer_target_app
 
 LOGGER: Final = logging.getLogger(__name__)
 
-DEFAULT_SOCKET = "/tmp/actuation-driver.sock"
 DEFAULT_STORE = Path.home() / ".computeruse"
+DEFAULT_SOCKET = str(DEFAULT_STORE / "run" / "actuation-driver.sock")
 DEMO_PROVIDER: str = "demo"
 OPENAI_PREFIX: str = "openai"
 
@@ -897,6 +897,45 @@ def build_config(
     )
 
 
+def ensure_secure_socket_dir(socket_path: str) -> None:
+    """Create the socket's parent directory, hardening it when it is ours.
+
+    The default path lives under ``~/.computeruse/run`` (0700, user-owned)
+    so no other user can pre-bind or symlink-swap the path. An explicit
+    ``--socket`` elsewhere (e.g. tests under /tmp) keeps working: a shared
+    sticky directory such as /tmp (1777) is left untouched — deleting or
+    replacing another user's file there fails closed at bind time, and the
+    socket file's own uid/mode plus the driver's peer check still
+    authenticate the connection (see ActuationClient). Only a non-sticky
+    group/other-writable directory owned by someone else is refused, and we
+    never chmod a directory we do not own.
+    """
+    import stat as stat_mod
+
+    parent = Path(socket_path).expanduser().parent
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        entry = parent.stat()
+    except OSError as exc:
+        raise RuntimeError(f"cannot stat socket directory {parent}: {exc}") from exc
+    euid = os.geteuid()
+    mode = entry.st_mode
+    sticky_world_writable = bool(mode & stat_mod.S_IWOTH and mode & stat_mod.S_ISVTX)
+    if sticky_world_writable:
+        LOGGER.warning(
+            "socket directory %s is a shared sticky directory; relying on "
+            "socket file ownership and driver peer authentication",
+            parent,
+        )
+        return
+    if entry.st_uid != euid:
+        raise RuntimeError(
+            f"socket directory {parent} owned by uid {entry.st_uid}, expected {euid}"
+        )
+    if mode & 0o077 != 0:
+        os.chmod(parent, 0o700)
+
+
 def spawn_driver(
     binary: str, socket_path: str, *, real: bool
 ) -> subprocess.Popen[bytes]:
@@ -909,11 +948,12 @@ def spawn_driver(
     are attached to any startup error, so the reason always reaches the panel
     (Law 6.3 explicit error propagation).
     """
-    # Remove a stale socket file before spawning — otherwise a crashed run's
-    # leftover file would make the wait loop (and the client) race a dead
-    # socket. The driver also removes it at startup; this makes it deterministic.
+    # Bind inside a user-owned 0700 directory; remove a stale socket file
+    # before spawning — otherwise a crashed run's leftover file would make
+    # the wait loop (and the client) race a dead socket.
+    ensure_secure_socket_dir(socket_path)
     Path(socket_path).unlink(missing_ok=True)
-    command = [binary, socket_path]
+    command = [binary, socket_path, "--allow-pid", str(os.getpid())]
     if real:
         command.append("--real")
     process = subprocess.Popen(

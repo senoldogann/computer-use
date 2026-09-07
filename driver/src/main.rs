@@ -27,10 +27,38 @@ use actuation_driver::protocol::{Request, Response};
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
     let real = raw_args.iter().any(|a| a == "--real");
-    let socket_path = raw_args
-        .into_iter()
-        .find(|a| a != "--real")
-        .unwrap_or_else(|| "/tmp/actuation-driver.sock".to_string());
+    let mut allow_pid: Option<i32> = None;
+    let mut allow_uid: Option<u32> = None;
+    let mut socket_path: Option<String> = None;
+    let mut pending_pid = false;
+    let mut pending_uid = false;
+    for arg in raw_args.into_iter() {
+        if pending_pid {
+            allow_pid = arg.parse::<i32>().ok();
+            pending_pid = false;
+        } else if pending_uid {
+            allow_uid = arg.parse::<u32>().ok();
+            pending_uid = false;
+        } else if arg == "--real" {
+            // Already captured above.
+        } else if arg == "--allow-pid" {
+            pending_pid = true;
+        } else if arg == "--allow-uid" {
+            pending_uid = true;
+        } else if socket_path.is_none() {
+            socket_path = Some(arg);
+        }
+    }
+    let socket_path =
+        socket_path.unwrap_or_else(|| "/tmp/actuation-driver.sock".to_string());
+    // Only the owning user may drive this host. Default to our own
+    // effective UID; an explicit --allow-uid overrides it for tests.
+    let allowed_uid: u32 = allow_uid.unwrap_or_else(|| unsafe { libc::geteuid() });
+    if let Some(pid) = allow_pid {
+        eprintln!("[driver] peer policy: uid={allowed_uid} pid={pid} only");
+    } else {
+        eprintln!("[driver] peer policy: uid={allowed_uid} only");
+    }
 
     // Construct the backend. On failure (e.g. no Accessibility consent) we log
     // the precise reason and exit non-zero so the orchestrator sees the driver
@@ -66,11 +94,38 @@ fn main() {
         }
     }
 
-    // Bind with a fixed socket; a stale socket file from a crashed run is
-    // removed first so the bind cannot fail on retry. A bind failure (e.g. a
-    // socket path longer than the OS limit) exits with a clean message instead
-    // of a Rust panic, so the orchestrator sees *why* the driver never came up
+    // Bind inside a user-owned 0700 directory so a /tmp race cannot
+    // pre-bind or symlink-swap the path between unlink and bind. A stale
+    // socket file from a crashed run is removed first so the bind cannot
+    // fail on retry. A bind failure exits with a clean message instead of
+    // a Rust panic, so the orchestrator sees *why* the driver never came up
     // (ADR-1: the orchestrator restarts us, but it must know the reason).
+    if let Some(parent) = std::path::Path::new(&socket_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("[driver] fatal: cannot create socket dir: {e}");
+                std::process::exit(1);
+            }
+            // Harden the directory only when it is ours to harden: never
+            // chmod a shared sticky directory such as /tmp (1777), and
+            // never touch one owned by another user. In those cases the
+            // socket file's own 0600 mode plus the peer-UID/PID check in
+            // accept_loop remain the authentication.
+            let harden: bool = fs::metadata(parent)
+                .map(|meta| {
+                    use std::os::unix::fs::MetadataExt;
+                    // 0o1000 is the sticky bit; 0o002 is other-writable.
+                    let sticky_shared = (meta.mode() & 0o1002) == 0o1002;
+                    #[allow(unsafe_code)]
+                    let own_uid = unsafe { libc::geteuid() };
+                    !sticky_shared && meta.uid() == own_uid
+                })
+                .unwrap_or(false);
+            if harden {
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
     let _ = fs::remove_file(&socket_path);
     let listener = match UnixListener::bind(&socket_path) {
         Ok(listener) => listener,
@@ -94,7 +149,7 @@ fn main() {
             // should serve. The worker is intentionally detached: the
             // orchestrator terminates this process when the run ends.
             let worker_backend = Arc::clone(&backend);
-            std::thread::spawn(move || accept_loop(listener, worker_backend));
+            std::thread::spawn(move || accept_loop(listener, worker_backend, allowed_uid, allow_pid));
             // When the menu-bar launcher spare the run it owns the status icon,
             // so this driver stays halo-only (one icon total, Law 5.2 clarity).
             if std::env::var_os("COMPUTERUSE_NO_STATUS").is_some() {
@@ -108,22 +163,105 @@ fn main() {
             let _ = listener;
         }
     } else {
-        accept_loop(listener, backend);
+        accept_loop(listener, backend, allowed_uid, allow_pid);
     }
+}
+
+/// Peer credentials for one accepted connection: (uid, pid) when the
+/// platform reports them, None when the socket does not answer.
+#[cfg(target_os = "linux")]
+fn peer_credentials(stream: &UnixStream) -> Option<(u32, i32)> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let ok = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        ) == 0
+    };
+    if ok {
+        Some((cred.uid, cred.pid))
+    } else {
+        None
+    }
+}
+
+/// macOS reports the peer UID via getpeereid and the peer PID via
+/// LOCAL_PEERPID. Both must agree with the policy; when the PID cannot
+/// be read the connection is rejected when a PID allowlist is configured.
+#[cfg(target_os = "macos")]
+fn peer_credentials(stream: &UnixStream) -> Option<(u32, i32)> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let uid_ok = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) == 0 };
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let pid_ok = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut libc::pid_t as *mut libc::c_void,
+            &mut len,
+        ) == 0
+    };
+    if uid_ok && pid_ok {
+        Some((uid, pid))
+    } else if uid_ok {
+        // PID unavailable: return a sentinel the caller treats as
+        // "no PID" so a configured allowlist still rejects.
+        Some((uid, -1))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peer_credentials(_stream: &UnixStream) -> Option<(u32, i32)> {
+    None
 }
 
 /// Serve the Unix socket forever: one thread per connection (F4), so a slow
 /// or idle client never blocks the accept loop from serving the orchestrator.
-fn accept_loop(listener: UnixListener, backend: Arc<dyn Backend>) {
+/// Every connection is authenticated by peer UID, and by peer PID when the
+/// orchestrator passed --allow-pid. Fail-closed: unreadable credentials
+/// are rejected, never accepted.
+fn accept_loop(
+    listener: UnixListener,
+    backend: Arc<dyn Backend>,
+    allowed_uid: u32,
+    allow_pid: Option<i32>,
+) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let backend = connection_backend(&backend);
-                std::thread::spawn(move || {
-                    if let Err(e) = handle_conn(stream, backend.as_ref()) {
-                        eprintln!("[driver] connection error: {e}");
+                match peer_credentials(&stream) {
+                    Some((uid, pid)) if uid == allowed_uid
+                        && allow_pid.is_none_or(|want| pid == want) =>
+                    {
+                        let backend = connection_backend(&backend);
+                        std::thread::spawn(move || {
+                            if let Err(e) = handle_conn(stream, backend.as_ref()) {
+                                eprintln!("[driver] connection error: {e}");
+                            }
+                        });
                     }
-                });
+                    Some((uid, pid)) => {
+                        eprintln!(
+                            "[driver] rejected connection: uid={uid} pid={pid} (policy uid={allowed_uid} pid={allow_pid:?})"
+                        );
+                    }
+                    None => {
+                        eprintln!("[driver] rejected connection: peer credentials unavailable");
+                    }
+                }
             }
             Err(e) => eprintln!("[driver] accept error: {e}"),
         }
