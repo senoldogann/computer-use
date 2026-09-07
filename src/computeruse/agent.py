@@ -156,10 +156,10 @@ class AgentConfig:
     app: str | None = None
     autonomy_level: AutonomyLevel = AutonomyLevel.FULL
     confirm_handler: Callable[[AgentTurn, str | None], bool] | None = None
-    # Trust mode (--yes): the operator has explicitly asked for uninterrupted
-    # autonomy. CONFIRM decisions are auto-approved and logged, BLOCK still
-    # blocks, kill-switch/budget/verification/stuck-guard still run. This is
-    # delegation in advance, not removal of the guard.
+    # Trust mode (--yes): the operator asked to skip routine/non-destructive
+    # confirmations. DESTRUCTIVE decisions still require an explicit scoped
+    # grant or a single-use human approval; BLOCK still blocks, and the
+    # kill-switch/budget/verification/stuck-guard safety floor still runs.
     auto_approve: bool = False
     enable_visual_verification: bool = True
     enable_vision: bool = True
@@ -298,9 +298,10 @@ def guarded(
     ALLOW. BLOCK and ALLOW pass through untouched, so an approval can never
     permit what the policy forbade.
 
-    ``auto_approve`` is trust mode (--yes): CONFIRM becomes ALLOW, BLOCK still
-    blocks. The safety floor (kill-switch, budget, verification, stuck-guard)
-    keeps running; only the human prompt is skipped, and the caller logs it.
+    ``auto_approve`` is trust mode (--yes): non-destructive CONFIRM becomes
+    ALLOW, while DESTRUCTIVE keeps the explicit-confirmation boundary unless a
+    scoped capability grant or consumed approval already authorised it. BLOCK
+    still blocks, and the safety floor keeps running.
     """
 
     def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
@@ -320,9 +321,13 @@ def guarded(
                     approved.request_id,
                 )
                 return PermissionDecision.ALLOW
-        if auto_approve and base is PermissionDecision.CONFIRM:
+        if (
+            auto_approve
+            and base is PermissionDecision.CONFIRM
+            and risk is not Risk.DESTRUCTIVE
+        ):
             LOGGER.info(
-                "trust mode: auto-approved %s for %r (risk=%s)",
+                "trust mode: auto-approved non-destructive %s for %r (risk=%s)",
                 turn.action.type,
                 turn.sub_goal,
                 risk.value,
