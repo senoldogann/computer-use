@@ -10,11 +10,13 @@ make the loop run forever, and a truncated run must never be silent.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import pytest
 
 from computeruse.orchestrator.failures import FailureKind, UnrecoverableFailureError
 from computeruse.orchestrator.loop import (
+    EMPTY_OBSERVATION,
     TOOL_REPEAT_ABORT_AFTER,
     TOOL_REPEAT_WARN_AFTER,
     AxProbeResult,
@@ -23,11 +25,14 @@ from computeruse.orchestrator.loop import (
     StuckLoopError,
     WorkingState,
     _extend_trail,
+    cycle_signature,
     decide_step,
     equivalent_action,
     map_action_to_screen,
+    neutralizing_zoom_pair,
     repetition_diagnostic,
     same_physical_action,
+    zoom_direction,
 )
 from computeruse.orchestrator.prompts import completion_auditor, completion_prompt
 from computeruse.orchestrator.schemas import (
@@ -37,6 +42,7 @@ from computeruse.orchestrator.schemas import (
     Finish,
     MouseClick,
     MouseMove,
+    PressHotkey,
     Wait,
 )
 from computeruse.vision import Point, ScreenCapture, ScreenMap, Size
@@ -319,10 +325,13 @@ def test_map_action_to_screen_carries_the_display_offset() -> None:
 def test_runner_coordinate_gate_lands_model_picks_on_screen_points() -> None:
     """End to end: the model reports map-image coords, the driver clicks screen pts.
 
-    A 1024x600 screen becomes a 512x300 screenshot map (factor 2.0). The
-    provider points at image (50,25); the physical layer must receive the
-    real screen point (100,50) — the exact failure that made the agent click
-    the browser toolbar instead of the first Google result.
+    A typical 1024x600 logical screen is now a 1:1 map (the old 512px cap was
+    raised so page text stays readable), so image (50,25) IS the screen point
+    (50,25). The explicit-scale path (a map with a real points-per-pixel
+    factor) is pinned by the ``map_action_to_screen`` unit tests above; this
+    test proves the OODA gate feeds the physical layer exactly what the model
+    read — the failure that made the agent click the browser toolbar instead
+    of the first Google result.
     """
     width, height = 1024, 600
     frame = ScreenCapture(
@@ -347,11 +356,18 @@ def test_runner_coordinate_gate_lands_model_picks_on_screen_points() -> None:
         max_steps=5,
     )
     runner.run(goal="map")
-    assert executed == [(100, 50)]
+    assert executed == [(50, 25)]
 
 
-def test_ax_summaries_are_scaled_into_the_screenshot_map_space() -> None:
-    """AX coordinates share the map's image space (one source of truth)."""
+def test_ax_summaries_stay_in_the_screenshot_map_space_at_1_to_1() -> None:
+    """AX coordinates share the map's image space (one source of truth).
+
+    With the map at full logical resolution the AX rect needs no rewrite: the
+    element the model reads is exactly where it sits on screen. The halving
+    behaviour for a genuinely downscaled map is covered by
+    ``summaries_to_image_space`` unit tests; this pins the common identity
+    case through the whole OODA pipeline.
+    """
     width, height = 1024, 600
     frame = ScreenCapture(
         display_id=0, width=width, height=height, scale=1.0, data=bytes(width * height * 4)
@@ -373,10 +389,9 @@ def test_ax_summaries_are_scaled_into_the_screenshot_map_space() -> None:
         max_steps=5,
     )
     runner.run(goal="ground")
-    # 1024pt wide -> a 512px map, so one image pixel is 2 screen points and an
-    # AX rect in points is HALVED on the way to the model. The gate doubles it
-    # back before actuation, so the model points at the element it read about.
-    assert seen[0] == ('Button "Reload" at (116,34) 22x12',)
+    # 1:1 map: image pixel == logical point, so the summary reaches the model
+    # untouched and the gate clicks the same point the model read.
+    assert seen[0] == ('Button "Reload" at (232,68) 44x24',)
 
 
 def test_stuck_loop_injects_corrective_hint_after_two() -> None:
@@ -403,6 +418,95 @@ def test_stuck_loop_injects_corrective_hint_after_two() -> None:
     assert len(hints) == 1
     assert "emit finish" in hints[0]  # type: ignore[operator]
     assert executed == [(42, 42), (42, 42), (42, 42)]
+
+
+def _zoom(key: str) -> PressHotkey:
+    return PressHotkey(type="press_hotkey", modifiers=["command"], key=key)
+
+
+def test_zoom_undo_pairs_are_the_same_stuck_activity_as_one_repeat() -> None:
+    """Cmd++ then Cmd+0 undoes its own viewport change and must not reset the wheel.
+
+    Pure side of the neutralizing-shortcut rule (Law 2): two different zoom
+    keys in opposite directions (in/out, either followed by reset) cancel
+    each other out — they are the non-advancing activity the stuck guard
+    exists to catch — while a zoom forward after a reset is a fresh change and
+    ordinary keys are not zoom at all.
+    """
+    assert zoom_direction(_zoom("=")) == "in"
+    assert zoom_direction(_zoom("+")) == "in"
+    assert zoom_direction(_zoom("-")) == "out"
+    assert zoom_direction(_zoom("0")) == "reset"
+    # A bare letter, or a zoom key without Command, is not a zoom press.
+    assert zoom_direction(_zoom("a")) is None
+    assert zoom_direction(PressHotkey(type="press_hotkey", modifiers=[], key="0")) is None
+    # in -> out / reset, out -> in / reset: each undoes the previous change.
+    assert neutralizing_zoom_pair(_zoom("="), _zoom("0"))
+    assert neutralizing_zoom_pair(_zoom("+"), _zoom("-"))
+    assert neutralizing_zoom_pair(_zoom("-"), _zoom("+"))
+    assert neutralizing_zoom_pair(_zoom("-"), _zoom("0"))
+    # Zooming further in the same direction, or forward after a reset, is a
+    # fresh change; the very first press has nothing to undo.
+    assert not neutralizing_zoom_pair(_zoom("="), _zoom("="))
+    assert not neutralizing_zoom_pair(_zoom("0"), _zoom("="))
+    assert not neutralizing_zoom_pair(None, _zoom("0"))
+
+
+def test_zoom_in_undo_out_loop_injects_the_oscillation_hint() -> None:
+    """Two Cmd++/Cmd+0 pairs fold a "stop zooming" hint into the next turn.
+
+    The observed doom loop alternated two DIFFERENT zoom keys, so the streak
+    guard (same action, nothing moved) could not fire: every press succeeded
+    and every press moved the layout. The pair counter sees the two undos and
+    warns the model to read from the screenshot instead of resizing it.
+    """
+    seen: list[str | None] = []
+    executed: list[str] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        seen.append(state.last_error)
+        if state.last_error is not None and "viewport-zoom oscillation detected" in state.last_error:
+            return _turn(Finish(type="finish", status="success", summary="ok"))
+        # Alternating zoom in / reset — never the same key twice in a row.
+        return _turn(_zoom("=") if state.step_index % 2 == 0 else _zoom("0"))
+
+    def execute_physical(action: object) -> None:
+        if isinstance(action, PressHotkey):
+            executed.append(action.key)
+
+    runner = OodaRunner(provider=provider, execute_physical=execute_physical, max_steps=12)
+    final = runner.run(goal="read the posts")
+    assert final.step_index >= 5
+    hints = [e for e in seen if e is not None and "viewport-zoom oscillation detected" in e]
+    assert len(hints) == 1
+    assert "Cmd++/Cmd+-/Cmd+0" in hints[0]  # type: ignore[operator]
+    # All four presses ran; the hint is what stops the fifth.
+    assert executed == ["=", "0", "=", "0"]
+
+
+def test_zoom_undo_pair_is_refused_before_it_reaches_the_host() -> None:
+    """A model that keeps zooming past the hint is stopped pre-actuation.
+
+    The third Cmd++/Cmd+0 undo pair is refused the same way the fourth
+    identical click is (StuckLoopError into the recovery ladder), so a run can
+    never zoom itself into a socket-crashing loop of fifteen presses. The
+    runner-level refusal is asserted directly so the cycle guard (which can
+    also trip on an unchanging test screen) cannot mask what is being pinned.
+    """
+    runner = OodaRunner(
+        provider=lambda state: _turn(Finish(type="finish", status="success", summary="ok")),
+        execute_physical=lambda _action: None,
+        max_steps=5,
+    )
+    runner._last_physical = _zoom("=")
+    runner._zoom_ping_pong = 2
+    with pytest.raises(StuckLoopError) as excinfo:
+        runner._guard_zoom_ping_pong(_zoom("0"), "read the posts")
+    assert excinfo.value.repeats == 3
+    # One undo pair (or none) is ordinary behaviour: no refusal.
+    runner._last_physical = _zoom("=")
+    runner._zoom_ping_pong = 1
+    runner._guard_zoom_ping_pong(_zoom("0"), "read the posts")  # must not raise
 
 
 def test_an_alternating_two_action_cycle_is_caught_like_a_repeat() -> None:
@@ -989,3 +1093,63 @@ def test_identical_capture_reuses_encoding_but_geometry_invalidates_it(
     moved = runner._capture_frame(())
     assert moved is not None
     assert moved[2].origin.x == -100.0
+
+
+def test_cycle_identity_ignores_pixel_noise_when_ax_is_available() -> None:
+    first = replace(EMPTY_OBSERVATION, raw_ui_elements=('Button "Accept"',), signature="frame-a")
+    noisy = replace(first, signature="frame-b")
+    assert cycle_signature(first) == cycle_signature(noisy)
+    changed = replace(noisy, content=("Article opened",))
+    assert cycle_signature(first) != cycle_signature(changed)
+    blind = replace(EMPTY_OBSERVATION, signature="frame-a")
+    assert cycle_signature(blind) != cycle_signature(replace(blind, signature="frame-b"))
+
+
+def test_decide_step_preserves_all_rolling_context() -> None:
+    """DECIDE must never drop rolling context fields.
+
+    Regression for the state-loss bug where decide_step rebuilt
+    WorkingState field-by-field and dropped dialog_notes, playbook,
+    mcp_tools and tool_result each turn.
+    """
+    from pathlib import Path
+
+    from computeruse.skills.playbook import PlaybookSummary
+
+    state = WorkingState(
+        goal="g",
+        completed_steps=("step_0:mouse_move",),
+        last_error="e",
+        knowledge=("k",),
+        active_window="w",
+        ui_elements=("u",),
+        open_tabs=("t",),
+        dialog_notes=("d",),
+        playbook=PlaybookSummary(
+            name="p",
+            description="d",
+            tags=("t",),
+            source_path=Path("p.md"),
+        ),
+        screenshot_b64="b64",
+        observed_trail=("trail",),
+        mcp_tools=("tool",),
+        tool_result="result",
+        tool_history=("h",),
+    )
+    turn = AgentTurn(
+        thought="t",
+        sub_goal="s",
+        action=MouseClick(type="mouse_click", x=10, y=10, button="left", click_count=1),
+    )
+    nxt = decide_step(state, turn).state
+    assert nxt.step_index == state.step_index + 1
+    assert nxt.dialog_notes == state.dialog_notes
+    assert nxt.playbook == state.playbook
+    assert nxt.mcp_tools == state.mcp_tools
+    assert nxt.tool_result == state.tool_result
+    assert nxt.observed_trail == state.observed_trail
+    assert nxt.tool_history == state.tool_history
+    assert nxt.plan == state.plan
+    assert nxt.knowledge == state.knowledge
+    assert nxt.skill == state.skill

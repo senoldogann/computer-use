@@ -57,7 +57,10 @@ def test_extract_facts_from_run_and_upsert(tmp_path: Path) -> None:
     assert len(facts) == 2
     assert facts[0].app == "Google Chrome"
     assert "click address bar" in facts[0].key.lower()
-    assert "300" in facts[0].value
+    assert "300" not in facts[0].value, "coordinates go stale; memory keeps the pattern"
+    assert facts[0].value == "mouse_click"
+    assert "github.com" not in facts[1].value, "typed text is never stored verbatim"
+    assert facts[1].value == "type_text text=<10 chars>"
 
     store = SemanticStore(tmp_path / "semantic")
     for fact in facts:

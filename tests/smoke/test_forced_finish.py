@@ -1,16 +1,18 @@
 """P0-1: a force-accepted finish must never become a skill.
 
-The stalemate guard (``MAX_FINISH_REJECTIONS``) accepts the actor's finish
-when the auditor keeps rejecting it, so the run ends instead of looping
-forever. That accept used to travel as a plain ``outcome="success"``, and
-the caller's distill gate read exactly that — so a flow the auditor never
-verified was distilled into the skill store and handed to future runs as a
-recipe. An unverified flow is not a skill; it is the precise shape of
-memory poisoning.
+The stalemate guard (``MAX_FINISH_REJECTIONS``) ends a run whose finish
+claims the auditor keeps rejecting, so the actor and the auditor cannot
+trade turns forever. That ending used to travel as a plain
+``outcome="success"``: the caller's distill gate read exactly that, so a
+flow the auditor never verified was distilled into the skill store as a
+recipe — and the user was told the run succeeded when the machine's own
+screen had denied it. An unverified flow is not a skill, and an unverified
+success is a false-green.
 
-These tests pin both halves of the fix: the loop flags the forced accept
-and hands the flag to ``on_complete``, and a full agent run through the
-real (simulated) driver completes while distilling nothing.
+These tests pin both halves of the fix: the stalemate ending is recorded
+as a failure carrying an honest retrospective (never the model's claimed
+success), and a full agent run through the real (simulated) driver
+completes while distilling nothing.
 """
 
 from __future__ import annotations
@@ -20,7 +22,12 @@ from pathlib import Path
 from computeruse.agent import Agent, AgentConfig
 from computeruse.memory.schemas import Episode
 from computeruse.orchestrator.evidence import CompletionVerdict
-from computeruse.orchestrator.loop import AxProbeResult, OodaRunner, WorkingState
+from computeruse.orchestrator.loop import (
+    STALEMATE_RETROSPECTIVE,
+    AxProbeResult,
+    OodaRunner,
+    WorkingState,
+)
 from computeruse.orchestrator.schemas import AgentTurn, Finish, MouseClick, Wait
 from computeruse.security.autonomy import AutonomyLevel
 from computeruse.skills.distiller import Trajectory
@@ -42,11 +49,14 @@ def _deny_everything(_state: WorkingState, _claim: str) -> CompletionVerdict:
 
 
 def test_forced_finish_reaches_on_complete_flagged() -> None:
-    """Two rejections plus insistence ends the run — flagged, not laundered.
+    """Two rejections plus insistence ends the run — as an honest failure.
 
     The wait step exists so there is a trajectory to hand over (a run that
     never acted fires no callback at all); the finish insistence is the
-    actor disagreeing with the auditor on every turn after it.
+    actor disagreeing with the auditor on every turn after it. The stalemate
+    guard lets the run terminate, but never as the success the auditor
+    denied: the outcome handed to ``on_complete`` is ``failure`` with the
+    model's claim replaced by the honest retrospective.
     """
 
     def provider(state: WorkingState) -> AgentTurn:
@@ -54,17 +64,19 @@ def test_forced_finish_reaches_on_complete_flagged() -> None:
             return _turn(Wait(type="wait", duration_ms=5, reason="settle"))
         return _turn(Finish(type="finish", status="success", summary="done"))
 
-    received: list[tuple[str, bool]] = []
+    received: list[tuple[str, bool, str | None]] = []
     runner = OodaRunner(
         provider=provider,
         execute_physical=lambda _action: None,
         sensor=lambda: _ONE_BY_ONE,
         completion_check=_deny_everything,
-        on_complete=lambda _t, o, _r, _s, forced: received.append((o, forced)),
+        on_complete=lambda _t, o, r, _s, forced: received.append((o, forced, r)),
         max_steps=10,
     )
     runner.run(goal="do the thing")
-    assert received == [("success", True)]
+    # Failure outcome + forced flag + the honest diagnostic retrospective —
+    # never the model's own "done" summary riding to the user as a success.
+    assert received == [("failure", True, STALEMATE_RETROSPECTIVE)]
 
 
 def test_verified_finish_stays_unflagged() -> None:
@@ -125,8 +137,11 @@ def test_forced_success_distills_nothing(tmp_path: Path) -> None:
     assert result.skills == ()
     assert len(result.episodes) == 1
     episode = result.episodes[0]
-    assert episode.outcome == "success"
+    assert episode.outcome == "failure"
     assert episode.forced_completion is True
+    # The user-facing side is failure everywhere, and the stored episode now
+    # agrees: a forced finish was never verified, so it records as the failure
+    # the auditor implied, not the success the model claimed.
     assert result.succeeded is False
     assert result.outcome == "failure"
 

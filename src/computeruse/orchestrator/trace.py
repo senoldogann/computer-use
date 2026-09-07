@@ -33,6 +33,27 @@ LOGGER: Final = logging.getLogger(__name__)
 STEPS_FILENAME: Final[str] = "steps.jsonl"
 
 
+#: Characters of a tool answer carried on the live event stream. The full
+#: answer already lives in the run's tool history and observed trail; the
+#: panel only needs the head of it to render the "what came back" line under
+#: a command row. Bounded so one large page fetch cannot bloat every step
+#: line tailing the stream.
+STREAM_TOOL_PREVIEW_CHARS: Final[int] = 500
+
+
+def truncate_for_stream(text: str, *, max_chars: int = STREAM_TOOL_PREVIEW_CHARS) -> str:
+    """Shorten a tool answer for the live event stream (pure).
+
+    Single responsibility: bound the stream payload. Collapsing whitespace
+    would destroy code indentation the panel wants to show expanded, so the
+    text is only cut, never reshaped — the panel decides how to display it.
+    """
+    cleaned = text.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[:max_chars].rstrip() + "…"
+
+
 @dataclass(frozen=True)
 class StepTrace:
     """One step of one run, as it happened (pure data).
@@ -58,6 +79,12 @@ class StepTrace:
     #: Why the step failed, when it did. ``None`` on a step that succeeded.
     error: str | None
     screenshot_b64: str | None = None
+    #: Head of what a non-physical tool answered (search hits, page extract,
+    #: CUA REPL result). ``None`` for physical actions and for failures raised
+    #: before the tool answered. Truncated by :func:`truncate_for_stream`, so
+    #: the live stream stays small while the trace file keeps the preview the
+    #: panel actually rendered.
+    tool_result: str | None = None
 
 
 def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
@@ -68,6 +95,10 @@ def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
     of megabytes for a thirty-step run.
     """
     payload: dict[str, object] = {
+        # Discriminator so the panel can tell a step from the sibling @@CU
+        # records on the same stream ({"type": "plan"}, {"type": "stats"}):
+        # a step is the only one carrying a numeric "step".
+        "type": "step",
         "run_id": record.run_id,
         "step": record.step,
         "time": datetime.now(UTC).isoformat(timespec="milliseconds"),
@@ -79,6 +110,7 @@ def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
         "route": record.route,
         "verdict": record.verdict,
         "error": record.error,
+        "tool_result": record.tool_result,
         "screenshot": screenshot,
     }
     return json.dumps(payload, ensure_ascii=False, default=str)

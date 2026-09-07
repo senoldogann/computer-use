@@ -46,6 +46,7 @@ from computeruse.orchestrator.untrusted import (
     render_observed_data,
     sanitize_observed_text,
 )
+from computeruse.vision.capture import SCREENSHOT_MAP_MAX_SIDE
 
 # The action contract, spelled out for a model that has never seen it. The
 # exact JSON shape mirrors what `AgentTurn` validates at parse time, so the
@@ -91,10 +92,10 @@ ACTION_CONTRACT: Final[str] = (
     '- mouse_move: {"type": "mouse_move", "x": int, "y": int, "duration_ms": int (default 180)} — ONLY when hover, tooltip, or drag preparation is explicitly needed\n'
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
-    '- type_text: {"type": "type_text", "text": str, "wpm": int (default 40)}\n'
+    '- type_text: {"type": "type_text", "text": str, "wpm": int (default 120)} — ONLY for SHORT text (a few words, single keys). Anything longer than ~24 characters MUST be clipboard_paste.\n'
     '- web_search: {"type": "web_search", "query": str} — search the web through the connected MCP search tool when one exists; otherwise it answers with browser instructions.\n'
     '- web_fetch: {"type": "web_fetch", "url": str} — read a page\'s text. Server-rendered pages only.\n'
-    '- clipboard_paste: {"type": "clipboard_paste", "text": str} — preferred for URLs, search queries, and any long text (Cmd+V)\n'
+    '- clipboard_paste: {"type": "clipboard_paste", "text": str} — MANDATORY for URLs, search queries, and ANY text longer than ~24 characters (one instant Cmd+V instead of seconds of keystrokes)\n'
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
     '- activate_app: {"type": "activate_app", "app": str} — brings an application (e.g. "Google Chrome", "Notes", "Finder") to the front\n'
     '- wait: {"type": "wait", "duration_ms": int, "reason": str}\n'
@@ -128,9 +129,11 @@ ACTION_CONTRACT: Final[str] = (
     "     if the emerald bounding box on the screenshot outlines your intended target icon, use\n"
     "     `click_mark` with its [mark] index — never fall back to coordinate estimation if a mark exists.\n"
     "   - Derive every (x, y) from the CURRENT screenshot or the AX element list.\n"
-    "   - Coordinate space: the screenshot is a SCALED-DOWN MAP of the screen (max 512px on its\n"
-    "     longest side). Report x,y EXACTLY as they appear in that image. The system converts them\n"
-    "     to real screen points for you — never apply any scale math yourself.\n"
+    "   - Coordinate space: the screenshot is a MAP of the screen (sized as stated in the\n"
+    "     PRIMARY PERCEPTION note — usually the full logical resolution, one image pixel per\n"
+    "     screen point, so page text keeps its real size and is readable as-is). Report x,y\n"
+    "     EXACTLY as they appear in that image. The system converts them to real screen points\n"
+    "     for you — never apply any scale math yourself.\n"
     "   - The AX list covers page content (links, headings, cells) as well as native chrome, and\n"
     "     each element is outlined on the screenshot. Coordinates in the AX list are already EXACT\n"
     "     CENTER points in the same image space: click that point EXACTLY as given with mouse_click\n"
@@ -155,6 +158,8 @@ ACTION_CONTRACT: Final[str] = (
     "     (reveals content below), dy NEGATIVE scrolls UP (reveals content above).\n"
     "   - Re-read the new screenshot after each scroll. Repeat small scrolls until the target is visible,\n"
     "     then click the coordinate you read from that screenshot.\n"
+    "   - If the element list carries the note '(the page extends below the visible area...)',\n"
+    "     there IS more content below — scroll down before concluding the target does not exist.\n"
     "   - If a scroll changes nothing, the cursor is probably not over a scrollable area (move it to the\n"
     "     page center) — or you are already at the end, in which case scroll the OTHER way.\n"
     "   - Headers, avatars and account menus live at the TOP: scroll up before hunting downward.\n"
@@ -175,12 +180,40 @@ ACTION_CONTRACT: Final[str] = (
     "\n"
     "   - Do NOT click browser chrome (tab bar, address bar, toolbar) when you mean a page element.\n"
     "\n"
-    "7. NEVER NAVIGATE BY KEYBOARD FOCUS (Tab / arrows):\n"
+    "7. READING WEB TEXT — NEVER ZOOM TO READ:\n"
+    "   - HARD RULE: NEVER use browser zoom to read. Do not press Cmd+'+', Cmd+'=', Cmd+'-' or\n"
+    "     Cmd+'0' to make page text larger or smaller, even when text looks small on screen. Zoom\n"
+    "     does not make text legible to you, it rescales every coordinate under the layout, and the\n"
+    "     orchestrator treats a zoom-in followed by its undo (e.g. Cmd++ then Cmd+0) as a stuck\n"
+    "     loop and will interrupt you. The screenshot the model reads IS at the page's real text\n"
+    "     size — read it there, don't enlarge it.\n"
+    "   - To examine the posts/text of a web page or feed (an X.com timeline, a news page), in this\n"
+    "     order:\n"
+    "     (a) SCROLL: move the cursor over the page content and mouse_scroll down (dy positive);\n"
+    "         re-read the fresh screenshot after every scroll. Feeds lazy-load, so each scroll\n"
+    "         reveals the posts below; Page Down is a fallback for large jumps.\n"
+    "     (b) SELECT+COPY: if you need long-form body text and scrolling has not surfaced it\n"
+    "         cleanly, click into the page and press Cmd+A then Cmd+C to select and copy the\n"
+    "         content, then re-observe — the copy is how the text becomes the page's selected\n"
+    "         content, visible to the accessibility state. Never zoom to 'enlarge' text, and do\n"
+    "         not paste the clipboard anywhere unless the goal names a destination.\n"
+    "     (c) VISUAL SCAN: when you reach the bottom, scroll back to the top and skim the whole\n"
+    "         page once before concluding that content is absent.\n"
+    "   - AX SCOPE: browsers DO expose page links, headings, buttons and cells in the AX element\n"
+    "     list, but the body text of heavy JavaScript apps (X/Twitter timelines, most modern news\n"
+    "     web apps) is NOT guaranteed to appear there as elements. If the AX list is empty or\n"
+    "     static for the text you need, stop re-querying the accessibility state — the text is in\n"
+    "     the screenshot, read it from the pixels. Never enter a query-AX loop hoping body text\n"
+    "     materialises.\n"
+    "   - web_fetch works for server-rendered pages only; for X.com-style apps it cannot help, so\n"
+    "     read those on screen by scrolling.\n"
+    "\n"
+    "8. NEVER NAVIGATE BY KEYBOARD FOCUS (Tab / arrows):\n"
     "   - Do not press Tab, Shift+Tab or arrow keys to 'find' an invisible element. Focus routing is\n"
     "     unpredictable across web apps and lands on the wrong control (profile popups, the address bar).\n"
     "   - Scroll the element into view and click it instead.\n"
     "\n"
-    "8. RECOVERY — READ THIS WHENEVER 'Last error to recover from' IS PRESENT:\n"
+    "9. RECOVERY — READ THIS WHENEVER 'Last error to recover from' IS PRESENT:\n"
     "   The orchestrator escalates deliberately, and the error text tells you which rung you are on:\n"
     "   - FIRST failure of a kind: a corrected retry is fine. Fix the specific thing named.\n"
     "   - SECOND in a row: do NOT retry the same action with adjusted coordinates. Change the METHOD —\n"
@@ -193,16 +226,20 @@ ACTION_CONTRACT: Final[str] = (
     "     accept/consent/continue control (or reject/close when that is the sensible path) using\n"
     "     its mark number — never try to reach content a dialog covers. A sign-in dialog you\n"
     "     cannot complete should be closed or dismissed, not filled in. Re-observe, then continue.\n"
+    "   - A SecurityCheck is a Cloudflare/CAPTCHA verification: click its verify checkbox (it\n"
+    "     is a leading mark, or aim at its center on the screenshot), wait for the page to\n"
+    "     reload, and re-observe. If the challenge cannot be solved after two attempts, finish\n"
+    "     with status failed and say the page is blocked by a captcha.\n"
     "   - The macOS menu bar (y near the top edge) is permanent system UI, not an open popup. Do not spam Escape.\n"
     "   - If unexpected tabs appear, a click opened a background tab instead of navigating: close it with\n"
     "     Cmd+W and return to the original tab.\n"
     "\n"
-    "9. ACTION MINIMIZATION:\n"
+    "10. ACTION MINIMIZATION:\n"
     "   - Prefer the smallest reliable action that advances the goal.\n"
     "   - Do not emit mouse_move before mouse_click unless hover, tooltip inspection, or a drag needs it.\n"
-    "   - Prefer clipboard_paste for long text, queries, prompts, and URLs.\n"
+    "   - MUST use clipboard_paste (never type_text) for any text longer than ~24 characters — typing it key by key wastes tens of seconds.\n"
     "\n"
-    "10. FINISHING — THE STRICTEST RULE:\n"
+    "11. FINISHING — THE STRICTEST RULE:\n"
     "   - Emit finish with status 'success' ONLY when the CURRENT screenshot itself shows the goal is done.\n"
     "   - Having performed the right actions is NOT evidence of success. The final screen is.\n"
     "   - Your summary must state the visible evidence ('the profile page shows the name updated to X'),\n"
@@ -211,11 +248,101 @@ ACTION_CONTRACT: Final[str] = (
     "   - If the goal genuinely cannot be reached from here, emit finish with status 'failed' and say\n"
     "     exactly what blocked it. An honest failure is a correct answer; a false success is not.\n"
     "\n"
-    "11. IDE INPUT HANDLING:\n"
+    "12. IDE INPUT HANDLING:\n"
     "   - Locate the IDE composer from the screenshot or AX elements; never rely on a fixed coordinate.\n"
     "   - Focus the composer, paste the complete prompt, submit with Return, then verify the prompt\n"
-    "     appears in the conversation before finishing."
+    "     appears in the conversation before finishing.\n"
+    "\n"
+    "13. CROSS-APPLICATION WORKFLOWS (e.g. read in browser, summarize to Notes):\n"
+    "   - When a goal requires reading content in one app (e.g. Chrome) and saving/summarizing in\n"
+    "     another (e.g. Notes):\n"
+    "     (a) GATHER COMPLETELY FIRST: finish reading and collecting all required points in the source\n"
+    "         app before switching away. Formulate the whole summary in your mind.\n"
+    "     (b) ACTIVATE ONCE: switch to the destination app with activate_app (e.g. 'Notes').\n"
+    "     (c) CREATE & PASTE IN ONE STEP: create the new note/document (Cmd+N via press_hotkey),\n"
+    "         and immediately clipboard_paste the complete gathered summary. Never type it character-by-character.\n"
+    "     (d) NEVER OSCILLATE: do NOT switch back to the source app 'just to check'. Trust the\n"
+    "         observations already recorded in your thoughts. Switching back and forth wastes steps and\n"
+    "         triggers cyclic loop guards."
 )
+
+# ---------------------------------------------------------------------------
+# Tool-tier trimming (Law 2: never advertise an action that cannot work)
+# ---------------------------------------------------------------------------
+#
+# ``ACTION_CONTRACT`` above documents the full action set, tools included.
+# That full text is right for a run with MCP servers or the CUA REPL
+# connected, and actively misleading for one without either: the model reads
+# a ``call_tool``/``web_search`` contract and spends its steps on actions that
+# answer "unavailable" (measured in the field: repeated ghost-tool calls
+# instead of screen work). The markers below carve the tool-only bullets and
+# the look-up guidance out of the full text to build the no-tool variant,
+# so the contract the model reads describes exactly the tools it can call.
+
+#: The single-line ``web_search`` bullet (removed when no search backend exists).
+_WEB_SEARCH_BULLET_START: Final[str] = "- web_search: {\"type\": \"web_search\", \"query\": str}"
+#: The multi-line ``call_tool`` bullet, from its start through its last line.
+_CALL_TOOL_BULLET_START: Final[str] = "- call_tool: {\"type\": \"call_tool\", \"tool\": str, \"arguments\": object}"
+_CALL_TOOL_BULLET_END: Final[str] = "cannot miss by a few points.\n"
+#: The ``finish`` bullet, before which the no-tool note is inserted.
+_FINISH_BULLET_MARK: Final[str] = "- finish: {\"type\": \"finish\""
+#: Section-6 look-up guidance and the browser-chrome rule that follows it.
+_LOOKUP_GUIDANCE_MARK: Final[str] = "   WHEN TO LOOK SOMETHING UP INSTEAD OF LOOKING AT IT:"
+_BROWSER_CHROME_RULE_MARK: Final[str] = "   - Do NOT click browser chrome"
+
+#: Replaces the section-2 tool bullets in the no-tool contract.
+_NO_TOOLS_ACTION_NOTE: Final[str] = (
+    "- NOTE: no MCP tools and no CUA REPL (js) are connected this run — call_tool, "
+    "web_search and the CUA JavaScript REPL are UNAVAILABLE. Do not emit them; they "
+    "answer with an error and waste the step. Reach the web by operating the real "
+    "browser on screen, or web_fetch for a plain URL's server-rendered text.\n"
+)
+
+#: Replaces the section-6 look-up guidance in the no-tool contract.
+_NO_TOOLS_LOOKUP_GUIDANCE: Final[str] = (
+    "   NO EXTERNAL TOOLS ARE CONNECTED THIS RUN (no MCP servers, no CUA REPL):\n"
+    "   web_search and call_tool are UNAVAILABLE — do not emit them. For a fact or a\n"
+    "   page, operate the real browser on screen (Cmd+L, type the query, Return) and\n"
+    "   read the results from the screen; web_fetch is available only when you already\n"
+    "   have a plain URL and want its server-rendered text. Nothing about THIS machine\n"
+    "   (windows, dialogs, downloads) is reachable any way but the screen.\n"
+)
+
+
+def _cut_line(text: str, start_marker: str) -> str:
+    """Remove one line starting at ``start_marker``, through its newline (pure)."""
+    start = text.index(start_marker)
+    end = text.index("\n", start) + 1
+    return text[:start] + text[end:]
+
+
+def _cut_span(text: str, start_marker: str, end_marker: str) -> str:
+    """Remove ``text`` from ``start_marker`` through ``end_marker`` (pure)."""
+    start = text.index(start_marker)
+    end = text.index(end_marker, start) + len(end_marker)
+    return text[:start] + text[end:]
+
+
+def no_tool_contract() -> str:
+    """The action contract for a run with no tool tier connected (pure).
+
+    Built from :data:`ACTION_CONTRACT` by carving out the tool-only bullets
+    and the look-up guidance, so the two texts cannot drift apart: the full
+    contract is the single source, and any future edit to it either keeps the
+    markers (and is trimmed correctly) or moves them (and fails loudly here at
+    ``str.index`` instead of silently advertising a ghost tool).
+    """
+    text = _cut_line(ACTION_CONTRACT, _WEB_SEARCH_BULLET_START)
+    text = _cut_span(text, _CALL_TOOL_BULLET_START, _CALL_TOOL_BULLET_END)
+    finish_at = text.index(_FINISH_BULLET_MARK)
+    text = text[:finish_at] + _NO_TOOLS_ACTION_NOTE + text[finish_at:]
+    guidance_start = text.index(_LOOKUP_GUIDANCE_MARK)
+    guidance_end = text.index(_BROWSER_CHROME_RULE_MARK, guidance_start)
+    return text[:guidance_start] + _NO_TOOLS_LOOKUP_GUIDANCE + text[guidance_end:]
+
+
+#: Precomputed once: the trim is pure and deterministic over the constant.
+NO_TOOL_ACTION_CONTRACT: Final[str] = no_tool_contract()
 
 
 COMPLETION_AUDIT_CONTRACT: Final[str] = (
@@ -339,8 +466,9 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
             ObservedSection(
                 "POPUP DIALOGS DETECTED ON SCREEN — resolve these FIRST (their controls "
                 "are the leading numbered elements in the AX list below; accept/consent/"
-                "continue to proceed, or reject/close when that keeps the goal on track), "
-                "then continue the task:",
+                "continue to proceed, or reject/close when that keeps the goal on track; "
+                "a SecurityCheck is a Cloudflare/CAPTCHA verification — click its verify "
+                "checkbox and wait, then re-observe), then continue the task:",
                 state.dialog_notes,
             )
         )
@@ -398,7 +526,7 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         # follows instructions.
         observed.append(
             ObservedSection(
-                "Tools available via call_tool (described by external servers):",
+                "Tools available via call_tool (from MCP servers and the CUA REPL):",
                 state.mcp_tools,
             )
         )
@@ -420,11 +548,13 @@ def state_context(state: WorkingState, *, max_steps: int = 100) -> str:
         lines.append(block)
     if state.screenshot_b64:
         lines.append(
-            "PRIMARY PERCEPTION (VISION-FIRST): A live screenshot is attached as a scaled-down "
-            "MAP of the screen (max 512px). Report every click coordinate EXACTLY as it appears "
-            "in the image — the system converts image pixels to real screen points "
-            "automatically, so never apply scale math yourself. AX element coordinates, when "
-            "listed above, are in this same image space. What you point at is what gets clicked."
+            "PRIMARY PERCEPTION (VISION-FIRST): A live screenshot is attached as a MAP of the "
+            f"screen (longest side up to {SCREENSHOT_MAP_MAX_SIDE}px; on a typical display this "
+            "is the full logical resolution, so text appears at its real size and is directly "
+            "readable — never zoom the browser to enlarge it). Report every click coordinate "
+            "EXACTLY as it appears in the image — the system converts image pixels to real screen "
+            "points automatically, so never apply scale math yourself. AX element coordinates, "
+            "when listed above, are in this same image space. What you point at is what gets clicked."
         )
     if state.skill is not None:
         # Law 3 Stage 2: the mounted skill's full instructions, so the model
@@ -528,7 +658,13 @@ def decision_prompt(
     """
     parts = [
         f"Application: {app}",
-        ACTION_CONTRACT,
+        # The contract advertises call_tool/web_search only when a tool tier
+        # (MCP server or the CUA REPL) is actually connected: ``mcp_tools`` is
+        # stamped from the runner's real wiring (including the js advert when
+        # the REPL engine is live), so an empty list is exactly "no tools at
+        # all", and the model is then handed the trimmed contract that says so
+        # instead of spending steps on tools that answer "unavailable".
+        ACTION_CONTRACT if state.mcp_tools else NO_TOOL_ACTION_CONTRACT,
         "",
         *( (BACKGROUND_ACTUATION_NOTE, "") if background else () ),
         state_context(state, max_steps=max_steps),
@@ -545,6 +681,16 @@ def _unescape_text_action(action: Action) -> Action:
     if isinstance(action, (ClipboardPaste, TypeText)):
         return action.model_copy(update={"text": html.unescape(action.text)})
     return action
+
+
+#: Text longer than this is pasted, not typed — unless the model explicitly
+#: chose a cadence. Keystrokes are paced one by one (a 100-character paragraph
+#: costs ~30 s at the default cadence) while a paste is one Cmd+V; the prompt
+#: already says this, but guidance alone does not move weak models, so the
+#: parser enforces it. Short strings stay on the keystroke path, where
+#: per-key behavior (single-key triggers, key-handling widgets) can matter.
+#: An explicit ``wpm`` is respected as deliberate model intent.
+LONG_TEXT_PASTE_CHARS: Final[int] = 24
 
 
 def _normalize_action_dict(action: dict[str, object]) -> dict[str, object]:
@@ -648,6 +794,18 @@ def _normalize_action_dict(action: dict[str, object]) -> dict[str, object]:
     # Text string casts
     if "text" in action and action["text"] is not None:
         action["text"] = str(action["text"])
+
+    # Long keystroke runs become one paste. Runs on the raw dict — before
+    # Pydantic fills the default — so a model-supplied ``wpm`` reads as intent
+    # and is honoured, while an unspecified cadence on bulk text is rerouted.
+    # The credential guards downstream cover both shapes identically, and the
+    # quiet background path writes both through the same AX value setter, so
+    # neither safety nor background mode distinguishes them.
+    if action.get("type") == "type_text" and "wpm" not in action:
+        text = action.get("text")
+        if isinstance(text, str) and len(text) > LONG_TEXT_PASTE_CHARS:
+            action["type"] = "clipboard_paste"
+            action.pop("wpm", None)
 
     return action
 

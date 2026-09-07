@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -88,7 +89,7 @@ from computeruse.orchestrator.schemas import (
     WebFetch,
     WebSearch,
 )
-from computeruse.orchestrator.trace import StepTrace
+from computeruse.orchestrator.trace import StepTrace, truncate_for_stream
 from computeruse.security.approvals import ApprovalRequiredError
 from computeruse.security.killswitch import KillSwitch
 from computeruse.security.permissions import (
@@ -98,7 +99,11 @@ from computeruse.security.permissions import (
 )
 from computeruse.skills.distiller import Trajectory
 from computeruse.skills.playbook import PlaybookSummary
-from computeruse.skills.registry import RelevanceMatch
+from computeruse.skills.registry import (
+    RelevanceMatch,
+    routes_disagree_on_site,
+    site_markers,
+)
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.tools import WebError, fetch_page
 from computeruse.vision.ax import (
@@ -145,10 +150,15 @@ LOGGER: Final = logging.getLogger(__name__)
 
 # Physical action types that must go to the driver, versus those the loop
 # handles internally. A frozenset keeps the routing decision a pure lookup.
+# ``click_mark`` is resolved to a ``MouseClick`` before actuation, but the
+# mark-resolution failure path traces the original decision through
+# ``decide_step`` — an unresolved ClickMark must still route as physical
+# instead of raising ValueError and crashing out of the recovery ladder.
 _PHYSICAL_ACTIONS: Final[frozenset[str]] = frozenset(
     {
         "mouse_move",
         "mouse_click",
+        "click_mark",
         "mouse_drag",
         "mouse_scroll",
         "type_text",
@@ -156,6 +166,12 @@ _PHYSICAL_ACTIONS: Final[frozenset[str]] = frozenset(
         "press_hotkey",
         "activate_app",
     }
+)
+# Tools reach the world without the host's input devices, so they are
+# routed away from the driver entirely: no coordinate gate, no focus guard,
+# no cursor to give back to the user afterwards.
+_TOOL_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"web_search", "web_fetch", "call_tool"}
 )
 _INTERNAL_ACTIONS: Final[frozenset[str]] = frozenset({"wait", "load_skill", "finish"})
 
@@ -204,10 +220,21 @@ SETTLE_MAX_POLLS: Final[int] = 8
 SETTLE_INTERVAL_S: Final[float] = 0.1
 
 # How many times a claimed completion may be rejected by the auditor before
-# the loop accepts the model's own verdict. Without a cap, an auditor and an
-# actor that permanently disagree would trade turns until the step budget
-# ran out — a stalemate is a worse outcome than an honestly-reported finish.
+# the loop stops letting the actor try again. Without a cap, an auditor and an
+# actor that permanently disagree would trade turns until the step budget ran
+# out. The cap ends the run (bounded), but it must never end it as the success
+# the auditor denied: an unverified claim closed as success is a false-green
+# the user trusts — the model's word over the machine's screen.
 MAX_FINISH_REJECTIONS: Final[int] = 2
+
+#: Retrospective recorded when the auditor rejected every completion claim and
+#: the stalemate guard had to end the run. The model's own summary is the
+#: least trustworthy account of its success, so the user is owed the machine's
+#: refusal, not the model's claim. Kept in the operator's language because it
+#: is a user-facing summary, like the browser fallback copy below.
+STALEMATE_RETROSPECTIVE: Final[str] = (
+    "Görev tamamlanamadı: ekran kanıtı doğrulanamadı ve auditor reddetti."
+)
 
 #: Consecutive target-app AX probe failures that declare the app frozen.
 #: One failed snapshot is a driver hiccup; three in a row while the window
@@ -364,9 +391,11 @@ class WorkingState:
     #: screen at once (a calculator covers the page whose number it used), and
     #: without a record of what the machine showed, such a goal is unprovable.
     observed_trail: tuple[str, ...] = ()
-    #: Tools borrowed from MCP servers, described one per line. Empty when
-    #: none are configured, which is how the prompt knows not to offer the
-    #: action at all rather than advertise something that cannot work.
+    #: Tools this runner can actually execute, described one per line — MCP
+    #: server tools plus the CUA REPL (js) when its engine is live. Empty when
+    #: none are connected, which is how the prompt knows not to offer
+    #: call_tool/web_search at all rather than advertise something that cannot
+    #: work (Law 2: never teach a ghost tool).
     mcp_tools: tuple[str, ...] = ()
     #: What the last non-physical tool returned — search hits, a page's text,
     #: or the reason it could not answer. Held for exactly one turn: it is an
@@ -420,32 +449,9 @@ def _route_for(action: Action) -> Routing:
     Raises :class:`ValueError` for the one genuinely invalid case — an internal
     action that cannot legally touch the driver.
     """
-    if action.type == "mouse_move":
+    if action.type in _PHYSICAL_ACTIONS:
         return "physical"
-    if action.type == "mouse_click":
-        return "physical"
-    if action.type == "click_mark":
-        # Resolved to a MouseClick before actuation, but the mark-resolution
-        # failure path traces the original decision through decide_step — an
-        # unresolved ClickMark must still route instead of raising ValueError
-        # and crashing the run out of the recovery ladder.
-        return "physical"
-    if action.type == "mouse_drag":
-        return "physical"
-    if action.type == "mouse_scroll":
-        return "physical"
-    if action.type == "type_text":
-        return "physical"
-    if action.type == "clipboard_paste":
-        return "physical"
-    if action.type == "press_hotkey":
-        return "physical"
-    if action.type == "activate_app":
-        return "physical"
-    # Tools reach the world without the host's input devices, so they are
-    # routed away from the driver entirely: no coordinate gate, no focus guard,
-    # no cursor to give back to the user afterwards.
-    if action.type in ("web_search", "web_fetch", "call_tool"):
+    if action.type in _TOOL_ACTIONS:
         return "internal_tool"
     if action.type == "wait":
         return "internal_wait"
@@ -482,14 +488,16 @@ def same_physical_action(left: Action, right: Action) -> bool:
 def map_action_to_screen(action: Action, screen_map: ScreenMap) -> Action:
     """Map a model-emitted coordinate action into global screen points.
 
-    The VLM perceives the screenshot as a scaled-down map (max 512px, see
-    :func:`computeruse.vision.capture.downscale_to_max_side`) of *one* display,
-    so every coordinate it reports is in image pixels measured from that
-    display's corner — while the driver clicks in global logical points
-    measured from the desktop's. :class:`ScreenMap` owns both halves of that
-    conversion (the scale and the display's origin), so this gate cannot apply
-    one and forget the other: a bare factor was enough while everything ran on
-    the primary display and silently wrong the moment it did not.
+    The VLM perceives the screenshot as a map of *one* display capped at
+    :data:`computeruse.vision.capture.SCREENSHOT_MAP_MAX_SIDE` (see
+    :func:`computeruse.vision.capture.downscale_to_max_side`; on a typical
+    MacBook logical display the map is 1:1 with screen points), so every
+    coordinate it reports is in image pixels measured from that display's
+    corner — while the driver clicks in global logical points measured from
+    the desktop's. :class:`ScreenMap` owns both halves of that conversion (the
+    scale and the display's origin), so this gate cannot apply one and forget
+    the other: a bare factor was enough while everything ran on the primary
+    display and silently wrong the moment it did not.
 
     Non-coordinate actions pass through unchanged (pure).
     """
@@ -667,6 +675,91 @@ def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REP
     if isinstance(left, CallTool) and isinstance(right, CallTool):
         return left.tool == right.tool and _args_similar(left.arguments, right.arguments)
     return same_physical_action(left, right)
+
+
+# ---------------------------------------------------------------------------
+# Neutralizing viewport shortcuts (stuck-loop guard, Law 2)
+# ---------------------------------------------------------------------------
+#
+# Browser zoom is the canonical doom-loop: a model that cannot read page text
+# presses Cmd++ to enlarge it, decides the result is no better, and presses
+# Cmd+0 (or Cmd+-) to undo — then repeats. Every press *succeeds* and every
+# press changes the screen, so the repetition guard's two halves (same action;
+# nothing moved) never fire while the pair returns the viewport to where it
+# started and reads nothing. These key families are the only viewport-scale
+# shortcuts the guard understands; everything else keeps the ordinary
+# equivalence rules.
+
+#: Keys that increase the viewport scale (``+`` needs Shift on a US layout, so
+#: models also emit ``=``).
+_ZOOM_IN_KEYS: Final[frozenset[str]] = frozenset({"+", "="})
+#: Keys that decrease the viewport scale (``_`` is the shifted ``-``).
+_ZOOM_OUT_KEYS: Final[frozenset[str]] = frozenset({"-", "_"})
+#: Keys that reset the viewport scale to 100%.
+_ZOOM_RESET_KEYS: Final[frozenset[str]] = frozenset({"0"})
+
+#: Zoom is a Command+key shortcut. Control is excluded so an unrelated app
+#: shortcut sharing the keys with a different modifier never counts; Shift is
+#: tolerated because the plus itself is Shift+equals and models spell the
+#: gesture either way.
+_ZOOM_MODIFIER: Final[str] = "command"
+_FORBIDDEN_ZOOM_MODIFIERS: Final[frozenset[str]] = frozenset({"control"})
+
+
+def zoom_direction(action: Action) -> Literal["in", "out", "reset"] | None:
+    """Whether a hotkey is a Command+zoom viewport change (pure)."""
+    if not isinstance(action, PressHotkey):
+        return None
+    modifiers = set(action.modifiers)
+    if _ZOOM_MODIFIER not in modifiers or modifiers & _FORBIDDEN_ZOOM_MODIFIERS:
+        return None
+    key = action.key.casefold()
+    if key in _ZOOM_IN_KEYS:
+        return "in"
+    if key in _ZOOM_OUT_KEYS:
+        return "out"
+    if key in _ZOOM_RESET_KEYS:
+        return "reset"
+    return None
+
+
+def neutralizing_zoom_pair(previous: Action | None, current: Action) -> bool:
+    """True when ``current`` undoes the viewport change of ``previous`` (pure).
+
+    ``Cmd++`` followed by ``Cmd+0`` is the pair measured in the field (15 zoom
+    presses on an X.com timeline before the run wedged); ``Cmd+-`` then
+    ``Cmd++`` and the reset paired with either direction undo their own change
+    too. A zoom *forward* after a reset (``Cmd+0`` then ``Cmd++``) moves the
+    view to a scale it has not just left, so it is a fresh change rather than
+    an undo and does not count. ``previous=None`` (no prior sensitive action)
+    can never undo anything.
+    """
+    if previous is None:
+        return False
+    previous_direction = zoom_direction(previous)
+    current_direction = zoom_direction(current)
+    if previous_direction is None or current_direction is None:
+        return False
+    if previous_direction == current_direction:
+        return False
+    if current_direction == "reset":
+        return True
+    return previous_direction != "reset"
+
+
+def zoom_ping_pong_diagnostic(previous: Action, current: Action, times: int) -> str:
+    """LLM-facing corrective hint when zoom presses keep undoing each other (pure)."""
+    return (
+        f"viewport-zoom oscillation detected: you changed the page zoom and then "
+        f"undid it ({previous.model_dump(exclude_none=True)} followed by "
+        f"{current.model_dump(exclude_none=True)}) {times} times. Every pair "
+        f"returns the viewport to where it started, so this loop cannot read "
+        "anything. STOP adjusting the browser zoom for this goal — never press "
+        "Cmd++/Cmd+-/Cmd+0 again. The screenshot carries page text at its real "
+        "size: read it directly from the image, scroll the page to reveal more "
+        "content (mouse_scroll with the cursor over the content, dy>0 scrolls "
+        "down), and emit finish if the goal is already met."
+    )
 
 
 def repetition_diagnostic(action: Action, repeats: int) -> str:
@@ -932,6 +1025,22 @@ NO_MCP_SEARCH_FALLBACK: Final[str] = (
     "tarayıcısını açarak aramanızı gerçekleştirin."
 )
 
+#: One-line advertisement for the CUA REPL (``js``) tool when an engine is
+#: live. Surfaced through the same channel as MCP tool descriptions
+#: (``WorkingState.mcp_tools``) so the model's available-tool list is the
+#: complete truth: a runner with only the REPL connected would otherwise
+#: advertise nothing while ``call_tool`` with tool ``js`` works, and a runner
+#: with neither would be the only one told it has none. Written by the
+#: harness (static, sanitised), so it needs no further escaping beyond the
+#: data fence ``state_context`` wraps the whole list in.
+CUA_JS_TOOL_LINE: Final[str] = (
+    "js — CUA REPL: run JavaScript that drives the desktop "
+    "(cua.getApp('Name'), app.getAXState(), app.find('Save'), app.click(el), "
+    "app.typeText('...'), app.pressKey('Cmd+S'), app.scroll([x,y],'down',1), "
+    "app.waitForElement('Save', {timeoutMs:3000}), el.crop(), "
+    "app.getWindowBounds(), app.findVisual('Send'))."
+)
+
 #: Substrings marking an MCP tool as a web search tool (matched against the
 #: qualified name and the server-written description, case-insensitively).
 _MCP_SEARCH_KEYWORDS: Final[tuple[str, ...]] = ("search", "exa", "tavily", "brave")
@@ -1029,32 +1138,13 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
         # times. Its own stated intent is the cheapest true record of that,
         # and it costs one line per step.
         step_label = f"{step_label} — {decision.sub_goal[:SUB_GOAL_LABEL_MAX_CHARS]}"
-    next_state = WorkingState(
-        goal=state.goal,
-        completed_steps=state.completed_steps,
-        last_error=state.last_error,
-        step_index=state.step_index + 1,
-        knowledge=state.knowledge,
-        active_window=state.active_window,
-        ui_elements=state.ui_elements,
-        open_tabs=state.open_tabs,
-        skill=state.skill,
-        screenshot_b64=state.screenshot_b64,
-        # The navigation trail accumulates across the whole run: OBSERVE reads
-        # it back in and extends it, so dropping it here means every cycle
-        # starts from empty and the trail never grows past one entry. That is
-        # the exact blindness PR #17 fixed — the auditor asking to see a search
-        # result and the page it opened at the same time, on a screen that can
-        # only show one.
-        observed_trail=state.observed_trail,
-        # The tool transcript is run-accumulated evidence, not per-observation
-        # perception: dropping it here would blind the completion auditor to
-        # every tool answer older than one turn.
-        tool_history=state.tool_history,
-        # The strategic plan is part of the rolling context: a decision must
-        # never drop the roadmap the provider is executing against (Law 4.3).
-        plan=state.plan,
-    )
+    # All rolling context survives DECIDE via replace: OBSERVE refreshes
+    # perception fields each cycle, but DECIDE must never drop them.
+    # Dropping observed_trail resets it every cycle (PR #17 blindness);
+    # dropping tool_history blinds the completion auditor; dropping plan
+    # loses the roadmap (Law 4.3); dropping dialog_notes/playbook/mcp_tools
+    # /tool_result resets dialog, skill, tool context each turn.
+    next_state = replace(state, step_index=state.step_index + 1)
     return StepOutcome(state=next_state, action=action, route=route, step_label=step_label)
 
 
@@ -1163,8 +1253,10 @@ def cycle_signature(observation: Observation) -> str:
     """
     window = observation.window
     title = f"{window.app_name}|{window.window_title}" if window is not None else ""
+    # Live overlays and animation must not disguise a repeated AX state.
+    frame = "" if observation.raw_ui_elements or observation.content else observation.signature
     return (
-        f"{observation.signature}|{title}|{hash(observation.raw_ui_elements)}"
+        f"{frame}|{title}|{hash(observation.raw_ui_elements)}"
         f"|{hash(observation.content)}"
     )
 
@@ -1330,9 +1422,18 @@ class OodaRunner:
     budget_guard: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
+        self._visited_transitions: deque[tuple[str, str]] = deque(
+            maxlen=CYCLE_MEMORY
+        )
+        self._reset_run_state()
+
+    def _reset_run_state(self) -> None:
+        """Reset all per-run shell state to its initial values.
+
+        Called once at construction (``__post_init__``) and again at the top
+        of every ``run()`` so a runner never leaks history between goals.
+        """
         # Trajectory of *successfully executed* actions in the current run.
-        # Shell state, not a constructor arg; reset at every ``run()`` so a
-        # runner never leaks history between goals.
         self._executed: list[Action] = []
         self._sub_goals: list[str] = []
         # Accessibility identity of what each executed step acted on, aligned
@@ -1347,10 +1448,6 @@ class OodaRunner:
         # The skill mounted by RETRIEVE in the current run (Law 3.2).
         self._skill: SkillDefinition | None = None
         self._working_app: str | None = None
-        # Bounded so a long run cannot grow it; see CYCLE_MEMORY.
-        self._visited_transitions: deque[tuple[str, str]] = deque(
-            maxlen=CYCLE_MEMORY
-        )
         # Best-effort perception warnings are logged once per run, then
         # demoted to debug: a permanently-failing probe (e.g. consent missing)
         # must not spam one line per step, but the first failure is still loud.
@@ -1369,6 +1466,12 @@ class OodaRunner:
         # the layout signature does not move.
         self._last_physical: Action | None = None
         self._stuck_streak: int = 0
+        # Viewport-zoom oscillation guard: how many times an executed zoom
+        # press undid the previous one (Cmd++ then Cmd+0). Each such pair
+        # returns the viewport to its starting scale, so two of them read as
+        # one stuck loop even though no two actions are ever equal and every
+        # press moved the screen. Reset per run like the streak guard.
+        self._zoom_ping_pong: int = 0
         # Tool-tier stuck budget (Law 2.2): the same tool asking nearly the
         # same question in a row. Tools move no cursor, so the screen
         # signature cannot judge them — the repeat count itself is the signal.
@@ -1380,10 +1483,10 @@ class OodaRunner:
         # verification, consumed by the next observation, dropped by anything
         # that could invalidate it (see ``_carry_ax_probe``).
         self._fresh_ax: AxProbeResult | None = None
-        #: Whether the current observation reused that reading rather than
-        #: taking its own. Reported, not inferred: the two are indistinguishable
-        #: in the log otherwise, and perception is the last place to be vague
-        #: about where an answer came from.
+        # Whether the current observation reused that reading rather than
+        # taking its own. Reported, not inferred: the two are indistinguishable
+        # in the log otherwise, and perception is the last place to be vague
+        # about where an answer came from.
         self._ax_was_carried: bool = False
         # The action awaiting a progress verdict, and the observation
         # signature captured just before it ran.
@@ -1408,6 +1511,18 @@ class OodaRunner:
         # Rejected finish claims, so a model that cannot prove completion still
         # terminates instead of arguing with the auditor forever.
         self._rejected_finishes: int = 0
+        # Whether the run ended on a finish the auditor never accepted:
+        # the stalemate guard force-accepts after MAX_FINISH_REJECTIONS,
+        # and that accept must travel with the trajectory so the caller can
+        # refuse to distill it (an unverified flow is not a skill).
+        self._forced_finish: bool = False
+        # Whether that forced accept came from the auditor *affirmatively
+        # rejecting* MAX_FINISH_REJECTIONS completion claims, as opposed to
+        # being unreachable (which also sets ``_forced_finish``). A rejection
+        # stalemate means the machine's screen never confirmed the claim, so
+        # the run must close as a failure with an honest retrospective — never
+        # as the model's unverified success.
+        self._stalemate_rejected: bool = False
         # P1 frozen-app signal: consecutive target-AX probe failures, plus
         # whether the window probe answered on the current turn. The pair
         # distinguishes "the app stopped talking" from "the driver is down".
@@ -1421,51 +1536,12 @@ class OodaRunner:
         self._last_state: WorkingState = WorkingState(goal="")
         self._playbook: PlaybookSummary | None = None
         self._playbook_scanned: bool = False
+        # Bounded deque retains its maxlen; only clear its contents.
+        self._visited_transitions.clear()
 
     def run(self, goal: str) -> WorkingState:
         state = WorkingState(goal=goal, knowledge=self.knowledge, plan=self.plan)
-        self._executed = []
-        self._sub_goals = []
-        self._step_targets = []
-        self._acted_target = ""
-        self._fresh_ax = None
-        self._ax_was_carried = False
-        self._skill = None
-        self._playbook = None
-        self._playbook_scanned = False
-        self._window_probe_warned = False
-        self._ax_probe_warned = False
-        self._screenshot_warned = False
-        self._observation = EMPTY_OBSERVATION
-        self._decision_window = None
-        self._stale_rejections = 0
-        self._consecutive_search_misses = 0
-        self._last_physical = None
-        self._stuck_streak = 0
-        self._last_tool = None
-        self._tool_streak = 0
-        self._last_verdict = None
-        self._visited_transitions.clear()
-        self._pending_action = None
-        self._pre_action_signature = ""
-        self._pre_action_cycle = ""
-        self._last_capture_hash = None
-        self._last_screenshot_b64 = None
-        self._last_error = None
-        self._failure_streaks = {}
-        self._consecutive_failures = 0
-        self._rejected_finishes = 0
-        # Whether the run ended on a finish the auditor never accepted:
-        # the stalemate guard below force-accepts after MAX_FINISH_REJECTIONS,
-        # and that accept must travel with the trajectory so the caller can
-        # refuse to distill it (an unverified flow is not a skill).
-        self._forced_finish = False
-        # P1 frozen-app signal: consecutive target-AX failures, and whether
-        # the window probe answered on the current turn. Both reset per run;
-        # neither survives it, so one run's beachball never arms the next.
-        self._ax_probe_failures = 0
-        self._window_probe_ok = False
-        self._physical_since_capture = False
+        self._reset_run_state()
         self._last_state = state
         # Every abnormal ending — the step budget, an exhausted recovery
         # ladder, a human takeover — is remembered as a failed episode before
@@ -1767,6 +1843,10 @@ class OodaRunner:
         # recovery diagnostics). Without the carry, the hint computed here
         # would be wiped in the same turn it was earned.
         preserved_hint: str | None = None
+        # Head of what a non-physical tool answered, for the live panel stream
+        # (the full answer already joins tool_result / tool_history / the
+        # observed trail below). None for physical actions and waits.
+        tool_preview: str | None = None
         try:
             if outcome.route == "physical":
                 # The repetition guard runs inside the recovery path, not
@@ -1796,6 +1876,7 @@ class OodaRunner:
                     self._last_tool = None
                     self._tool_streak = 0
                 answer = self._run_tool(outcome.action)
+                tool_preview = truncate_for_stream(answer) if answer else None
                 if tool_hint is not None:
                     self._last_error = tool_hint
                     preserved_hint = tool_hint
@@ -1893,7 +1974,7 @@ class OodaRunner:
             self._consecutive_search_misses = 0
             self._reset_tool_streak()
             self._record_for_progress(outcome.action)
-        self._trace_step(decision, outcome, verdict=verdict, error=None)
+        self._trace_step(decision, outcome, verdict=verdict, error=None, tool_result=tool_preview)
         # A successful action clears obsolete recovery diagnostics: the
         # provider must not keep steering around a failure that already
         # recovered (M1). A stuck-loop hint is re-injected by the next
@@ -1946,6 +2027,7 @@ class OodaRunner:
         *,
         verdict: Evidence | None,
         error: str | None,
+        tool_result: str | None = None,
     ) -> None:
         """Hand one step to the observability sink (best effort, never fatal).
 
@@ -1974,6 +2056,7 @@ class OodaRunner:
                     verdict=verdict.value if verdict is not None else None,
                     error=error,
                     screenshot_b64=self._observation.screenshot_b64,
+                    tool_result=tool_result,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - a trace sink must never kill a run
@@ -2409,7 +2492,31 @@ class OodaRunner:
         would_stuck = self._stuck_streak + 1 if self._same_physical(action) else 0
         if would_stuck >= REPEAT_ABORT_AFTER:
             raise StuckLoopError(action=action, repeats=would_stuck, goal=goal)
+        self._guard_zoom_ping_pong(action, goal)
         self._guard_cycle(action, goal)
+
+    def _guard_zoom_ping_pong(self, action: Action, goal: str) -> None:
+        """Refuse a zoom press that would undo the previous one a third time.
+
+        The streak guard needs the SAME action with NO screen movement; a
+        zoom-in followed by Cmd+0 is a different action and genuinely moves
+        the screen every time, so neither half of that guard can fire — yet
+        the pair is the exact doom loop observed in the field (a run pressed
+        zoom shortcuts fifteen times on an X.com timeline, reading nothing).
+        This guard counts the *undo pairs* the progress checks have already
+        seen (``_settle_progress`` folded the corrective hint in after the
+        second one) and refuses the press that would make the third, raising
+        into the same recovery ladder as the streak guard so the model is
+        told to change strategy instead of losing the run at the first trip.
+        """
+        if not neutralizing_zoom_pair(self._last_physical, action):
+            return
+        if self._zoom_ping_pong + 1 >= REPEAT_ABORT_AFTER:
+            raise StuckLoopError(
+                action=action,
+                repeats=self._zoom_ping_pong + 1,
+                goal=goal,
+            )
 
     def _guard_cycle(self, action: Action, goal: str) -> None:
         """Refuse an action already taken from this exact screen, repeatedly.
@@ -2572,6 +2679,8 @@ class OodaRunner:
         elif isinstance(action, MouseDrag):
             targets.append(("drag start", action.start_x, action.start_y))
             targets.append(("drag end", action.end_x, action.end_y))
+        elif isinstance(action, MouseMove):
+            targets.append(("move", action.x, action.y))
         for label, x, y in targets:
             if not point_in_frame(Point(float(x), float(y)), frame):
                 raise CoordinateOutOfBoundsError(
@@ -2697,14 +2806,31 @@ class OodaRunner:
         # this rule) still resets the streak via cycle_moved.
         confirmed = self._last_verdict is Evidence.CONFIRMED
         confirmed_progress = confirmed and cycle_moved
+        previous = self._last_physical
         if self._same_physical(pending) and not moved and not confirmed_progress:
             self._stuck_streak += 1
         else:
             self._stuck_streak = 0
         self._last_physical = pending
-        if self._stuck_streak < REPEAT_WARN_AFTER:
+        if self._stuck_streak >= REPEAT_WARN_AFTER:
+            hint = repetition_diagnostic(pending, self._stuck_streak)
+            self._last_error = hint
+            return replace(state, last_error=hint)
+        # Zoom undo pairs are judged alongside the repeat streak: the pair is
+        # the same non-advancing activity as one repeated action, but neither
+        # repetition test can see it (each press is a different action, and
+        # each one genuinely moves the screen), so it counts on its own wheel.
+        # A hint is folded in after the second undo pair; the pre-action guard
+        # then refuses the third. Any non-zoom action restarts the count.
+        if neutralizing_zoom_pair(previous, pending):
+            self._zoom_ping_pong += 1
+        elif not isinstance(pending, PressHotkey) or zoom_direction(pending) is None:
+            self._zoom_ping_pong = 0
+        if self._zoom_ping_pong < REPEAT_WARN_AFTER:
             return state
-        hint = repetition_diagnostic(pending, self._stuck_streak)
+        if previous is None:  # a pair implies a prior action; keep types honest
+            return state
+        hint = zoom_ping_pong_diagnostic(previous, pending, self._zoom_ping_pong)
         self._last_error = hint
         return replace(state, last_error=hint)
 
@@ -2849,7 +2975,7 @@ class OodaRunner:
         active_window = window_summary(window) if window is not None else state.active_window
         return replace(
             state,
-            mcp_tools=self.mcp.describe() if self.mcp is not None else (),
+            mcp_tools=self._available_tools(),
             active_window=active_window,
             ui_elements=ui_elements,
             open_tabs=open_tabs,
@@ -2961,6 +3087,32 @@ class OodaRunner:
                 self._last_error = rejection
                 LOGGER.warning("ooda finish rejected: %s", rejection)
                 return replace(state, last_error=rejection), False, True
+            if self._stalemate_rejected:
+                # The stalemate guard ended the audit loop, but ending the RUN
+                # as a success would record exactly the false-green it exists
+                # to prevent: the auditor said "no" to every claim, so the
+                # model's success verdict is contradicted by the machine's own
+                # screen. Close as a failure whose retrospective states why,
+                # so the episode, the report, the mission and the menu all
+                # read failure instead of the model's unverified claim.
+                LOGGER.warning(
+                    "closing run as failure after %d rejected completion claims "
+                    "(screen evidence never confirmed the goal)",
+                    self._rejected_finishes,
+                )
+                state = replace(
+                    state,
+                    completed_steps=state.completed_steps + (step_label,),
+                    last_error=STALEMATE_RETROSPECTIVE,
+                    skill=self._skill,
+                )
+                self._finalize(
+                    state,
+                    outcome="failure",
+                    retrospective=STALEMATE_RETROSPECTIVE,
+                    forced_completion=True,
+                )
+                return state, True, False
         # Terminal decisions are a fresh control boundary: repetition
         # diagnostics are useful while selecting an action, but must not
         # survive a valid completion decision.
@@ -3032,15 +3184,21 @@ class OodaRunner:
         if self.completion_check is None:
             return None
         if self._rejected_finishes >= MAX_FINISH_REJECTIONS:
-            # The auditor and the actor disagree persistently. Accept the
-            # model's own verdict rather than looping: the run's honest
-            # outcome is recorded in ``last_error`` either way. This accept
-            # is flagged, not laundered — the caller must treat the flow as
-            # unverified (never distill it), which is why the flag exists
-            # rather than a quieter outcome downgrade here.
+            # The auditor and the actor permanently disagree: every completion
+            # claim was affirmatively rejected. The run must still terminate
+            # (bounded), but letting this claim through as a plain accept
+            # would end it as the success the auditor denied — a false-green
+            # recorded where the machine's own screen never confirmed it. Both
+            # flags travel to the terminal handler: ``_forced_finish`` marks
+            # the accept unverified (never distilled), and
+            # ``_stalemate_rejected`` tells ``_finish`` to close the run as a
+            # failure with an honest retrospective rather than the model's
+            # claim. An unreachable auditor sets only ``_forced_finish``: no
+            # rejection happened there, so no counter-evidence exists.
             self._forced_finish = True
+            self._stalemate_rejected = True
             LOGGER.warning(
-                "accepting finish after %d rejected completion claims",
+                "completion claims rejected %d times; closing the run as unverified",
                 self._rejected_finishes,
             )
             return None
@@ -3248,7 +3406,6 @@ class OodaRunner:
             return False
         if not isinstance(action, (TypeText, ClipboardPaste)):
             return False
-            return False
         if not action.text:
             return False
         if self._target_owns_the_screen():
@@ -3295,7 +3452,6 @@ class OodaRunner:
         returns the moment it moves, falling back to the full budget when
         there is no probe or nothing changes.
         """
-        import time
 
         max_polls = self.settle_max_polls
         interval_s = self.settle_interval_s
@@ -3329,10 +3485,23 @@ class OodaRunner:
             )
         duration_ms = action.duration_ms
         LOGGER.info("ooda wait %sms (%s)", duration_ms, action.reason)
-        # NOTE: time.sleep lives here, the shell; tests inject zero so it stays fast.
-        import time
 
         time.sleep(duration_ms / 1000.0)
+
+    def _available_tools(self) -> tuple[str, ...]:
+        """Adverts for every tool this runner can actually execute.
+
+        The MCP registry's own descriptions, plus the CUA REPL when an engine
+        is live. The union is what makes ``WorkingState.mcp_tools`` the single
+        source of truth for "is a tool tier connected": the prompt builder
+        drops the ``call_tool`` / CUA-JavaScript bullets from the action
+        contract exactly when this is empty, so a run with no MCP servers and
+        no REPL is never told to reach for tools that answer with "unavailable".
+        """
+        described = self.mcp.describe() if self.mcp is not None else ()
+        if self.cua_repl is not None:
+            described = (*described, CUA_JS_TOOL_LINE)
+        return described
 
     def _run_tool(self, action: Action) -> str:
         """Run a non-physical tool and return what the next turn should read.
@@ -3342,113 +3511,130 @@ class OodaRunner:
         query, fall back to the browser, say it cannot look this up — and
         routing it through the recovery ladder instead would spend the
         escalation budget meant for actions that fight the screen.
+        """
+        try:
+            if isinstance(action, WebSearch):
+                return self._run_web_search(action)
+            if isinstance(action, WebFetch):
+                return self._run_web_fetch(action)
+            if isinstance(action, CallTool):
+                return self._run_call_tool(action)
+        except WebError as exc:
+            return self._web_error_fallback(action, exc)
+        raise ValueError(f"not a tool action: {action.type!r}")
+
+    def _run_web_search(self, action: WebSearch) -> str:
+        """Bridge ``web_search`` to MCP search tools or surface a browser fallback.
 
         ``web_search`` is a smart bridge, not a service: with a connected MCP
         search tool it forwards the query there; without one it answers with
         the browser fallback directly, so the model never loops against a
         missing local service.
         """
-        try:
-            if isinstance(action, WebSearch):
-                candidates = _mcp_search_candidates(self.mcp)
-                names = ", ".join(tool.qualified_name for tool in candidates)
+        candidates = _mcp_search_candidates(self.mcp)
+        names = ", ".join(tool.qualified_name for tool in candidates)
 
-                if self._consecutive_search_misses >= 2:
-                    if names:
-                        return (
-                            f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
-                            f"Aramayı web_search ile tekrarlayamazsınız! Kurulu MCP arama araçlarını ({names}) "
-                            f"call_tool ile kullanın veya doğrudan ekrandaki Google Chrome tarayıcısına geçip arama çubuğunu kullanın."
-                        )
-                    return (
-                        f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
-                        f"Aramayı web_search ile tekrarlayamazsınız! {NO_MCP_SEARCH_FALLBACK}"
-                    )
-
-                if not action.query.strip():
-                    self._consecutive_search_misses += 1
-                    return "web_search needs a non-empty query. Aramayı web_search ile tekrarlamayın; boş sorguyu düzeltin veya tarayıcıyı kullanın."
-
-                if not candidates:
-                    self._consecutive_search_misses += 1
-                    return (
-                        f"web_search {action.query!r}: {NO_MCP_SEARCH_FALLBACK} "
-                        "Aramayı web_search ile tekrarlamayın; doğrudan ekrandaki Google Chrome veya Safari "
-                        "tarayıcısını açın (Cmd+L, aramayı yazın, sonuçları ekrandan okuyun)."
-                    )
-
-                failures: list[str] = []
-                for tool in candidates:
-                    arguments = _search_arguments_for(tool, action.query)
-                    try:
-                        outcome = self.mcp.call(tool.qualified_name, arguments) if self.mcp is not None else None
-                    except Exception as exc:  # noqa: BLE001 - one broken server must not stop the next tool
-                        failures.append(f"{tool.qualified_name}: {exc}")
-                        continue
-                    if outcome is None:
-                        failures.append(f"{tool.qualified_name}: MCP registry unavailable")
-                        continue
-                    if not outcome.failed:
-                        self._consecutive_search_misses = 0
-                        LOGGER.info("ooda web_search bridged to MCP tool %r", tool.qualified_name)
-                        return f"web_search {action.query!r} via {tool.qualified_name} returned:\n{outcome.text}"
-                    failures.append(f"{tool.qualified_name}: {outcome.text}")
-                self._consecutive_search_misses += 1
-                tried = "; ".join(failures) if failures else "no MCP search tool answered"
-                return (
-                    f"web_search {action.query!r} failed through MCP ({tried}). "
-                    f"Aramayı web_search ile tekrarlamayın! Doğrudan ekrandaki Google Chrome tarayıcısına geçip "
-                    f"arama çubuğunu kullanarak aramayı fiziksel olarak gerçekleştirin."
-                )
-            if isinstance(action, WebFetch):
-                text = fetch_page(action.url)
-                return f"web_fetch {action.url}:\n{text}"
-            if isinstance(action, CallTool):
-                if action.tool in ("js", "cua_repl.js", "cua_repl", "eval_js") and self.cua_repl is not None:
-                    code = str(action.arguments.get("code", ""))
-                    res = self.cua_repl.execute(code)
-                    self._consecutive_search_misses = 0
-                    status = "failed" if res.is_error else "returned"
-                    detail = res.content
-                    if res.is_error:
-                        detail = "\n".join(part for part in (res.content, res.error) if part)
-                        if not detail:
-                            detail = "CUA execution failed without a diagnostic; inspect the bridge."
-                    return f"call_tool {action.tool} {status}:\n{detail}"
-                if self.mcp is None:
-                    return (
-                        "call_tool is unavailable: no MCP servers are configured. "
-                        "Use the screen or the web tools instead."
-                    )
-                outcome = self.mcp.call(action.tool, action.arguments)
-                if not outcome.failed:
-                    self._consecutive_search_misses = 0
-                status = "failed" if outcome.failed else "returned"
-                # Deliberately NOT fenced here. This string becomes
-                # ``tool_result``, which the prompt renders inside the one
-                # observed-data block that sanitises everything in it. Writing
-                # the tags by hand at this call site is what let a server
-                # return the closing tag and escape the block — the choke point
-                # exists so no call site has to remember.
-                return f"call_tool {action.tool} {status}:\n{outcome.text}"
-        except WebError as exc:
-            LOGGER.warning("ooda tool %s failed: %s", action.type, exc)
-            self._consecutive_search_misses += 1
-            candidates = _mcp_search_candidates(self.mcp)
-            names = ", ".join(tool.qualified_name for tool in candidates)
+        if self._consecutive_search_misses >= 2:
             if names:
-                fallback_advice = (
-                    f"{action.type} failed ({exc}). Aramayı web_search ile tekrarlamayın! "
-                    f"Kurulu MCP arama araçlarını ({names}) call_tool ile deneyin "
-                    f"veya Google Chrome tarayıcısını açıp aramayı doğrudan tarayıcı üzerinden yapın."
+                return (
+                    f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
+                    f"Aramayı web_search ile tekrarlayamazsınız! Kurulu MCP arama araçlarını ({names}) "
+                    f"call_tool ile kullanın veya doğrudan ekrandaki Google Chrome tarayıcısına geçip arama çubuğunu kullanın."
                 )
-            else:
-                fallback_advice = (
-                    f"{action.type} failed ({exc}). Aramayı web_search ile tekrarlamayın! "
-                    f"Doğrudan Google Chrome tarayıcısına geçip aramayı tarayıcı üzerinden yapın."
-                )
-            return f"{action.type} failed: {fallback_advice}"
-        raise ValueError(f"not a tool action: {action.type!r}")
+            return (
+                f"web_search engellendi ({self._consecutive_search_misses} kez ardışık sonuç alınamadı). "
+                f"Aramayı web_search ile tekrarlayamazsınız! {NO_MCP_SEARCH_FALLBACK}"
+            )
+
+        if not action.query.strip():
+            self._consecutive_search_misses += 1
+            return "web_search needs a non-empty query. Aramayı web_search ile tekrarlamayın; boş sorguyu düzeltin veya tarayıcıyı kullanın."
+
+        if not candidates:
+            self._consecutive_search_misses += 1
+            return (
+                f"web_search {action.query!r}: {NO_MCP_SEARCH_FALLBACK} "
+                "Aramayı web_search ile tekrarlamayın; doğrudan ekrandaki Google Chrome veya Safari "
+                "tarayıcısını açın (Cmd+L, aramayı yazın, sonuçları ekrandan okuyun)."
+            )
+
+        failures: list[str] = []
+        for tool in candidates:
+            arguments = _search_arguments_for(tool, action.query)
+            try:
+                outcome = self.mcp.call(tool.qualified_name, arguments) if self.mcp is not None else None
+            except Exception as exc:  # noqa: BLE001 - one broken server must not stop the next tool
+                failures.append(f"{tool.qualified_name}: {exc}")
+                continue
+            if outcome is None:
+                failures.append(f"{tool.qualified_name}: MCP registry unavailable")
+                continue
+            if not outcome.failed:
+                self._consecutive_search_misses = 0
+                LOGGER.info("ooda web_search bridged to MCP tool %r", tool.qualified_name)
+                return f"web_search {action.query!r} via {tool.qualified_name} returned:\n{outcome.text}"
+            failures.append(f"{tool.qualified_name}: {outcome.text}")
+        self._consecutive_search_misses += 1
+        tried = "; ".join(failures) if failures else "no MCP search tool answered"
+        return (
+            f"web_search {action.query!r} failed through MCP ({tried}). "
+            f"Aramayı web_search ile tekrarlamayın! Doğrudan ekrandaki Google Chrome tarayıcısına geçip "
+            f"arama çubuğunu kullanarak aramayı fiziksel olarak gerçekleştirin."
+        )
+
+    def _run_web_fetch(self, action: WebFetch) -> str:
+        """Fetch a page's text content."""
+        text = fetch_page(action.url)
+        return f"web_fetch {action.url}:\n{text}"
+
+    def _run_call_tool(self, action: CallTool) -> str:
+        """Dispatch a ``call_tool`` action to CUA-REPL or the MCP registry."""
+        if action.tool in ("js", "cua_repl.js", "cua_repl", "eval_js") and self.cua_repl is not None:
+            code = str(action.arguments.get("code", ""))
+            res = self.cua_repl.execute(code)
+            self._consecutive_search_misses = 0
+            status = "failed" if res.is_error else "returned"
+            detail = res.content
+            if res.is_error:
+                detail = "\n".join(part for part in (res.content, res.error) if part)
+                if not detail:
+                    detail = "CUA execution failed without a diagnostic; inspect the bridge."
+            return f"call_tool {action.tool} {status}:\n{detail}"
+        if self.mcp is None:
+            return (
+                "call_tool is unavailable: no MCP servers are configured. "
+                "Use the screen or the web tools instead."
+            )
+        outcome = self.mcp.call(action.tool, action.arguments)
+        if not outcome.failed:
+            self._consecutive_search_misses = 0
+        status = "failed" if outcome.failed else "returned"
+        # Deliberately NOT fenced here. This string becomes
+        # ``tool_result``, which the prompt renders inside the one
+        # observed-data block that sanitises everything in it. Writing
+        # the tags by hand at this call site is what let a server
+        # return the closing tag and escape the block — the choke point
+        # exists so no call site has to remember.
+        return f"call_tool {action.tool} {status}:\n{outcome.text}"
+
+    def _web_error_fallback(self, action: Action, exc: WebError) -> str:
+        """Format a fallback message when a web tool raises ``WebError``."""
+        LOGGER.warning("ooda tool %s failed: %s", action.type, exc)
+        self._consecutive_search_misses += 1
+        candidates = _mcp_search_candidates(self.mcp)
+        names = ", ".join(tool.qualified_name for tool in candidates)
+        if names:
+            fallback_advice = (
+                f"{action.type} failed ({exc}). Aramayı web_search ile tekrarlamayın! "
+                f"Kurulu MCP arama araçlarını ({names}) call_tool ile deneyin "
+                f"veya Google Chrome tarayıcısını açıp aramayı doğrudan tarayıcı üzerinden yapın."
+            )
+        else:
+            fallback_advice = (
+                f"{action.type} failed ({exc}). Aramayı web_search ile tekrarlamayın! "
+                f"Doğrudan Google Chrome tarayıcısına geçip aramayı tarayıcı üzerinden yapın."
+            )
+        return f"{action.type} failed: {fallback_advice}"
 
     def _load_skill_for(self, action: Action) -> SkillDefinition:
         """Law 3 Stage 2: load the requested skill's full definition."""
@@ -3484,6 +3670,15 @@ class OodaRunner:
                 LOGGER.warning("playbook scan failed: %s", exc)
 
         playbook = state.playbook if state.playbook is not None else self._playbook
+        if playbook is not None and routes_disagree_on_site(state.goal, playbook.description):
+            # The playbook is provably about another web property: its steps
+            # would steer this goal somewhere else (Law 3.2 pollution).
+            LOGGER.info(
+                "playbook %r describes %r, not the goal's site; not mounting",
+                playbook.name,
+                sorted(site_markers(playbook.description)),
+            )
+            playbook = None
         if playbook != state.playbook:
             state = replace(state, playbook=playbook)
 
@@ -3506,6 +3701,16 @@ class OodaRunner:
                 len(matches),
                 self.app,
                 SKILL_MOUNT_MIN_SCORE,
+            )
+            return state
+        if routes_disagree_on_site(state.goal, mounted.description):
+            # A same-app skill distilled on a different site cleared the token
+            # floor on generic workflow words ('read', 'post', 'comments') and
+            # would now steer an X.com goal with Hacker News instructions.
+            LOGGER.info(
+                "skill %r was distilled on %r, not the goal's site; not mounting",
+                mounted.skill_id,
+                sorted(site_markers(mounted.description)),
             )
             return state
         try:

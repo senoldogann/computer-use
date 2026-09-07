@@ -39,6 +39,89 @@ def test_client_health() -> None:
         assert health.get("backend") == "simulated"
 
 
+def test_client_refuses_symlink_socket(tmp_path) -> None:
+    """Fail-closed: never connect through a symlink (pre-bind swap race)."""
+    import os
+
+    from computeruse.orchestrator.client import ActuationClient, DriverConnectionError
+    from tests.smoke.conftest import SOCKET_PATH
+
+    link = tmp_path / "evil.sock"
+    os.symlink(str(SOCKET_PATH), link)
+    client = ActuationClient(str(link), connect_retries=1)
+    # _connect_once raises the specific OSError; connect() surfaces it
+    # as DriverConnectionError after retries (reason stays in the log).
+    try:
+        client._connect_once()
+    except OSError as exc:
+        assert "symlink" in str(exc)
+    else:
+        raise AssertionError("symlink socket was not refused")
+    try:
+        client.health()
+    except DriverConnectionError:
+        pass
+    else:
+        raise AssertionError("symlink socket was not refused")
+
+
+def test_driver_rejects_wrong_peer_pid(tmp_path) -> None:
+    """A driver started with --allow-pid 1 rejects our connection."""
+    import os
+    import socket as socket_mod
+    import subprocess
+    import time
+
+    # pytest tmp paths exceed SUN_LEN (~104 chars); use a short /tmp name.
+    from pathlib import Path
+
+    from tests.smoke.conftest import DRIVER_BIN
+
+    sock = Path(f"/tmp/pid-gated-{os.getpid()}-{time.time_ns() % 1_000_000}.sock")
+    try:
+        os.unlink(sock)
+    except OSError:
+        pass
+    proc = subprocess.Popen(
+        [str(DRIVER_BIN), str(sock), "--allow-pid", "1"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        for _ in range(50):
+            if sock.exists():
+                break
+            if proc.poll() is not None:
+                _, errs = proc.communicate(timeout=5)
+                raise AssertionError(f"gated driver exited early: {errs[-2000:]}")
+            time.sleep(0.05)
+        else:
+            errs = ""
+            raise AssertionError(
+                f"gated driver did not bind in time (poll={proc.poll()}): {errs[-2000:]}"
+            )
+        conn = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        conn.settimeout(5.0)
+        try:
+            conn.connect(str(sock))
+            conn.sendall(b'{"method":"ping"}\n')
+            try:
+                data = conn.recv(4096)
+            except (TimeoutError, OSError):
+                data = b""
+            assert data == b"", "wrong-PID connection was not rejected"
+        finally:
+            conn.close()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+
+
 def test_mouse_move_ack() -> None:
     payload = rpc_call(
         {"method": "mouse_move", "params": {"x": 640, "y": 480, "duration_ms": 120}}

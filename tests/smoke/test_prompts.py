@@ -588,3 +588,92 @@ def test_normalize_action_dict_normalizes_click_mark_aliases() -> None:
         "type": "click_mark",
         "mark": 5,
     }
+
+
+def test_long_typing_without_cadence_becomes_one_paste() -> None:
+    """Bulk text must not ride the per-keystroke path by model habit.
+
+    Observed in the field: the prompt already prefers paste for long text,
+    yet the model typed a 100-character checklist at 300 ms/key (~30 s).
+    Guidance alone does not move weak models, so the parser reroutes: long
+    text with no explicit wpm becomes one Cmd+V, with the text untouched.
+    """
+    long_text = "Define project scope\nSet milestones and timeline"
+    original: dict[str, object] = {"type": "type_text", "text": long_text}
+    normalized = _normalize_action_dict(original)
+    assert normalized == {"type": "clipboard_paste", "text": long_text}
+    assert original == {"type": "type_text", "text": long_text}
+
+
+def test_short_typing_stays_on_keystrokes() -> None:
+    """Short strings keep per-key behavior (single-key triggers, widgets)."""
+    assert _normalize_action_dict({"type": "type_text", "text": "x" * 24}) == {
+        "type": "type_text",
+        "text": "x" * 24,
+    }
+    assert _normalize_action_dict({"type": "type_text", "text": "Project Checklist"}) == {
+        "type": "type_text",
+        "text": "Project Checklist",
+    }
+
+
+def test_explicit_cadence_is_model_intent_and_is_honoured() -> None:
+    """A model-supplied wpm opts out of the reroute, whatever the length."""
+    action = _normalize_action_dict(
+        {"type": "type_text", "text": "y" * 100, "wpm": 40}
+    )
+    assert action["type"] == "type_text"
+    assert action["wpm"] == 40
+
+
+def test_long_typing_reroute_applies_inside_batches() -> None:
+    """Batch items ride the same reroute as the single-action form."""
+    turn = parse_decision(
+        '{"thought": "t", "sub_goal": "s", '
+        '"action": {"type": "type_text", "text": "short"}, '
+        '"actions": [{"type": "type_text", "text": "short"}, '
+        '{"type": "type_text", "text": "' + "z" * 50 + '"}]}'
+    )
+    assert turn.actions is not None and len(turn.actions) == 2
+    assert turn.actions[0].type == "type_text"
+    assert turn.actions[1].type == "clipboard_paste"
+
+
+def test_contract_states_the_paste_rule_and_fast_default() -> None:
+    """The instruction and the gate must agree: paste is mandatory for bulk,
+    and the typed default is the fast-human cadence the reroute assumes."""
+    from computeruse.orchestrator.prompts import ACTION_CONTRACT
+    from computeruse.orchestrator.schemas import TypeText
+
+    assert "MUST be clipboard_paste" in ACTION_CONTRACT
+    assert TypeText.model_fields["wpm"].default == 120
+
+
+def test_contract_forbids_zoom_and_prescribes_scroll_read_order() -> None:
+    """The web-reading reflexes are part of the contract, not advice.
+
+    Regression for the X.com doom-loop: a model that could not read a 512px
+    thumbnail answered by zooming, because nothing in its instructions said
+    zoom was forbidden or that page text is meant to be read by scrolling. The
+    contract now hard-bans viewport zoom, orders scroll -> select/copy ->
+    visual scan, and tells the model not to loop on AX queries for body text.
+    """
+    from computeruse.orchestrator.prompts import ACTION_CONTRACT
+
+    assert "NEVER use browser zoom to read" in ACTION_CONTRACT
+    assert "zoom-in followed by its undo" in ACTION_CONTRACT
+    assert "SCROLL:" in ACTION_CONTRACT and "SELECT+COPY:" in ACTION_CONTRACT
+    assert "VISUAL SCAN:" in ACTION_CONTRACT
+    assert "Never enter a query-AX loop" in ACTION_CONTRACT
+
+
+def test_primary_perception_note_states_the_real_map_size() -> None:
+    """The map note the model reads must agree with the actual capture cap."""
+    from computeruse.orchestrator.prompts import state_context
+    from computeruse.vision.capture import SCREENSHOT_MAP_MAX_SIDE
+
+    rendered = state_context(
+        WorkingState(goal="read", screenshot_b64="cGF5bG9hZA=="),
+    )
+    assert f"{SCREENSHOT_MAP_MAX_SIDE}px" in rendered
+    assert "never zoom the browser" in rendered

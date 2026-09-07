@@ -282,9 +282,43 @@ def test_search_arguments_follow_the_tool_schema() -> None:
 def test_prompt_no_longer_calls_browser_search_fragile() -> None:
     """The old guidance steered the model away from the browser it needed."""
     assert "dozen fragile steps" not in ACTION_CONTRACT
-    prompt = decision_prompt(WorkingState(goal="x"), app="Google Chrome")
+    state = WorkingState(goal="x", mcp_tools=("tavily.search(query) — search the web",))
+    prompt = decision_prompt(state, app="Google Chrome")
     assert "If an MCP search tool (Tavily, Exa, Brave) is available" in prompt
     assert "open Google Chrome, use Cmd+L" in prompt
+
+
+def test_prompt_without_tools_never_advertises_ghost_tools() -> None:
+    """No MCP, no CUA REPL: the contract must not teach call_tool/web_search.
+
+    The field failure this closes: with no tool tier connected the model still
+    read an action contract full of MCP and CUA-JavaScript examples and spent
+    its steps on call_tool/web_search actions that answer "unavailable". A
+    run with no tools should be told exactly that and pointed at the screen.
+    """
+    prompt = decision_prompt(WorkingState(goal="read x.com posts"), app="Google Chrome")
+    assert "no MCP tools and no CUA REPL (js) are connected" in prompt
+    assert "UNAVAILABLE" in prompt
+    assert "NO EXTERNAL TOOLS ARE CONNECTED THIS RUN" in prompt
+    # The ghost actions themselves must not be described as callable bullets.
+    assert "- call_tool: {" not in prompt
+    assert "- web_search: {" not in prompt
+    assert "cua.getApp" not in prompt
+    # Native screen/browser guidance survives the trim.
+    assert "- web_fetch: {" in prompt
+    assert "mouse_scroll" in prompt
+
+
+def test_prompt_with_tools_advertises_call_tool_and_search_bridge() -> None:
+    """A connected search tool restores the full tool contract."""
+    state = WorkingState(
+        goal="read x.com posts",
+        mcp_tools=("tavily.search(query) — search the web via Tavily",),
+    )
+    prompt = decision_prompt(state, app="Google Chrome")
+    assert "- call_tool: {" in prompt
+    assert "- web_search: {" in prompt
+    assert "If an MCP search tool (Tavily, Exa, Brave) is available" in prompt
 
 
 def test_the_ssrf_guard_reads_every_spelling_the_kernel_accepts() -> None:

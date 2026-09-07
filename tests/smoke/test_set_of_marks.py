@@ -77,6 +77,26 @@ def test_annotate_set_of_marks_modifies_buffer() -> None:
     assert annotated.data[idx + 2] == 80   # R
 
 
+def test_annotated_frame_keeps_the_display_origin() -> None:
+    """The annotated frame shares the source frame's coordinate space."""
+    w, h = 40, 30
+    capture = ScreenCapture(
+        display_id=1,
+        width=w,
+        height=h,
+        scale=2.0,
+        origin_x=1512.0,
+        origin_y=0.0,
+        data=bytes(w * h * 4),
+    )
+    marks = parse_ax_elements_to_marks(('Button "Test" at (10, 10) 30x20',))
+    annotated = annotate_set_of_marks(capture, marks)
+    assert annotated.origin_x == 1512.0
+    assert annotated.origin_y == 0.0
+    assert annotated.display_id == 1
+    assert annotated.scale == 2.0
+
+
 # ── Set-of-Marks wired into the loop ───────────────────────────────────────
 
 
@@ -182,8 +202,10 @@ def test_a_mark_is_never_scaled_by_the_coordinate_gate() -> None:
     multiplication would send the click a third of the way up the display.
     """
     executed: list[Action] = []
+    # A display wider than the map cap (1568px), so a genuine points-per-pixel
+    # factor is in play instead of the 1:1 map a typical laptop now gets.
     logical = ScreenCapture(
-        display_id=0, width=1536, height=1024, scale=1.0, data=bytes(1536 * 1024 * 4)
+        display_id=0, width=2048, height=1536, scale=1.0, data=bytes(2048 * 1536 * 4)
     )
 
     def ax_probe() -> AxProbeResult:

@@ -8,6 +8,7 @@ knowledge into the OODA working context as compact strings the provider sees.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -205,3 +206,89 @@ def test_agent_retrieves_app_knowledge_for_provider(tmp_path) -> None:
     result = Agent(config).run()
     assert seen and "[Safari] shortcut.fullscreen: Ctrl+Cmd+F" in seen[0]
     assert result.knowledge == seen[0]
+
+
+# --- Domain isolation (Law 4.2: a site's facts stay on that site) -----------
+
+
+def _chrome_entry(entry_id: str, key: str, *, site: str | None = None) -> SemanticEntry:
+    return _entry(
+        entry_id=entry_id,
+        app="Google Chrome",
+        key=key,
+        value="mouse_scroll",
+        kind="pattern",
+        tags=("read", "posts"),
+        site=site,
+    )
+
+
+def test_site_of_goal_picks_the_single_named_site() -> None:
+    from computeruse.memory.semantic import site_of_goal
+
+    assert site_of_goal("X.com'a git, ilk 3 gönderiyi oku") == "x"
+    assert site_of_goal("read the Hacker News front page") == "hacker news"
+    # No site, or several, cannot claim one learning site.
+    assert site_of_goal("export the report") is None
+    assert site_of_goal("compare X.com and Reddit posts") is None
+
+
+def test_search_entries_drops_entries_learned_on_another_site() -> None:
+    """An X.com goal must not be staged Hacker News patterns from the same app."""
+    hn = _chrome_entry("chrome.read-hn", "read the Hacker News comments", site="hacker news")
+    x_fact = _chrome_entry("chrome.read-x", "read the x.com timeline posts", site="x")
+    generic = _chrome_entry("chrome.read-feed", "scroll the page feed")  # legacy: no site
+
+    goal = "X.com'a git, ana sayfadaki gönderileri oku"
+    scored = search_entries((hn, x_fact, generic), "", app="Google Chrome", goal=goal)
+    ids = {entry.entry_id for entry in scored}
+    # The HN fact is refused (its stamped site disagrees); the X fact and the
+    # site-less legacy fact pass.
+    assert "chrome.read-hn" not in ids
+    assert "chrome.read-x" in ids
+    assert "chrome.read-feed" in ids
+    # Without a goal there is no site to disagree about: everything returns.
+    assert {e.entry_id for e in search_entries((hn,), "", app="Google Chrome")} == {
+        "chrome.read-hn"
+    }
+
+
+def test_search_entries_legacy_text_cannot_poison_another_site() -> None:
+    """Entries written before the site field existed still filter by their text."""
+    legacy_hn = _chrome_entry("chrome.hn-old", "read Hacker News stories and comments")
+    legacy_x = _chrome_entry("chrome.x-old", "read X.com posts then summarize")
+    goal = "X.com'daki son gönderileri oku"
+    ids = {
+        e.entry_id
+        for e in search_entries((legacy_hn, legacy_x), "", app="Google Chrome", goal=goal)
+    }
+    assert ids == {"chrome.x-old"}
+
+
+def test_facts_are_stamped_with_the_runs_site() -> None:
+    """extract_facts_from_run carries the learning site onto every entry."""
+    facts = extract_facts_from_run(
+        app="Google Chrome",
+        steps=(
+            MouseClick(type="mouse_click", x=100, y=100),
+            MouseClick(type="mouse_click", x=200, y=200),
+        ),
+        step_descriptions=("open the first post", "open the second post"),
+        site="x",
+    )
+    assert facts and all(fact.site == "x" for fact in facts)
+
+
+def test_prune_corrupt_removes_only_unparseable_entries(tmp_path: Path) -> None:
+    store = SemanticStore(tmp_path / "semantic")
+    store.put(_entry())
+    (tmp_path / "semantic" / "broken.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "semantic" / "wrong-shape.json").write_text(
+        '{"entry_id": "chrome.x"}', encoding="utf-8"
+    )
+    removed = store.prune_corrupt()
+    assert set(removed) == {"broken.json", "wrong-shape.json"}
+    # The healthy entry survives.
+    assert {e.entry_id for e in store.entries()} == {"safari.shortcut.fullscreen"}
+    # A second sweep finds nothing left to remove.
+    assert store.prune_corrupt() == ()

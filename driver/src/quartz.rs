@@ -490,6 +490,16 @@ impl Backend for QuartzBackend {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
+        // The pasteboard is the user's: bulk text now routinely rides it (the
+        // orchestrator reroutes long typing to one paste), so whatever it
+        // holds is saved up front and put back afterwards. Best-effort on
+        // both ends — a pasteboard we cannot read or restore must never fail
+        // the paste itself.
+        let saved: Option<Vec<u8>> = Command::new("pbpaste")
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| out.stdout);
         let mut child = Command::new("pbcopy")
             .stdin(Stdio::piped())
             .spawn()
@@ -506,7 +516,17 @@ impl Backend for QuartzBackend {
             return Err(BackendError("pbcopy failed to set pasteboard".to_string()));
         }
         std::thread::sleep(Duration::from_millis(50));
-        self.hotkey(&[Modifier::Command], "v")
+        let paste_result = self.hotkey(&[Modifier::Command], "v");
+        // The focused app consumes the pasteboard synchronously while
+        // handling the key event, so by the time the original contents go
+        // back the paste has already landed.
+        if saved.is_some() {
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        if let Some(previous) = saved {
+            restore_pasteboard(&previous);
+        }
+        paste_result
     }
 
     fn ax_set_value(&self, pid: u32, point: Point, text: &str) -> Result<bool, BackendError> {
@@ -992,6 +1012,35 @@ mod app_match_tests {
         assert!(!matches_app("safari", "com.apple.safari", "calculator"));
         // An empty last component cannot match anything.
         assert!(!matches_app("odd", "trailing.", ""));
+    }
+}
+
+/// Put previously saved bytes back on the pasteboard (best-effort).
+///
+/// Loud on failure, never fatal: by the time this runs the paste has already
+/// landed, so a failed restore is a warning about the user's clipboard — not
+/// a failed action.
+fn restore_pasteboard(previous: &[u8]) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let result = (|| -> Result<(), String> {
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn pbcopy: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(previous)
+                .map_err(|e| format!("write pbcopy: {e}"))?;
+        }
+        let status = child.wait().map_err(|e| format!("wait pbcopy: {e}"))?;
+        if !status.success() {
+            return Err("pbcopy exited non-zero".to_string());
+        }
+        Ok(())
+    })();
+    if let Err(detail) = result {
+        eprintln!("[driver] warning: could not restore pasteboard: {detail}");
     }
 }
 

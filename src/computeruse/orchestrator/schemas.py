@@ -76,7 +76,11 @@ class MouseScroll(BaseModel):
 class TypeText(BaseModel):
     type: Literal["type_text"]
     text: str
-    wpm: int = Field(ge=1, default=40, description="Words per minute typing speed.")
+    # Fast-human cadence: 120 wpm paces a key every 100 ms — brisk but still
+    # physically plausible keystrokes. Bulk text never rides this path anyway:
+    # the decision parser reroutes long strings to clipboard_paste (one Cmd+V),
+    # so this default only prices short strings and single-key triggers.
+    wpm: int = Field(ge=1, default=120, description="Words per minute typing speed.")
 
 
 class ClipboardPaste(BaseModel):

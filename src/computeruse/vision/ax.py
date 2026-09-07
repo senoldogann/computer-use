@@ -176,11 +176,12 @@ def element_summary(element: AXElement) -> str:
     The reported point is the element's **centre**, not its top-left origin.
     The model clicks the coordinate it is given, and a click at an element's
     exact corner sits on its boundary, where any rounding at all lands outside.
-    That is not hypothetical: one image pixel is ~3.3 logical points on a
-    Retina display, summaries are rounded to whole image pixels before the
-    model sees them, and a 12-point-tall link is under 4 pixels. Aiming at
-    corners, the model repeatedly reported the right link and clicked one point
-    above it, into the row behind — six consecutive misses on a real page.
+    On a Retina display downscaled to the map cap one image pixel can be
+    several logical points, summaries are rounded to whole image pixels before
+    the model sees them, and a 12-point-tall link shrinks below 4 pixels.
+    Aiming at corners, the model repeatedly reported the right link and
+    clicked one point above it, into the row behind — six consecutive misses
+    on a real page.
     Aiming at centres gives every element half its own size as slack, which is
     an order of magnitude more than the rounding can consume.
     """
@@ -501,10 +502,14 @@ def summaries_to_image_space(
 
     The provider works in exactly one coordinate space: the screenshot map the
     VLM sees (``downscale_to_max_side``). AX rects arrive in logical screen
-    points, which are *larger* numbers than the map's — a 1512pt-wide display
-    maps to a 512px image, so a button at x=232pt sits at x=79px in the image.
-    The conversion therefore **divides** by the map's points-per-pixel; the
-    runner's actuation gate multiplies by the same number on the way back.
+    points. On a typical MacBook the map is 1:1 with logical points and this
+    rewrite is a no-op (``ScreenMap.is_identity``); only a display wider than
+    :data:`computeruse.vision.capture.SCREENSHOT_MAP_MAX_SIDE` is downscaled,
+    making its points *larger* than image pixels (a 2048pt-wide display capped
+    to a 1568px map has ~1.31 points per pixel, so a button at x=232pt sits at
+    x=177px in the image). The conversion therefore **divides** by the map's
+    points-per-pixel; the runner's actuation gate multiplies by the same
+    number on the way back.
 
     Getting this direction wrong is not a rounding error: it multiplied every
     AX coordinate by ~3 instead of dividing, so the model was handed positions
@@ -715,6 +720,46 @@ WEB_DECISION_KEYWORDS: Final[tuple[str, ...]] = (
     "ok",
 )
 
+#: Context terms naming a verification challenge — Cloudflare's "Verify you
+#: are human", CAPTCHAs, "checking your browser" interstitial. These are the
+#: overlays that stop a page dead with no consent wording, so the consent
+#: gate above can never catch them: the agent stares at a checkbox it was
+#: never told exists. Same cross-language rule as the consent set: a Turkish
+#: challenge says "güvenlik kontrolü", an English one "security check".
+SECURITY_CHECK_CONTEXT_KEYWORDS: Final[tuple[str, ...]] = (
+    "verify you are human",
+    "verify your identity",
+    "security check",
+    "cloudflare",
+    "captcha",
+    "bot check",
+    "checking your browser",
+    "before you continue",
+    "are you human",
+    "robot",
+    "doğrulama",
+    "güvenlik kontrolü",
+    "insan olduğunuzu",
+    "robot olmadığınızı",
+    "devam etmek için",
+    "challenge",
+)
+
+#: Decision terms on a control inside a security challenge. The Cloudflare
+#: checkbox itself is usually titled "Verify you are human"; some challenges
+#: render the decision as a button ("Continue", "Doğrula").
+SECURITY_CHECK_DECISION_KEYWORDS: Final[tuple[str, ...]] = (
+    "verify",
+    "doğrula",
+    "i'm not a robot",
+    "ben robot değilim",
+    "ben robot degilim",
+    "continue",
+    "devam",
+    "start",
+    "başla",
+)
+
 
 #: Cap on the actionable controls collected per dialogue. A settings sheet
 #: can carry a dozen buttons, but the model only needs the first handful to
@@ -740,8 +785,8 @@ def _title_has_keyword(element: AXElement, keywords: tuple[str, ...]) -> bool:
     return any(keyword in title for keyword in keywords)
 
 
-def _subtree_mentions_consent(node: AXElement) -> bool:
-    """Whether any text in the subtree names a consent/privacy concern (pure).
+def _subtree_mentions(node: AXElement, keywords: tuple[str, ...]) -> bool:
+    """Whether any text in the subtree contains a keyword (pure).
 
     Short-circuits on the first hit and never builds the subtree text into
     one string, so gating a page full of ordinary groups stays cheap.
@@ -751,7 +796,7 @@ def _subtree_mentions_consent(node: AXElement) -> bool:
             if not text:
                 continue
             lowered = text.lower()
-            if any(keyword in lowered for keyword in CONSENT_CONTEXT_KEYWORDS):
+            if any(keyword in lowered for keyword in keywords):
                 return True
         return any(walk(child) for child in current.children)
 
@@ -827,23 +872,44 @@ def detect_dialogs(
         if kind is not None:
             elements = _collect_actionable(node, viewport, max_elements=max_elements)
             if elements and not inside_dialogue:
-                if kind == "Overlay" and not (
-                    _subtree_mentions_consent(node)
+                is_consent_overlay = kind == "Overlay" and (
+                    _subtree_mentions(node, CONSENT_CONTEXT_KEYWORDS)
                     and any(
                         _title_has_keyword(element, WEB_DECISION_KEYWORDS)
+                        and element.title.strip().casefold() not in {
+                            "manage consent", "manage cookies", "cookie settings",
+                            "privacy settings", "çerez ayarları", "onay tercihlerini yönet",
+                        }
                         for element in elements
                     )
-                ):
+                )
+                is_security_check = kind == "Overlay" and (
+                    _subtree_mentions(node, SECURITY_CHECK_CONTEXT_KEYWORDS)
+                    and any(
+                        _title_has_keyword(element, SECURITY_CHECK_DECISION_KEYWORDS)
+                        for element in elements
+                    )
+                )
+                if kind == "Overlay" and not (is_consent_overlay or is_security_check):
                     # An ordinary page section wearing a dialog-ish shape:
                     # not a modal — descend and keep looking.
                     pass
                 else:
+                    # Name the kind honestly so the prompt can tell the model
+                    # what kind of obstacle it is: a consent wall wants an
+                    # accept/reject decision, a security check wants the
+                    # verify checkbox clicked.
+                    report_kind = (
+                        "SecurityCheck"
+                        if is_security_check and not is_consent_overlay
+                        else kind
+                    )
                     label = node.title or node.value or ""
                     if not label:
                         label = _first_text(node)
                     found.append(
                         Dialogue(
-                            kind=kind,
+                            kind=report_kind,
                             label=label[:120],
                             elements=elements,
                         )
@@ -893,3 +959,128 @@ def dialogue_notes(dialogs: tuple[Dialogue, ...], *, max_buttons: int = 4) -> tu
         label = dialogue.label or dialogue.kind
         notes.append(f'{dialogue.kind} "{label}" — controls: {", ".join(labels)}')
     return tuple(notes)
+
+
+#: How close an OCR decision line must sit to a context line (vertical, in
+#: logical points) to count as part of the same dialog. A consent box's
+#: buttons sit directly under its prose; a footer button a screen away does
+#: not. The context line may be short, so the window is generous.
+OCR_DIALOG_PROXIMITY_PX: Final[float] = 400.0
+
+
+def _line_mentions(line: RecognizedLine, keywords: tuple[str, ...]) -> bool:
+    """Whether an OCR line's text contains any lowercase keyword (pure)."""
+    lowered = line.text.lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _ocr_dialog_clusters(
+    lines: tuple[RecognizedLine, ...],
+) -> tuple[tuple[RecognizedLine, tuple[RecognizedLine, ...]], ...]:
+    """(context line, nearby decision lines) pairs from OCR text (pure).
+
+    The pair gate mirrors the AX detector's: a context line only counts when
+    a decision line sits within a screenful of it, so a page that merely
+    mentions cookies next to an unrelated button is never flagged. And a
+    context line that is itself a decision control ("Kabul Et" contains the
+    consent word "kabul"; the Cloudflare checkbox's own title is the whole
+    context phrase) does not spawn its own cluster when it already belongs
+    to a reported one — the button is the cluster, not a second dialog.
+    """
+    context_keywords = CONSENT_CONTEXT_KEYWORDS + SECURITY_CHECK_CONTEXT_KEYWORDS
+    decision_keywords = WEB_DECISION_KEYWORDS + SECURITY_CHECK_DECISION_KEYWORDS
+    context = [line for line in lines if _line_mentions(line, context_keywords)]
+    clusters: list[tuple[RecognizedLine, tuple[RecognizedLine, ...]]] = []
+    for ctx in context:
+        decisions = tuple(
+            line
+            for line in lines
+            if line is not ctx
+            and abs(line.y - ctx.y) <= OCR_DIALOG_PROXIMITY_PX
+            and _line_mentions(line, decision_keywords)
+        )
+        if not decisions:
+            continue
+        if any(
+            _line_mentions(ctx, decision_keywords)
+            and abs(ctx.y - other.y) <= OCR_DIALOG_PROXIMITY_PX
+            for other, _ in clusters
+        ):
+            continue
+        clusters.append((ctx, decisions))
+    return tuple(clusters)
+
+
+def ocr_dialog_notes(
+    lines: tuple[RecognizedLine, ...], *, max_lines: int = 6
+) -> tuple[str, ...]:
+    """Detect consent / security-check overlays from OCR text alone (pure).
+
+    This is ADR-2's blind-app path: when the AX tree came back empty the
+    dialog detector above can never run, and the model is left staring at a
+    cookie wall it was never told exists. OCR lines carry the same words the
+    tree would have — a context line ("çerezler"/"consent"/"verify you are
+    human") and, within a screenful, its decision controls ("Kabul Et",
+    "Consent", "Verify").
+
+    Returns one note per matched cluster, e.g.
+    ``SecurityCheck "checking your browser..." — controls: Verify you are human``.
+    """
+    notes: list[str] = []
+    for ctx, decisions in _ocr_dialog_clusters(lines)[:max_lines]:
+        is_security = _line_mentions(ctx, SECURITY_CHECK_CONTEXT_KEYWORDS)
+        kind = "SecurityCheck" if is_security else "Overlay"
+        label = ctx.text.strip()[:100] or kind
+        unique_decisions = list(
+            dict.fromkeys(line.text.strip()[:60] for line in decisions)
+        )[:4]
+        notes.append(f'{kind} "{label}" — controls: {", ".join(unique_decisions)}')
+    return tuple(notes)
+
+
+def ocr_dialog_summaries(lines: tuple[RecognizedLine, ...]) -> tuple[str, ...]:
+    """Grounding lines for OCR-detected dialog controls, to lead the list (pure).
+
+    The decision lines the detector matched, rendered in the same summary
+    shape the model clicks (``Text "Kabul Et" at (x,y) WxH``). Prepending
+    them gives a blind-app run the same first-marks advantage the AX path
+    has: the consent button is the easiest click on screen.
+    """
+    decisions: list[RecognizedLine] = []
+    for _ctx, cluster_decisions in _ocr_dialog_clusters(lines):
+        for line in cluster_decisions:
+            if line not in decisions:
+                decisions.append(line)
+    return recognized_summaries(tuple(decisions[:4]))
+
+
+#: A page's scrollable content counts as extending below the visible area
+#: when its bottom edge passes this far past the observed viewport's bottom
+#: (a few points of rounding/scrollbar slack are not "more content").
+CLIPPED_TOLERANCE_PX: Final[float] = 8.0
+
+
+def web_content_clipped_below(root: AXElement, viewport: Rect | None) -> bool:
+    """Whether any page area extends below the observed viewport (pure).
+
+    Browsers expose the page document (``AXWebArea``) with its *full*
+    scrollable height, not just the visible slice — on a long page the
+    WebArea's bottom edge sits far below the window. That is the signal the
+    model is missing: it sees a screenshot of the visible part and has no
+    way to know there is more below, so it concludes the target does not
+    exist and finishes instead of scrolling. This flag becomes a one-line
+    note beside the element list telling it to scroll down.
+
+    ``None`` when no WebArea is present (non-browser apps) or no viewport
+    was observed — both mean "no scroll hint".
+    """
+    if viewport is None:
+        return False
+    viewport_bottom = viewport.origin.y + viewport.size.height
+
+    def walk(node: AXElement) -> bool:
+        if node.role == "WebArea" and node.y + node.height > viewport_bottom + CLIPPED_TOLERANCE_PX:
+            return True
+        return any(walk(child) for child in node.children)
+
+    return walk(root)

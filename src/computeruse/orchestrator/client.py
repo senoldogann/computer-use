@@ -265,6 +265,48 @@ class ActuationClient:
     def _connect_once(self) -> socket.socket:
         if not os.path.exists(self._socket_path):
             raise OSError(f"socket file {self._socket_path} does not exist")
+        # Fail-closed: never connect through a symlink or to a socket owned
+        # by another user, and never through a group/other-writable
+        # directory — that is the /tmp pre-bind / symlink-swap race.
+        if os.path.islink(self._socket_path):
+            raise OSError(f"socket {self._socket_path} is a symlink; refusing to connect")
+        try:
+            entry = os.stat(self._socket_path)
+        except OSError as exc:
+            raise OSError(f"cannot stat socket {self._socket_path}: {exc}") from exc
+        euid = os.geteuid()
+        if entry.st_uid != euid:
+            raise OSError(
+                f"socket {self._socket_path} owned by uid {entry.st_uid}, "
+                f"expected {euid}; refusing to connect"
+            )
+        if entry.st_mode & 0o077 != 0:
+            raise OSError(
+                f"socket {self._socket_path} has group/other permissions "
+                f"({oct(entry.st_mode & 0o777)}); refusing to connect"
+            )
+        parent = os.path.dirname(os.path.abspath(self._socket_path))
+        try:
+            parent_entry = os.stat(parent)
+        except OSError as exc:
+            raise OSError(f"cannot stat socket directory {parent}: {exc}") from exc
+        import stat as stat_mod
+
+        sticky_world_writable = bool(
+            parent_entry.st_mode & stat_mod.S_IWOTH
+            and parent_entry.st_mode & stat_mod.S_ISVTX
+        )
+        if not sticky_world_writable:
+            if parent_entry.st_uid != euid:
+                raise OSError(
+                    f"socket directory {parent} owned by uid {parent_entry.st_uid}, "
+                    f"expected {euid}; refusing to connect"
+                )
+            if parent_entry.st_mode & 0o022 != 0:
+                raise OSError(
+                    f"socket directory {parent} is group/other-writable "
+                    f"({oct(parent_entry.st_mode & 0o777)}); refusing to connect"
+                )
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self._recv_timeout_seconds)
         try:

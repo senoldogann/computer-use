@@ -265,6 +265,25 @@ def test_watch_without_autonomous_is_rejected_with_exit_2(
     assert _reject_unusable_arguments(parse_args(["--watch", "/tmp/inbox"])) == 2
 
 
+def test_yes_with_supervised_levels_is_rejected_with_exit_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--yes with --level 0/1 would bypass the level that exists to ask."""
+    assert (
+        _reject_unusable_arguments(parse_args(["--goal", "x", "--yes", "--level", "1"]))
+        == 2
+    )
+    assert "cannot be combined with --level 0/1" in capsys.readouterr().err
+    assert (
+        _reject_unusable_arguments(parse_args(["--goal", "x", "--yes", "--level", "0"]))
+        == 2
+    )
+    assert (
+        _reject_unusable_arguments(parse_args(["--goal", "x", "--yes", "--level", "3"]))
+        is None
+    )
+
+
 def test_watch_with_a_bounded_session_passes_validation() -> None:
     """The rule only fires when the session is missing, not when it is bounded."""
     args = parse_args(["--autonomous", "3", "--max-tokens", "100", "--watch", "/tmp/inbox"])
