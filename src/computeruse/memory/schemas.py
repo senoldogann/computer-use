@@ -1,10 +1,9 @@
-"""Episodic memory schemas (Law 4.1).
+"""Episodic and preference memory schemas (Law 4).
 
 Every agent run that reaches a terminal outcome leaves an :class:`Episode`
 record — the trajectory plus whether it succeeded and why, in a structured,
-disk-round-trippable form. This is the raw material both the distiller (Law 3)
-and future hindsight analysis consume; it is intentionally independent of the
-implementation details of *how* those downstream consumers work.
+disk-round-trippable form. The same module owns the durable typed user-model
+record used by Law 4.2; storage/reconciliation live in their focused modules.
 """
 
 from __future__ import annotations
@@ -17,6 +16,16 @@ from pydantic import BaseModel, Field
 from computeruse.orchestrator.schemas import Action
 
 EpisodeOutcome = Literal["success", "failure"]
+PreferenceDomain = Literal[
+    "ui",
+    "workflow",
+    "communication",
+    "app",
+    "scheduling",
+    "formatting",
+    "general",
+]
+PreferenceSource = Literal["explicit", "repeated_behavior", "successful_correction"]
 
 
 class Episode(BaseModel):
@@ -59,4 +68,23 @@ class Episode(BaseModel):
     recorded_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="UTC timestamp, frozen at creation.",
+    )
+
+
+class PreferenceRecord(BaseModel):
+    """One durable, provenance-bearing user preference (Law 4.2)."""
+
+    preference_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    domain: PreferenceDomain
+    key: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence_count: int = Field(ge=1)
+    source: PreferenceSource
+    evidence_ids: tuple[str, ...] = Field(min_length=1)
+    first_seen: datetime
+    last_seen: datetime
+    supersedes: str | None = Field(
+        default=None,
+        pattern=r"^[a-z0-9][a-z0-9._-]*$",
     )
