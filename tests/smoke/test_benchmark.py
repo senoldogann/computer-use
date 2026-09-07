@@ -52,6 +52,7 @@ def _record(scenario_id: str = "s01", attempt: int = 1, **overrides: object) -> 
         "scenario_id": scenario_id,
         "attempt": attempt,
         "outcome": "expected_pass",
+        "expected_outcome": "expected_pass",
         "steps": 8,
         "duration_s": 60.0,
         "tokens": 80000,
