@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -49,7 +50,13 @@ APP_KNOWLEDGE_MAX_ENTRIES: Final[int] = 16
 
 from computeruse.mcp import DEFAULT_CONFIG_PATH, McpRegistry, load_server_configs
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
-from computeruse.memory.schemas import Episode, EpisodeOutcome
+from computeruse.memory.preferences import (
+    ACTIVE_PREFERENCE_LIMIT,
+    PreferenceStore,
+    PreferenceWrite,
+    extract_explicit_preference_evidence,
+)
+from computeruse.memory.schemas import Episode, EpisodeOutcome, PreferenceRecord
 from computeruse.memory.semantic import SemanticStore
 from computeruse.orchestrator.client import (
     AX_MAX_DEPTH,
@@ -143,7 +150,6 @@ def ax_left_us_blind(summaries: tuple[str, ...], *, threshold: int) -> bool:
     return len(grounded) <= threshold
 
 
-
 @dataclass(frozen=True)
 class AgentConfig:
     """Everything the agent needs to run one goal (caller-provided)."""
@@ -207,6 +213,10 @@ class AgentConfig:
     # The agent deliberately does not know what a mission is: it reports where
     # it got to, and whoever asked for the work decides what that means.
     on_plan_progress: Callable[[GoalPlan], None] | None = None
+    # PR C event seam: every durable preference write is reported after it is
+    # persisted. The callback is observability only; an exception is logged and
+    # can never turn a successfully completed physical task into a failure.
+    on_preference_write: Callable[[PreferenceWrite], None] | None = None
     # Observability: when set, every step of the run is appended as one JSON
     # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
     # entirely — a run pays nothing for a diagnostic nobody asked for.
@@ -257,8 +267,11 @@ class AgentResult:
     distilled: DistillResult | None
     episodes: tuple[Episode, ...]
     skills: tuple[SkillSummary, ...]
-    # Law 4.2: the app knowledge strings the provider saw during the run.
+    # Law 4.2: semantic app facts plus active preference summaries staged into
+    # the provider context for this run.
     knowledge: tuple[str, ...]
+    # Law 4.2: contradiction-free active durable preferences after this run.
+    preferences: tuple[PreferenceRecord, ...] = ()
     # Law 3.2: the skill mounted into the working context by RETRIEVE (if any).
     skill: SkillDefinition | None = None
     # This run's identity. Always present (a run is identifiable even when
@@ -406,7 +419,6 @@ def _remember_route(registry: SkillRegistry, fresh: SkillDefinition) -> None:
         registry.save(refined)
 
 
-
 class Agent:
     """Imperative shell composing every tier into one run.
 
@@ -426,6 +438,7 @@ class Agent:
         skills_registry = SkillRegistry(self._config.store_dir / "skills")
         playbook_registry = PlaybookRegistry()
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
+        preference_store = PreferenceStore(self._config.store_dir / "preferences")
         # Corrupt entries are skipped on read but left behind, to be re-warned
         # on every run forever. Sweep them once at startup so the store only
         # holds facts that parse (Law 4.2: a memory that cannot be read is
@@ -462,6 +475,7 @@ class Agent:
                 run_id=run_id,
                 save_screenshots=self._config.trace_screenshots,
             )
+
             def announce_and_record(record: StepTrace) -> None:
                 announce(record)
                 tracer.record(record)
@@ -487,7 +501,8 @@ class Agent:
             # A force-accepted finish counts as unverified, not as success:
             # the auditor rejected every claim and the stalemate guard let it
             # through to end the run, so neither the skill store, the skill's
-            # win counter, nor semantic memory may learn from this flow.
+            # win counter, semantic memory, nor preference memory may learn
+            # from this flow.
             nonlocal distilled, succeeded
             verified = outcome == "success" and not forced_completion
             succeeded = verified
@@ -543,6 +558,23 @@ class Agent:
                     site=site_of_goal(trajectory.description),
                 ):
                     semantic_store.upsert(fact)
+
+                preference_evidence = extract_explicit_preference_evidence(
+                    self._config.goal,
+                    source_id=run_id,
+                    observed_at=datetime.now(UTC),
+                )
+                for evidence in preference_evidence:
+                    write = preference_store.record(evidence)
+                    if self._config.on_preference_write is None:
+                        continue
+                    try:
+                        self._config.on_preference_write(write)
+                    except Exception as exc:  # noqa: BLE001 - observability only
+                        LOGGER.warning(
+                            "preference write callback failed after persistence: %s",
+                            exc,
+                        )
 
         with ActuationClient(
             self._config.socket_path,
@@ -620,14 +652,10 @@ class Agent:
             app = self._config.app
             if app is None:
                 app = (focused.app_name if focused is not None else "") or "unknown"
-            # Law 4.2 RETRIEVE: the app's known preferences/patterns/shortcuts
-            # are staged into the working context as compact strings, so the
-            # provider makes decisions against what the system already knows
-            # about the (possibly just-discovered) app. The goal gates the
-            # stage (Law 4 domain isolation): a browser store holds facts
-            # learned on many sites, and only facts aligned with the site this
-            # goal names may enter the prompt — an X.com run is never handed
-            # Hacker News patterns learned under the same app.
+            # Law 4.2 RETRIEVE: app-local semantic knowledge is staged first,
+            # then contradiction-free global user preferences. Both are compact
+            # strings so the provider gets durable guidance without raw
+            # provenance or unbounded memory history.
             app_knowledge = semantic_store.search(
                 "", app=app, goal=self._config.goal
             )
@@ -640,10 +668,18 @@ class Agent:
                     APP_KNOWLEDGE_MAX_ENTRIES,
                 )
                 app_knowledge = app_knowledge[:APP_KNOWLEDGE_MAX_ENTRIES]
-            knowledge = tuple(
+            semantic_knowledge = tuple(
                 f"[{entry.app}] {entry.key}: {entry.value}"
                 for entry in app_knowledge
             )
+            active_preference_records = preference_store.active(
+                limit=ACTIVE_PREFERENCE_LIMIT
+            )
+            preference_knowledge = tuple(
+                f"[preference:{record.domain}] {record.key}: {record.value}"
+                for record in active_preference_records
+            )
+            knowledge = semantic_knowledge + preference_knowledge
             # ADR-2 grounding: the AX tree of the frontmost app,
             # summarized into the compact lines the provider sees every turn —
             # so a decision's coordinates come from real elements, and the
@@ -1189,6 +1225,7 @@ class Agent:
             episodes=tuple(episodes_store.episodes()),
             skills=tuple(skills_registry.index()),
             knowledge=knowledge,
+            preferences=preference_store.active(limit=ACTIVE_PREFERENCE_LIMIT),
             skill=state.skill,
             run_id=run_id,
         )
