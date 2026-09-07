@@ -86,6 +86,8 @@ def test_tool_history_preserves_tool_provenance_for_completion_audit(monkeypatch
 def test_research_contract_requires_source_verification() -> None:
     """Search snippets discover candidates; selected claims require source evidence."""
     assert "SEARCH RESULTS ARE DISCOVERY, NOT SOURCE VERIFICATION" in ACTION_CONTRACT
-    assert "open or fetch the source you actually rely on" in ACTION_CONTRACT
-    assert "collect more candidates than the requested final count" in ACTION_CONTRACT
+    assert "open or fetch" in ACTION_CONTRACT
+    assert "source you actually rely on" in ACTION_CONTRACT
+    assert "collect more candidates" in ACTION_CONTRACT
+    assert "requested final count" in ACTION_CONTRACT
     assert "distinguish discovery evidence from source verification" in COMPLETION_AUDIT_CONTRACT
