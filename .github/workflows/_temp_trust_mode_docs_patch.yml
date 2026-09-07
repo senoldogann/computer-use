@@ -1,0 +1,85 @@
+name: Temporary trust-mode contract docs patch
+
+on:
+  push:
+    branches:
+      - audit/trust-mode-destructive-boundary-2026-09-07
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/trust-mode-destructive-boundary-2026-09-07
+      - name: Align trust-mode contract text
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, got {count}: {old!r}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          replace_once(
+              "src/computeruse/cli.py",
+              '''        help="Autonomy level 0-3 (default: 3 = full). Level 3 still asks "
+                  "about destructive actions unless --yes is given.",''',
+              '''        help="Autonomy level 0-3 (default: 3 = full). Destructive actions still "
+                  "require explicit approval or a scoped grant, including with --yes.",''',
+          )
+          replace_once(
+              "src/computeruse/cli.py",
+              '''        help="Trust mode: auto-approve non-destructive CONFIRM decisions without prompting, so "
+                  "the agent runs uninterrupted like a human operator. BLOCK still "
+                  "blocks, and the kill-switch (Cmd+Shift+Escape, shaking the mouse, "
+                  "or Ctrl-C), "
+                  "budgets, verification and stuck-guard keep running. Every "
+                  "auto-approval is logged. This is delegation in advance — use it "
+                  "only on a machine you own.",''',
+              '''        help="Trust mode: auto-approve non-destructive confirmations so routine "
+                  "work can run unattended. Destructive actions still require explicit "
+                  "approval or a scoped grant. BLOCK still blocks, and the kill-switch "
+                  "(Cmd+Shift+Escape, shaking the mouse, or Ctrl-C), budgets, verification "
+                  "and stuck-guard keep running. Every auto-approval is logged.",''',
+          )
+          replace_once(
+              "driver/src/menu.rs",
+              '''/// Off by default, matching the CLI. On, the panel's own Approve/Deny card can
+              /// never appear and the capability grants the store holds are never consulted,
+              /// because nothing ever reaches a confirmation — so a panel that started this
+              /// way silently made the whole permission surface decorative.''',
+              '''/// Off by default, matching the CLI. On, only non-destructive confirmations
+              /// are skipped. Destructive actions still reach the panel's Approve/Deny flow
+              /// or a matching scoped capability grant, so the permission surface remains
+              /// active in unattended mode.''',
+          )
+          replace_once(
+              "driver/assets/menu.html",
+              '''      // OFF by default, matching the CLI. On, the Approve/Deny card below can
+                    // never appear and the standing capability grants are never consulted,
+                    // because nothing ever reaches a confirmation — a panel that started this
+                    // way made its own permission surface decorative.''',
+              '''      // OFF by default, matching the CLI. On, routine/non-destructive prompts
+                    // are skipped; destructive actions still reach Approve/Deny or a matching
+                    // scoped capability grant, so the permission surface remains active.''',
+          )
+          PY
+          python -m py_compile src/computeruse/cli.py
+          git diff --check
+      - name: Commit contract text
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/computeruse/cli.py driver/src/menu.rs driver/assets/menu.html
+          git diff --cached --check
+          git commit -m "docs(safety): state trust-mode destructive boundary"
+          git push origin HEAD:audit/trust-mode-destructive-boundary-2026-09-07
