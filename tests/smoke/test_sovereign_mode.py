@@ -81,6 +81,15 @@ def test_cli_requires_explicit_sovereign_switch() -> None:
     assert cli.resolve_autonomy_level(sovereign) is AutonomyLevel.SOVEREIGN
 
 
+def test_build_config_propagates_sovereign_level() -> None:
+    args = cli.parse_args(
+        ["--goal", "x", "--sovereign", "--deadline-seconds", "60"]
+    )
+    config = cli.build_config(args, goal="x", activate_named_app=False)
+
+    assert config.autonomy_level is AutonomyLevel.SOVEREIGN
+
+
 def test_numeric_level_does_not_expose_sovereign() -> None:
     with pytest.raises(SystemExit):
         cli.parse_args(["--goal", "x", "--level", "4"])
