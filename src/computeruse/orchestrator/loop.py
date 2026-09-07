@@ -882,18 +882,18 @@ def verification_region(target: Point, *, size: float = 48.0) -> Rect:
 #: How many distinct windows of observed evidence to carry. Enough to span a
 #: two- or three-application task, small enough that the audit prompt stays a
 #: second opinion rather than a transcript.
-TRAIL_MAX_ENTRIES: Final[int] = 6
-#: Characters of visible text kept per window. A count, a title or a status
-#: line fits comfortably; a whole article does not, and should not.
-TRAIL_MAX_CHARS: Final[int] = 600
+TRAIL_MAX_ENTRIES: Final[int] = 10
+#: Characters of visible text kept per window. A full article section, multi-bullet
+#: notes, or detailed app text fits comfortably so the completion auditor sees full proof.
+TRAIL_MAX_CHARS: Final[int] = 4000
 #: How many tool answers the run transcript keeps for the auditor. Tool output
 #: is denser than window chrome — a search answer or a page extract carries
 #: its verdict in the first screenful — so fewer, longer entries than the
 #: window trail.
-TOOL_HISTORY_MAX_ENTRIES: Final[int] = 6
+TOOL_HISTORY_MAX_ENTRIES: Final[int] = 10
 #: Characters kept per tool answer. Enough for the head of a result list or a
 #: page's lede; the archived file, not the transcript, holds the rest.
-TOOL_HISTORY_MAX_CHARS: Final[int] = 800
+TOOL_HISTORY_MAX_CHARS: Final[int] = 4000
 
 
 def _informative_text(content: Sequence[str], *, max_chars: int) -> str:
@@ -2590,6 +2590,10 @@ class OodaRunner:
             # counted it and owns the thresholds the run's tests pin. Two
             # guards scoring the same repeat would abort a step early.
             return
+        # If the auditor rejected completion, the agent is actively switching
+        # between source and destination apps to remediate and verify; do not abort.
+        if self._rejected_finishes > 0:
+            return
         transition = (
             cycle_signature(self._observation),
             json.dumps(action.model_dump(exclude_none=True), sort_keys=True),
@@ -3025,7 +3029,7 @@ class OodaRunner:
             dialog_notes=dialog_notes,
             screenshot_b64=screenshot_b64 if self.vision_enabled else None,
             observed_trail=_extend_trail(
-                state.observed_trail, window, content, TRAIL_MAX_ENTRIES
+                state.observed_trail, window, content or raw_ui_elements, TRAIL_MAX_ENTRIES
             ),
         )
 
@@ -3227,17 +3231,19 @@ class OodaRunner:
         if self.completion_check is None:
             return None
         if self._rejected_finishes >= MAX_FINISH_REJECTIONS:
-            # The auditor and the actor permanently disagree: every completion
-            # claim was affirmatively rejected. The run must still terminate
-            # (bounded), but letting this claim through as a plain accept
-            # would end it as the success the auditor denied — a false-green
-            # recorded where the machine's own screen never confirmed it. Both
-            # flags travel to the terminal handler: ``_forced_finish`` marks
-            # the accept unverified (never distilled), and
-            # ``_stalemate_rejected`` tells ``_finish`` to close the run as a
-            # failure with an honest retrospective rather than the model's
-            # claim. An unreachable auditor sets only ``_forced_finish``: no
-            # rejection happened there, so no counter-evidence exists.
+            # The auditor has rejected earlier claims, but the agent may have acted
+            # and repaired the screen state before this attempt. Verify one last time:
+            # if the screen now genuinely satisfies the goal, accept it as verified.
+            # Otherwise, terminate as an honest unverified stalemate failure.
+            try:
+                verdict = self.completion_check(state, finish.summary)
+            except Exception as exc:  # noqa: BLE001
+                self._forced_finish = True
+                LOGGER.warning("completion audit unavailable: %s", exc)
+                return None
+            if verdict.satisfied:
+                LOGGER.info("ooda completion audited (after recovery): %s", verdict.evidence)
+                return None
             self._forced_finish = True
             self._stalemate_rejected = True
             LOGGER.warning(

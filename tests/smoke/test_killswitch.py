@@ -167,6 +167,102 @@ def test_ooda_runner_without_kill_switch_is_unaffected() -> None:
     assert final.step_index >= 1
 
 
+def _counting_runner(
+    kill_switch: object, executed: list[str], max_steps: int = 10
+) -> OodaRunner:
+    """An infinite mouse-move run whose every physical effect is recorded.
+
+    mouse_move is deliberately outside the stuck-loop guard, so only the
+    kill switch can stop this run — any effect after the trip is a failed
+    stop, not a slow one.
+    """
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        return AgentTurn.model_validate(
+            {"thought": "", "sub_goal": "", "action": {"type": "mouse_move", "x": 5, "y": 5}}
+        )
+
+    def execute(action: object) -> None:
+        executed.append(str(action))
+
+    return OodaRunner(
+        provider=provider,
+        execute_physical=execute,
+        kill_switch=kill_switch,  # type: ignore[arg-type]
+        max_steps=max_steps,
+    )
+
+
+def test_sigint_channel_freezes_hardware_actions() -> None:
+    """Channel 1 of 3: SIGINT / Ctrl-C.
+
+    The CLI installs a SIGINT catcher as a live signal predicate. When it
+    fires mid-run the loop must raise before the next physical effect —
+    not finish the step, not run one more action.
+    """
+    polls: list[bool] = [False]
+
+    def sigint_arrived() -> bool:
+        # First poll (before step 0) passes; the SIGINT lands during step 0.
+        if polls[0]:
+            return True
+        polls[0] = True
+        return False
+
+    switch = KillSwitch(monitor=None, signal_predicate=sigint_arrived)
+    executed: list[str] = []
+    with pytest.raises(KillSwitchTripped):
+        _counting_runner(switch, executed).run(goal="keep moving")
+    assert len(executed) <= 1, f"actions after the SIGINT trip: {executed}"
+
+
+def test_hotkey_channel_freezes_hardware_actions() -> None:
+    """Channel 2 of 3: Command+Shift+Escape global hotkey.
+
+    Production wires the driver's hotkey_state RPC as a composed predicate
+    (``KillSwitch.with_signal_predicate``); this mirrors that wiring with a
+    fake poll so the test proves the channel, not just the predicate type.
+    """
+    polls: list[bool] = [False]
+
+    def hotkey_state() -> bool:
+        if polls[0]:
+            return True
+        polls[0] = True
+        return False
+
+    switch = KillSwitch(monitor=None).with_signal_predicate(hotkey_state)
+    executed: list[str] = []
+    with pytest.raises(KillSwitchTripped):
+        _counting_runner(switch, executed).run(goal="keep moving")
+    assert len(executed) <= 1, f"actions after the hotkey trip: {executed}"
+
+
+def test_shake_channel_freezes_hardware_actions() -> None:
+    """Channel 3 of 3: physical mouse reclaim (cursor shake).
+
+    No predicate at all — the trip must come from the HID-rate cursor
+    samples alone, and again nothing physical may run after it.
+    """
+    samples: list[CursorSample] = []
+
+    def cursor() -> CursorSample:
+        sample = CursorSample(
+            x=100.0 if len(samples) % 2 else 0.0, y=0.0, time=len(samples) * 0.02
+        )
+        samples.append(sample)
+        return sample
+
+    switch = KillSwitch(
+        monitor=MouseShakeMonitor(cursor, window_size=4, min_reversals=2),
+    )
+    executed: list[str] = []
+    with pytest.raises(KillSwitchTripped):
+        _counting_runner(switch, executed).run(goal="keep moving")
+    assert samples, "the shake monitor must have been polled"
+    assert len(executed) <= 1, f"actions after the shake trip: {executed}"
+
+
 def test_killswitch_signal_predicate() -> None:
     # Without installing a real signal (which needs a main thread), a manual
     # flag is the closest deterministic proxy: tripped() must honor it.

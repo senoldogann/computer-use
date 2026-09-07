@@ -219,3 +219,32 @@ def test_an_unreachable_auditor_marks_the_finish_unverified() -> None:
     runner.run("do the thing")
 
     assert runner._forced_finish is True
+
+
+def test_recovery_after_rejections_is_accepted_as_verified() -> None:
+    """The agent is rejected twice, repairs the state, and the 3rd attempt is verified."""
+    attempts = 0
+
+    def auditor(_state: WorkingState, _claim: str) -> CompletionVerdict:
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 3:
+            return CompletionVerdict(satisfied=True, evidence="the goal is now verified")
+        return CompletionVerdict(satisfied=False, evidence="not yet verified")
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index in (0, 2, 4):
+            return _turn(Wait(type="wait", duration_ms=5, reason="settle"))
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    received: list[tuple[str, bool, str | None]] = []
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _action: None,
+        sensor=lambda: _ONE_BY_ONE,
+        completion_check=auditor,
+        on_complete=lambda _t, o, r, _s, forced: received.append((o, forced, r)),
+        max_steps=10,
+    )
+    runner.run(goal="do the thing")
+    assert received == [("success", False, "done")]

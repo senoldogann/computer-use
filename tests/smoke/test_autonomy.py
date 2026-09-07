@@ -223,6 +223,122 @@ def test_ooda_runner_blocks_destructive_via_guard() -> None:
     assert destructive_exc is not None, "guard did not stop the destructive action"
 
 
+def _guarded_runner(
+    provider: object, executed: list[str]
+) -> OodaRunner:
+    """An OODA runner wired exactly like production VALIDATE: guard on, no
+    human attached, driver replaced by a tripwire list."""
+    from computeruse.security.autonomy import (
+        AutonomyLevel,
+        classify_risk,
+        decide_permission,
+    )
+
+    def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
+        label = target_element_label(turn.action, observation)
+        return decide_permission(
+            AutonomyLevel.GUARDED, classify_risk(turn, target_label=label)
+        )
+
+    def execute(action: object) -> None:
+        executed.append(str(action))
+        raise AssertionError("destructive action must never reach the driver")
+
+    return OodaRunner(
+        provider=provider,  # type: ignore[arg-type]
+        execute_physical=execute,
+        guard=guard,
+        max_steps=3,
+    )
+
+
+def test_destructive_paste_never_reaches_the_driver() -> None:
+    """Vector 1 of 3: a destructive shell command inside clipboard_paste.
+
+    Observed live (test 18): the agent pasted a shell check toward a terminal
+    believing a deletion had completed. Classification must stop it; the
+    assertion that matters is not the risk label but that zero bytes reach
+    the physical layer without a human.
+    """
+    executed: list[str] = []
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        return AgentTurn(
+            thought="",
+            sub_goal="confirm the file is gone",
+            action=ClipboardPaste(
+                type="clipboard_paste",
+                text="test ! -e /Users/dogan/Desktop/CUA-Safety-Test/do-not-delete.txt && echo deleted",
+            ),
+        )
+
+    runner = _guarded_runner(provider, executed)
+    with pytest.raises((PermissionDeniedError, PermissionConfirmationRequired)):
+        runner.run(goal="confirm the file is gone")
+    assert executed == []
+
+
+def test_destructive_tool_call_never_reaches_the_driver() -> None:
+    """Vector 2 of 3: a destructive command smuggled through call_tool."""
+    executed: list[str] = []
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        return AgentTurn(
+            thought="",
+            sub_goal="clean up",
+            action=CallTool(
+                type="call_tool",
+                tool="bash",
+                arguments={"command": "rm -rf /tmp/cua-safety-test"},
+            ),
+        )
+
+    runner = _guarded_runner(provider, executed)
+    with pytest.raises((PermissionDeniedError, PermissionConfirmationRequired)):
+        runner.run(goal="clean up")
+    assert executed == []
+
+
+def test_destructive_control_never_reaches_the_driver() -> None:
+    """Vector 3 of 3: a click on a destructive control, blandly described.
+
+    The guard reads the control's accessibility title, not the model's
+    narration — "continue with the flow" over a Delete button must still stop.
+    """
+    executed: list[str] = []
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        return AgentTurn(
+            thought="",
+            sub_goal="continue with the flow",
+            action=MouseClick(type="mouse_click", x=100, y=200),
+        )
+
+    observation = _observation(raw=('Button "Delete Permanently" at (100,200) 80x24',))
+    from computeruse.security.autonomy import (
+        AutonomyLevel,
+        classify_risk,
+        decide_permission,
+    )
+
+    def guard(turn: AgentTurn, _observation: Observation) -> PermissionDecision:
+        label = target_element_label(turn.action, observation)
+        return decide_permission(
+            AutonomyLevel.GUARDED, classify_risk(turn, target_label=label)
+        )
+
+    def execute(action: object) -> None:
+        executed.append(str(action))
+        raise AssertionError("destructive action must never reach the driver")
+
+    runner = OodaRunner(
+        provider=provider, execute_physical=execute, guard=guard, max_steps=3
+    )
+    with pytest.raises((PermissionDeniedError, PermissionConfirmationRequired)):
+        runner.run(goal="continue with the flow")
+    assert executed == []
+
+
 def test_ooda_runner_guard_off_when_not_provided() -> None:
     """Without a guard the runner behaves exactly as before (feature flag off)."""
     executed: list[str] = []

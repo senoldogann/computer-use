@@ -1722,8 +1722,8 @@ def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
             file=sys.stderr,
         )
         return 2
-    if args.autonomous is None and not args.goal:
-        print("error: --goal is required unless --autonomous is given", file=sys.stderr)
+    if args.autonomous is None and not args.goal and args.resume is None:
+        print("error: --goal is required unless --autonomous or --resume is given", file=sys.stderr)
         return 2
     if (
         getattr(args, "watch", None) is not None
