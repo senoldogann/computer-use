@@ -1,7 +1,7 @@
 """Autonomy-level permission guard (Law 5.1).
 
-The constitution defines four autonomy levels (0 Observer / 1 Supervised /
-2 Guarded / 3 Full). This module turns that policy into a *pure* decision:
+The constitution defines five autonomy levels (0 Observer / 1 Supervised /
+2 Guarded / 3 Full / 4 Sovereign). This module turns that policy into a *pure* decision:
 :func:`classify_risk` inspects a decision the model wants to take, and
 :func:`decide_permission` maps a level + risk to one of
 :class:`PermissionDecision`.
@@ -47,12 +47,13 @@ from computeruse.security.permissions import (
 
 
 class AutonomyLevel(Enum):
-    """The four configurable autonomy levels from the constitution."""
+    """The five configurable autonomy levels from the constitution."""
 
     OBSERVER = 0   # Recommends actions and highlights regions, never touches.
     SUPERVISED = 1  # Proposes each action and waits for confirmation.
     GUARDED = 2    # Routine actions run; destructive ones ask first.
-    FULL = 3       # Unattended, with safety boundaries + auto-fallback.
+    FULL = 3       # Unattended, destructive actions still ask.
+    SOVEREIGN = 4  # Operator-delegated: destructive actions may run unattended.
 
 
 class Risk(Enum):
@@ -610,7 +611,13 @@ def decide_permission(level: AutonomyLevel, risk: Risk) -> PermissionDecision:
       destructive actions ask.
     * Level 3 -- full: everything non-destructive runs autonomously;
       destructive actions still require confirmation.
+    * Level 4 -- sovereign: the operator delegated destructive permission for
+      this session, so every classified risk is allowed at the permission layer.
+      Risk classification and runtime safety invariants remain active.
     """
+    if level is AutonomyLevel.SOVEREIGN:
+        return PermissionDecision.ALLOW
+
     # Full autonomy still requires confirmation for destructive operations.
     # Physical side effects must remain fail-closed even in unattended mode.
     if risk is Risk.DESTRUCTIVE:
