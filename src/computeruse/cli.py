@@ -368,19 +368,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         choices=[0, 1, 2, 3],
         default=AutonomyLevel.FULL.value,
-        help="Autonomy level 0-3 (default: 3 = full). Level 3 still asks "
-        "about destructive actions unless --yes is given.",
+        help="Autonomy level 0-3 (default: 3 = full). Destructive actions still "
+        "require explicit approval or a scoped grant, including with --yes.",
     )
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="Trust mode: auto-approve non-destructive CONFIRM decisions without prompting, so "
-        "the agent runs uninterrupted like a human operator. BLOCK still "
-        "blocks, and the kill-switch (Cmd+Shift+Escape, shaking the mouse, "
-        "or Ctrl-C), "
-        "budgets, verification and stuck-guard keep running. Every "
-        "auto-approval is logged. This is delegation in advance — use it "
-        "only on a machine you own.",
+        help="Trust mode: auto-approve non-destructive confirmations so routine "
+        "work can run unattended. Destructive actions still require explicit "
+        "approval or a scoped grant. BLOCK still blocks, and the kill-switch "
+        "(Cmd+Shift+Escape, shaking the mouse, or Ctrl-C), budgets, verification "
+        "and stuck-guard keep running. Every auto-approval is logged.",
     )
     parser.add_argument(
         "--background",

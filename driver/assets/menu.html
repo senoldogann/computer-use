@@ -5767,10 +5767,10 @@
         if (savedLvl === 2 || savedLvl === 3) currentAutonomyLevel = savedLvl;
       } catch (e) { }
       // Trust mode (--yes): auto-approve non-destructive CONFIRM only; keep destructive confirmation + BLOCK + kill-switch.
-      // OFF by default, matching the CLI. On, the Approve/Deny card below can
-      // never appear and the standing capability grants are never consulted,
-      // because nothing ever reaches a confirmation — a panel that started this
-      // way made its own permission surface decorative.
+      // OFF by default, matching the CLI. On, routine/non-destructive prompts
+      // are skipped; destructive actions still reach Approve/Deny or a matching
+      // scoped capability grant, so the permission surface remains active.
+      // Destructive confirmation is never disabled by generic trust mode.
       var trustMode = false;
       try {
         var savedTrust = localStorage.getItem("cu_trust_mode");

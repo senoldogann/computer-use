@@ -113,10 +113,10 @@ static WEBVIEW_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
 static AUTONOMY_LEVEL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(3);
 /// Trust mode (--yes): auto-approve non-destructive CONFIRM without prompting.
 ///
-/// Off by default, matching the CLI. On, the panel's own Approve/Deny card can
-/// never appear and the capability grants the store holds are never consulted,
-/// because nothing ever reaches a confirmation — so a panel that started this
-/// way silently made the whole permission surface decorative.
+/// Off by default, matching the CLI. On, only non-destructive confirmations
+/// are skipped. Destructive actions still reach the panel's Approve/Deny flow
+/// or a matching scoped capability grant, so the permission surface remains
+/// active in unattended mode.
 static TRUST_MODE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Whether MCP servers are active for agent runs.
