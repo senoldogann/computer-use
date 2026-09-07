@@ -1,133 +1,48 @@
 import AppKit
 import SwiftUI
 
-/// Standardized native title bar icon button.
-/// Subclasses NSButton with `mouseDownCanMoveWindow = false` to guarantee that clicks
-/// inside the macOS top titlebar area (y < 28pt) are never captured by window-dragging.
-struct NativeTitleBarButton: NSViewRepresentable {
+/// Title-bar toggle button as a pure SwiftUI Button.
+///
+/// A representable NSButton desyncs from SwiftUI's layout after an animated
+/// panel toggle: its model frame stays at the pre-toggle position while the
+/// icon animates away, so clicks land next to the icon ("works once, then
+/// dead"). A SwiftUI Button hit-tests exactly where it draws, always.
+struct NativeTitleBarButton: View {
     let iconName: String
     let isActive: Bool
     let tooltip: String
     let action: () -> Void
 
-    func makeNSView(context: Context) -> TitleBarNSButton {
-        let button = TitleBarNSButton(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
-        button.onClick = action
-        button.toolTip = tooltip
-        button.isActive = isActive
-        button.setIcon(name: iconName)
-        return button
-    }
+    @State private var isHovered = false
 
-    func updateNSView(_ button: TitleBarNSButton, context: Context) {
-        button.onClick = action
-        button.toolTip = tooltip
-        button.isActive = isActive
-        button.setIcon(name: iconName)
-    }
-}
-
-final class TitleBarNSButton: NSButton {
-    var isActive: Bool = false {
-        didSet { updateAppearance() }
-    }
-    var onClick: (() -> Void)?
-    private var isHovered = false
-    private var isPressed = false
-    private var trackingArea: NSTrackingArea?
-
-    override var mouseDownCanMoveWindow: Bool { false }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        bezelStyle = .regularSquare
-        isBordered = false
-        title = ""
-        imagePosition = .imageOnly
-        imageScaling = .scaleProportionallyDown
-        wantsLayer = true
-        focusRingType = .none
-        layer?.cornerRadius = 6
-        layer?.masksToBounds = true
-        layer?.borderWidth = 1
-        updateAppearance()
-    }
-
-    func setIcon(name: String) {
-        if let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-            self.image = img.withSymbolConfiguration(config)
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: iconName)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(
+                    isActive || isHovered ? Theme.textPrimary : Theme.textSecondary
+                )
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(
+                            isHovered
+                                ? Theme.cardElevated
+                                : (isActive ? Color.white.opacity(0.08) : Color.clear)
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(
+                            isHovered || isActive ? Theme.borderOverlay : Color.clear,
+                            lineWidth: 1
+                        )
+                )
+                .contentShape(Rectangle())
         }
-    }
-
-    func updateAppearance() {
-        if isHovered || isPressed {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-            layer?.borderColor = NSColor(Theme.color97948E).withAlphaComponent(0.35).cgColor
-            contentTintColor = NSColor(Theme.colorF5F4F2)
-        } else {
-            // Idle state: absolutely NO background color and NO border
-            layer?.backgroundColor = NSColor.clear.cgColor
-            layer?.borderColor = NSColor.clear.cgColor
-            contentTintColor = NSColor(Theme.colorAAA8A3)
-        }
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        self.trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        isHovered = true
-        updateAppearance()
-        NSCursor.pointingHand.set()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        isHovered = false
-        isPressed = false
-        updateAppearance()
-        NSCursor.arrow.set()
-    }
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        isPressed = true
-        updateAppearance()
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        isPressed = false
-        updateAppearance()
-        let location = convert(event.locationInWindow, from: nil)
-        if bounds.contains(location) {
-            onClick?()
-        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(tooltip)
     }
 }
 

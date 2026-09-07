@@ -85,6 +85,17 @@ struct CenterStageView: View {
                     .padding(.horizontal, 7).padding(.vertical, 3).background(Theme.cardElevated).clipShape(Capsule())
             }
 
+            // Console ⋯ menu — top-right of the window, never inside the chat
+            if threadsStore.activeThread?.entries.contains(where: { $0.kind == .console }) == true {
+                Theme.borderOverlay
+                    .frame(width: 1, height: 16)
+
+                ConsoleMenuButton(
+                    threadsStore: threadsStore,
+                    entries: threadsStore.activeThread?.entries ?? []
+                )
+            }
+
             // Right panel toggle (live viewport)
             NativeTitleBarButton(
                 iconName: "sidebar.right",
@@ -188,9 +199,12 @@ struct CenterStageView: View {
                 }
             }
 
-            // Glass composer docked at the bottom of the active task
+            // Glass composer docked at the bottom of the active task — same
+            // centered column and side margins as the messages above it.
             ComposerView(state: state, compact: true)
-                .padding(.horizontal, 24)
+                .frame(maxWidth: 780)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 28)
                 .padding(.bottom, 16)
         }
     }
