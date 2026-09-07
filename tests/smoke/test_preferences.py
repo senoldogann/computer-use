@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from computeruse.memory.preferences import (
     PreferenceEvidence,
+    PreferenceStore,
+    active_preferences,
     apply_preference_evidence,
     contains_sensitive_preference_material,
     make_preference_id,
@@ -294,3 +298,171 @@ def test_sensitive_evidence_is_rejected_without_a_record() -> None:
     assert write.record is None
     assert write.replaced_id is None
     assert "sensitive" in write.safe_summary.lower()
+
+
+def test_active_preferences_exclude_one_off_repeated_behavior() -> None:
+    pending = apply_preference_evidence(
+        (),
+        _evidence("compact", source="repeated_behavior", source_id="episode-1"),
+    )
+    assert pending.record is not None
+    assert active_preferences((pending.record,)) == ()
+
+
+def test_active_preferences_expose_repeated_behavior_after_two_distinct_evidence() -> None:
+    first = apply_preference_evidence(
+        (),
+        _evidence("compact", source="repeated_behavior", source_id="episode-1"),
+    )
+    assert first.record is not None
+    second = apply_preference_evidence(
+        (first.record,),
+        _evidence(
+            "compact",
+            source="repeated_behavior",
+            source_id="episode-2",
+            seconds=1,
+        ),
+    )
+    assert second.record is not None
+    assert active_preferences((second.record,)) == (second.record,)
+
+
+def test_active_preferences_return_only_new_value_after_supersession() -> None:
+    compact = apply_preference_evidence((), _evidence("compact"))
+    assert compact.record is not None
+    detailed = apply_preference_evidence(
+        (compact.record,),
+        _evidence("detailed", source_id="run-2", seconds=1),
+    )
+    assert detailed.record is not None
+
+    assert active_preferences((compact.record, detailed.record)) == (detailed.record,)
+
+
+def test_active_preferences_keep_explicit_winner_over_inferred_challenger() -> None:
+    explicit = apply_preference_evidence((), _evidence("compact"))
+    assert explicit.record is not None
+    records = (explicit.record,)
+    challenger_record = None
+    for index in range(1, 4):
+        write = apply_preference_evidence(
+            records,
+            _evidence(
+                "detailed",
+                source="repeated_behavior",
+                source_id=f"episode-{index}",
+                seconds=index,
+            ),
+        )
+        assert write.record is not None
+        challenger_record = write.record
+        records = tuple(
+            record
+            for record in records
+            if record.preference_id != write.record.preference_id
+        ) + (write.record,)
+
+    assert challenger_record is not None
+    assert challenger_record.confidence > 0.60
+    assert active_preferences(records) == (explicit.record,)
+
+
+def test_active_preferences_are_deterministic_bounded_and_domain_scoped() -> None:
+    compact = apply_preference_evidence((), _evidence("compact", key="style"))
+    markdown = apply_preference_evidence((), _evidence("markdown", key="format"))
+    assert compact.record is not None
+    assert markdown.record is not None
+    communication = PreferenceRecord(
+        preference_id="communication.tone.abcdef123456",
+        domain="communication",
+        key="tone",
+        value="direct",
+        confidence=1.0,
+        evidence_count=1,
+        source="explicit",
+        evidence_ids=("run-c",),
+        first_seen=_now(),
+        last_seen=_now(),
+    )
+    records = (markdown.record, communication, compact.record)
+
+    formatting = active_preferences(records, domain="formatting")
+    assert tuple(record.key for record in formatting) == ("format", "style")
+    assert active_preferences(records, limit=1) == (communication,)
+
+
+def test_preference_store_survives_restart_and_returns_active_record(tmp_path: Path) -> None:
+    store = PreferenceStore(tmp_path / "preferences")
+    write = store.record(_evidence("compact"))
+    assert write.record is not None
+
+    reopened = PreferenceStore(tmp_path / "preferences")
+    assert reopened.records() == (write.record,)
+    assert reopened.active() == (write.record,)
+
+
+def test_preference_store_reinforces_same_file_in_place(tmp_path: Path) -> None:
+    store_dir = tmp_path / "preferences"
+    store = PreferenceStore(store_dir)
+    first = store.record(
+        _evidence("compact", source="repeated_behavior", source_id="episode-1")
+    )
+    second = store.record(
+        _evidence(
+            "compact",
+            source="repeated_behavior",
+            source_id="episode-2",
+            seconds=1,
+        )
+    )
+    assert first.record is not None
+    assert second.record is not None
+
+    assert len(tuple(store_dir.glob("*.json"))) == 1
+    assert store.records() == (second.record,)
+    assert second.record.evidence_count == 2
+
+
+def test_preference_store_preserves_superseded_history(tmp_path: Path) -> None:
+    store = PreferenceStore(tmp_path / "preferences")
+    first = store.record(_evidence("compact"))
+    second = store.record(_evidence("detailed", source_id="run-2", seconds=1))
+    assert first.record is not None
+    assert second.record is not None
+
+    records = store.records()
+    assert {record.preference_id for record in records} == {
+        first.record.preference_id,
+        second.record.preference_id,
+    }
+    assert store.active() == (second.record,)
+
+
+def test_preference_store_persists_nothing_for_sensitive_evidence(tmp_path: Path) -> None:
+    store_dir = tmp_path / "preferences"
+    store = PreferenceStore(store_dir)
+    sensitive_value = "token=" + "abcdef0123456789"
+
+    write = store.record(_evidence(sensitive_value))
+
+    assert write.outcome == "rejected_sensitive"
+    assert store.records() == ()
+    assert not tuple(store_dir.glob("*.json"))
+
+
+def test_preference_store_skips_corrupt_file_without_hiding_healthy_memory(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store_dir = tmp_path / "preferences"
+    store = PreferenceStore(store_dir)
+    healthy = store.record(_evidence("compact"))
+    assert healthy.record is not None
+    (store_dir / "broken.json").write_text("{not json", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        records = store.records()
+
+    assert records == (healthy.record,)
+    assert "unreadable preference" in caplog.text.lower()
