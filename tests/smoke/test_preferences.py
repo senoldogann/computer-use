@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from computeruse.memory.preferences import PreferenceEvidence, make_preference_id
 from pydantic import ValidationError
 
-from computeruse.memory.preferences import PreferenceEvidence, make_preference_id
 from computeruse.memory.schemas import PreferenceRecord
 
 
