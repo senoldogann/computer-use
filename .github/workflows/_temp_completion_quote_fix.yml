@@ -1,0 +1,44 @@
+name: Temporary completion quote fix
+
+on:
+  push:
+    branches:
+      - audit/completion-auditor-fail-closed-2026-09-07
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/completion-auditor-fail-closed-2026-09-07
+      - name: Fix completion quote literals and compile
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("src/computeruse/orchestrator/loop.py")
+          text = p.read_text(encoding="utf-8")
+          replacements = {
+              '""failed" and explain the verification outage."': '"\\"failed\\" and explain the verification outage."',
+              'status "failed" and "': 'status \\"failed\\" and "',
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected one {old!r}, got {count}")
+              text = text.replace(old, new, 1)
+          p.write_text(text, encoding="utf-8")
+          PY
+          python -m py_compile src/computeruse/orchestrator/loop.py src/computeruse/orchestrator/prompts.py tests/smoke/test_completion_fail_closed.py tests/smoke/test_prompts.py
+          git diff --check
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/computeruse/orchestrator/loop.py
+          git commit -m "fix(completion): repair verifier diagnostics literals"
+          git push origin HEAD:audit/completion-auditor-fail-closed-2026-09-07
