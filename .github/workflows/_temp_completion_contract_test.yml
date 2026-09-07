@@ -1,0 +1,83 @@
+name: Temporary completion contract test update
+
+on:
+  push:
+    branches:
+      - audit/completion-auditor-fail-closed-2026-09-07
+
+permissions:
+  contents: write
+
+jobs:
+  update-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/completion-auditor-fail-closed-2026-09-07
+      - name: Update obsolete fail-open contract test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tests/smoke/test_visual_verification.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''def test_broken_auditor_never_traps_a_finished_run() -> None:
+              """A checker that raises must not turn a completed task into a hung one."""
+              screen = FakeScreen()
+
+              def provider(_state: WorkingState) -> AgentTurn:
+                  return _turn(Finish(type="finish", status="success", summary="done"))
+
+              def broken_audit(_state: WorkingState, _claim: str) -> object:
+                  raise RuntimeError("auditor transport down")
+
+              runner = OodaRunner(
+                  provider=provider,
+                  execute_physical=lambda _action: None,
+                  sensor=screen.sensor,
+                  completion_check=broken_audit,  # type: ignore[arg-type]
+                  max_steps=5,
+              )
+              final = runner.run(goal="rename")
+              assert final.completed_steps == ("step_0:finish",)
+          '''
+          new = '''def test_broken_auditor_fails_closed_without_hanging() -> None:
+              """A checker outage is bounded, but cannot verify a claimed success."""
+              screen = FakeScreen()
+
+              def provider(_state: WorkingState) -> AgentTurn:
+                  return _turn(Finish(type="finish", status="success", summary="done"))
+
+              def broken_audit(_state: WorkingState, _claim: str) -> object:
+                  raise RuntimeError("auditor transport down")
+
+              runner = OodaRunner(
+                  provider=provider,
+                  execute_physical=lambda _action: None,
+                  sensor=screen.sensor,
+                  completion_check=broken_audit,  # type: ignore[arg-type]
+                  max_steps=5,
+              )
+              final = runner.run(goal="rename")
+              # Two rejected claims, then the existing bounded stalemate gate closes
+              # the third claim as an unverified failure instead of hanging forever.
+              assert final.completed_steps == ("step_2:finish",)
+              assert final.last_error is not None
+              assert "doğrulan" in final.last_error.casefold()
+              assert runner._forced_finish is True
+              assert runner._stalemate_rejected is True
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one obsolete contract block, got {text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+          python -m py_compile tests/smoke/test_visual_verification.py
+          git diff --check
+      - name: Commit test contract update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/smoke/test_visual_verification.py
+          git commit -m "test(completion): replace obsolete fail-open expectation"
+          git push origin HEAD:audit/completion-auditor-fail-closed-2026-09-07
