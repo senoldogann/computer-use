@@ -319,7 +319,9 @@ final class AppState: ObservableObject {
 
     func resumeCheckpoint(mission: BlockedMissionItem, planID: String) {
         guard !runStore.isRunning else { return }
-        let id = threadsStore.resolveTargetThread(for: mission.goal)
+        // Resuming belongs to the conversation that parked the work: reuse
+        // the thread carrying this goal instead of starting a new topic.
+        let id = threadsStore.resolveTargetThread(for: mission.goal, reuseIdle: true)
         selectThread(id)
         runner.resume(threadID: id, goal: mission.goal, planID: planID)
     }
