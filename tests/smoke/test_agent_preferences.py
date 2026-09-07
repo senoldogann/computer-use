@@ -123,6 +123,27 @@ def test_forced_unverified_finish_does_not_learn_preference(tmp_path: Path) -> N
     assert PreferenceStore(tmp_path / "store" / "preferences").records() == ()
 
 
+def test_empty_trajectory_success_does_not_learn_preference(tmp_path: Path) -> None:
+    def finish_immediately(_state: WorkingState) -> AgentTurn:
+        return _turn(Finish(type="finish", status="success", summary="already done"))
+
+    writes: list[PreferenceWrite] = []
+    result = Agent(
+        _config(
+            tmp_path,
+            goal="From now on use compact summaries.",
+            provider=finish_immediately,
+            on_preference_write=writes.append,
+        )
+    ).run()
+
+    assert result.succeeded is True
+    assert result.trajectory == ()
+    assert result.preferences == ()
+    assert writes == []
+    assert PreferenceStore(tmp_path / "store" / "preferences").records() == ()
+
+
 def test_sensitive_durable_instruction_is_never_persisted(tmp_path: Path) -> None:
     secret_like = "token=" + "abcdef0123456789"
     result = Agent(
