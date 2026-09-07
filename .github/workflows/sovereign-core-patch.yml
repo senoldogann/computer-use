@@ -1,0 +1,89 @@
+name: Sovereign core patch
+
+on:
+  push:
+    branches: [feat/sovereign-mode-core]
+
+permissions:
+  contents: write
+
+jobs:
+  task1:
+    if: github.event.head_commit.message == 'chore(sovereign): apply task 1 policy patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/sovereign-mode-core
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Patch autonomy policy exactly
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/computeruse/security/autonomy.py')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  'The constitution defines four autonomy levels (0 Observer / 1 Supervised /\n'
+                  '2 Guarded / 3 Full). This module turns that policy into a *pure* decision:',
+                  'The constitution defines five autonomy levels (0 Observer / 1 Supervised /\n'
+                  '2 Guarded / 3 Full / 4 Sovereign). This module turns that policy into a *pure* decision:',
+              ),
+              (
+                  'class AutonomyLevel(Enum):\n'
+                  '    """The four configurable autonomy levels from the constitution."""\n\n'
+                  '    OBSERVER = 0   # Recommends actions and highlights regions, never touches.\n'
+                  '    SUPERVISED = 1  # Proposes each action and waits for confirmation.\n'
+                  '    GUARDED = 2    # Routine actions run; destructive ones ask first.\n'
+                  '    FULL = 3       # Unattended, with safety boundaries + auto-fallback.\n',
+                  'class AutonomyLevel(Enum):\n'
+                  '    """The five configurable autonomy levels from the constitution."""\n\n'
+                  '    OBSERVER = 0   # Recommends actions and highlights regions, never touches.\n'
+                  '    SUPERVISED = 1  # Proposes each action and waits for confirmation.\n'
+                  '    GUARDED = 2    # Routine actions run; destructive ones ask first.\n'
+                  '    FULL = 3       # Unattended, destructive actions still ask.\n'
+                  '    SOVEREIGN = 4  # Operator-delegated: destructive actions may run unattended.\n',
+              ),
+              (
+                  '    * Level 3 -- full: everything non-destructive runs autonomously;\n'
+                  '      destructive actions still require confirmation.\n'
+                  '    """\n'
+                  '    # Full autonomy still requires confirmation for destructive operations.\n',
+                  '    * Level 3 -- full: everything non-destructive runs autonomously;\n'
+                  '      destructive actions still require confirmation.\n'
+                  '    * Level 4 -- sovereign: the operator delegated destructive permission for\n'
+                  '      this session, so every classified risk is allowed at the permission layer.\n'
+                  '      Risk classification and runtime safety invariants remain active.\n'
+                  '    """\n'
+                  '    if level is AutonomyLevel.SOVEREIGN:\n'
+                  '        return PermissionDecision.ALLOW\n\n'
+                  '    # Full autonomy still requires confirmation for destructive operations.\n',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one patch marker, found {count}: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify Task 1 GREEN
+        run: uv run pytest -q tests/smoke/test_sovereign_mode.py
+
+      - name: Commit verified Task 1
+        run: |
+          git config user.name 'computer-use audit bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/computeruse/security/autonomy.py
+          git commit -m 'feat(security): add sovereign autonomy policy'
+          git push origin HEAD:feat/sovereign-mode-core
