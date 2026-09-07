@@ -6,8 +6,19 @@ without weakening the existing FULL safety boundary.
 
 from __future__ import annotations
 
+from computeruse.agent import guarded
+from computeruse.orchestrator.loop import EMPTY_OBSERVATION
+from computeruse.orchestrator.schemas import AgentTurn, ClipboardPaste
 from computeruse.security.autonomy import AutonomyLevel, Risk, decide_permission
 from computeruse.security.permissions import PermissionDecision
+
+
+def _destructive_turn() -> AgentTurn:
+    return AgentTurn(
+        thought="cleanup",
+        sub_goal="remove temporary data",
+        action=ClipboardPaste(type="clipboard_paste", text="rm -rf ~/temporary-data"),
+    )
 
 
 def test_sovereign_is_a_distinct_internal_level() -> None:
@@ -28,3 +39,30 @@ def test_full_still_confirms_destructive_actions() -> None:
         decide_permission(AutonomyLevel.FULL, Risk.DESTRUCTIVE)
         is PermissionDecision.CONFIRM
     )
+
+
+def test_sovereign_does_not_require_grant_lookup() -> None:
+    def unexpected_authorize(_turn: AgentTurn, _label: str | None):
+        raise AssertionError("sovereign must not consult grants for permission")
+
+    guard = guarded(
+        AutonomyLevel.SOVEREIGN,
+        authorize=unexpected_authorize,
+        auto_approve=False,
+    )
+
+    assert guard(_destructive_turn(), EMPTY_OBSERVATION) is PermissionDecision.ALLOW
+
+
+def test_sovereign_does_not_consume_single_use_approval() -> None:
+    def unexpected_approval(_turn: AgentTurn, _label: str | None):
+        raise AssertionError("sovereign must not consume queued approval")
+
+    guard = guarded(
+        AutonomyLevel.SOVEREIGN,
+        authorize=None,
+        auto_approve=False,
+        consume_approval=unexpected_approval,
+    )
+
+    assert guard(_destructive_turn(), EMPTY_OBSERVATION) is PermissionDecision.ALLOW
