@@ -3274,6 +3274,32 @@
       display: flex !important;
     }
 
+    /* Compact-mode expand button: hidden in full view, small icon at the
+       far left of the pill. Same expand path as starting to type. */
+    .compact-expand-btn {
+      display: none;
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      color: var(--text-tertiary);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .compact-expand-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-primary);
+    }
+
+    body.compact-mode .compact-expand-btn {
+      display: inline-flex !important;
+    }
+
     body.compact-mode .compact-send-btn {
       display: inline-flex !important;
     }
@@ -4774,6 +4800,16 @@
     </div>
 
     <div class="input-wrapper" id="composerWrapper">
+      <!-- Compact-mode expand button: opens the full view without typing -->
+      <button class="compact-expand-btn" id="compactExpandBtn" type="button" title="Genişlet">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 3 21 3 21 9" />
+          <polyline points="9 21 3 21 3 15" />
+          <line x1="21" y1="3" x2="14" y2="10" />
+          <line x1="3" y1="21" x2="10" y2="14" />
+        </svg>
+      </button>
       <!-- Compact Pill Bar Brand Header (visible only in compact-mode) -->
       <div class="compact-brand-group" id="compactBrandGroup">
         <svg class="compact-cursor-icon" width="16" height="16" viewBox="0 0 24 24" fill="#FFB17F" stroke="#FFB17F"
@@ -7428,6 +7464,16 @@
         compactSendBtnEl.addEventListener("click", function () {
           window.expandWindow();
           submit();
+        });
+      }
+
+      // Compact pill → full view without typing: the same expand path the
+      // input's typing handler uses, then keep focus in the input.
+      var compactExpandBtnEl = document.getElementById("compactExpandBtn");
+      if (compactExpandBtnEl) {
+        compactExpandBtnEl.addEventListener("click", function () {
+          window.expandWindow();
+          if (goalInputEl) goalInputEl.focus();
         });
       }
 
