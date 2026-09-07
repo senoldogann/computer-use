@@ -8,8 +8,9 @@ browser profiles, real OS dialogs), never a headless/sandboxed bypass.
 The design thesis is **Prompt & Orchestration Supremacy**: the scaffolding —
 strict JSON contracts, the OODA loop, validation gates, and self-correction —
 must be so resilient that even a weak LLM stays reliable. The full project
-constitution lives in [`AGENTS.md`](AGENTS.md); the two architectural pivots are
-recorded there as ADR-1 and ADR-2:
+constitution lives in [`AGENTS.md`](AGENTS.md); key architecture and
+permission-governance decisions are recorded there as ADRs, including ADR-1,
+ADR-2, and ADR-4:
 
 ## ADR-1 — Layered hybrid (Rust actuation + Python orchestration)
 
@@ -34,6 +35,17 @@ recorded there as ADR-1 and ADR-2:
   marks in the same format AX elements do. It fires only when AX came back
   empty — a text pass on every turn would bury the real elements under
   duplicate readings of their own labels.
+
+## ADR-4 — Sovereign is explicit delegation, not trust mode
+
+- **Level 3 remains the ordinary numeric autonomy ceiling.** Destructive
+  actions still require an approval record or a matching scoped capability
+  grant.
+- **Level 4 is entered only with `--sovereign`.** It delegates destructive
+  permission for one bounded session; a hard budget is mandatory and the
+  kill-switch, verification, completion audit, tracing, focus/staleness gates,
+  coordinate bounds, driver trust checks, stuck-loop guard, and recovery
+  ceilings remain active.
 
 ## Repository map
 
@@ -67,7 +79,7 @@ src/computeruse/
 │   ├── approvals.py  # Law 5.1: park an action for a human instead of hanging
 │   ├── grants.py     # Law 5.1: bounded authority delegated in advance
 │   ├── killswitch.py # Law 5.2: kill-switch (shake detector + OODA gate)
-│   └── autonomy.py   # Law 5.1: Level 0-3 guard, destructive-action detection
+│   └── autonomy.py   # Law 5.1: Levels 0-4 guard, destructive-action detection
 └── vision/
     ├── ax.py          # ADR-2 primary: AXElement tree + find_elements grounding
     ├── coordinates.py # ADR-2: pure retina/DPI scale + multi-display mapping
@@ -391,8 +403,11 @@ Working & tested:
   + retrospective) and exposes `known_signatures()` so a repeated workflow is
   never re-distilled — Law 4 memory feeds Law 3 skills through the same
   flow-signature contract.- Law 5.1 autonomy guard: `security/autonomy.py` classifies actions by risk
-  and maps Level 0-3 to allow/confirm/block; wired into the OODA VALIDATE step
-  so a destructive move raises before ever touching the physical driver.
+  and maps Levels 0-4 to allow/confirm/block. Level 3 still requires confirmation
+  or a matching scoped grant for destructive actions; Level 4 Sovereign is the
+  explicit bounded session delegation defined by ADR-4. The guard is wired into
+  the OODA VALIDATE step so a blocked move raises before ever touching the
+  physical driver.
 - Law 5.2 global kill-hotkey: the real driver installs a CGEventTap listening
   for Command+Shift+Escape (the event is *consumed*, never delivered to apps)
   and the orchestrator polls it via the `hotkey_state` RPC before every step.
