@@ -217,7 +217,6 @@ def apply_preference_evidence(
         (record for record in records if record.preference_id == preference_id),
         None,
     )
-    duplicate = current is not None and evidence.source_id in current.evidence_ids
     if current is None:
         candidate = PreferenceRecord(
             preference_id=preference_id,
@@ -259,8 +258,6 @@ def apply_preference_evidence(
         outcome = "pending"
     elif current is None:
         outcome = "created"
-    elif duplicate and current is not None and not _is_active(current):
-        outcome = "pending"
     else:
         outcome = "reinforced"
 
