@@ -9,17 +9,23 @@ idempotent, and credential-like material must be rejected before persistence.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Final, Literal
 
+from computeruse.atomic import write_atomic
 from computeruse.memory.schemas import (
     PreferenceDomain,
     PreferenceRecord,
     PreferenceSource,
 )
 from computeruse.slug import ascii_slug
+
+LOGGER: Final = logging.getLogger(__name__)
 
 PreferenceWriteOutcome = Literal[
     "created",
@@ -205,7 +211,10 @@ def apply_preference_evidence(
             outcome="rejected_sensitive",
             record=None,
             replaced_id=None,
-            safe_summary=f"rejected sensitive preference evidence for {evidence.domain}/{normalized_key}",
+            safe_summary=(
+                "rejected sensitive preference evidence for "
+                f"{evidence.domain}/{normalized_key}"
+            ),
         )
 
     preference_id = make_preference_id(
@@ -267,3 +276,93 @@ def apply_preference_evidence(
         replaced_id=replaces.preference_id if replaces is not None else None,
         safe_summary=f"{outcome} preference evidence for {evidence.domain}/{normalized_key}",
     )
+
+
+def active_preferences(
+    records: tuple[PreferenceRecord, ...],
+    *,
+    domain: PreferenceDomain | None = None,
+    limit: int | None = None,
+) -> tuple[PreferenceRecord, ...]:
+    """Return the deterministic, contradiction-free preferences safe to stage.
+
+    History is append-preserving, but prompt context is not a history dump. For
+    each ``(domain, key)`` this function chooses exactly one unsuperseded active
+    value. Explicit evidence wins over corrections, which win over inferred
+    behavior; confidence and freshness break ties inside one source class.
+    """
+    if limit is not None and limit < 0:
+        raise ValueError("preference limit must be non-negative")
+
+    superseded = _superseded_ids(records)
+    grouped: dict[tuple[PreferenceDomain, str], list[PreferenceRecord]] = {}
+    for record in records:
+        if domain is not None and record.domain != domain:
+            continue
+        if record.preference_id in superseded or not _is_active(record):
+            continue
+        group_key = (record.domain, _normalize_identity_text(record.key))
+        grouped.setdefault(group_key, []).append(record)
+
+    winners: list[PreferenceRecord] = []
+    for candidates in grouped.values():
+        candidates.sort(
+            key=lambda record: (
+                -_SOURCE_STRENGTH[record.source],
+                -record.confidence,
+                -record.last_seen.timestamp(),
+                record.preference_id,
+            )
+        )
+        winners.append(candidates[0])
+
+    winners.sort(
+        key=lambda record: (
+            record.domain,
+            _normalize_identity_text(record.key),
+            record.preference_id,
+        )
+    )
+    if limit is not None:
+        winners = winners[:limit]
+    return tuple(winners)
+
+
+class PreferenceStore:
+    """Atomic, append-history persistence for adaptive preference records."""
+
+    def __init__(self, store_dir: Path) -> None:
+        self._store_dir = store_dir
+
+    def records(self) -> tuple[PreferenceRecord, ...]:
+        """Read every healthy record, skipping isolated corrupt files."""
+        if not self._store_dir.is_dir():
+            return ()
+        records: list[PreferenceRecord] = []
+        for path in sorted(self._store_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                records.append(PreferenceRecord.model_validate(payload))
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("unreadable preference %s: %s", path, exc)
+        records.sort(key=lambda record: record.preference_id)
+        return tuple(records)
+
+    def record(self, evidence: PreferenceEvidence) -> PreferenceWrite:
+        """Reconcile and atomically persist one safe evidence observation."""
+        write = apply_preference_evidence(self.records(), evidence)
+        if write.record is None:
+            return write
+        self._store_dir.mkdir(parents=True, exist_ok=True)
+        path = self._store_dir / f"{write.record.preference_id}.json"
+        write_atomic(path, write.record.model_dump_json(indent=2) + "\n")
+        return write
+
+    def active(
+        self,
+        *,
+        domain: PreferenceDomain | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreferenceRecord, ...]:
+        """Return bounded active preferences without exposing contradictions."""
+        return active_preferences(self.records(), domain=domain, limit=limit)
