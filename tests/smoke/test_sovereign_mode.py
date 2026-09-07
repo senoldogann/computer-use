@@ -93,3 +93,59 @@ def test_build_config_propagates_sovereign_level() -> None:
 def test_numeric_level_does_not_expose_sovereign() -> None:
     with pytest.raises(SystemExit):
         cli.parse_args(["--goal", "x", "--level", "4"])
+
+
+def test_sovereign_requires_a_hard_budget(capsys: pytest.CaptureFixture[str]) -> None:
+    args = cli.parse_args(["--goal", "x", "--sovereign"])
+
+    assert cli._reject_unusable_arguments(args) == 2
+    assert "--sovereign requires at least one" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "budget_args",
+    [
+        ["--deadline-seconds", "60"],
+        ["--max-tokens", "1000"],
+        ["--max-cost", "1.0"],
+    ],
+)
+def test_sovereign_accepts_any_hard_budget(budget_args: list[str]) -> None:
+    args = cli.parse_args(["--goal", "x", "--sovereign", *budget_args])
+
+    assert cli._reject_unusable_arguments(args) is None
+
+
+def test_sovereign_rejects_yes(capsys: pytest.CaptureFixture[str]) -> None:
+    args = cli.parse_args(
+        ["--goal", "x", "--sovereign", "--yes", "--deadline-seconds", "60"]
+    )
+
+    assert cli._reject_unusable_arguments(args) == 2
+    assert "--sovereign cannot be combined with --yes" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_sovereign_rejects_conflicting_lower_level(
+    level: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = cli.parse_args(
+        [
+            "--goal",
+            "x",
+            "--sovereign",
+            "--level",
+            str(level),
+            "--deadline-seconds",
+            "60",
+        ]
+    )
+
+    assert cli._reject_unusable_arguments(args) == 2
+    assert "--sovereign cannot be combined with --level 0/1/2" in capsys.readouterr().err
+
+
+def test_full_single_run_still_needs_no_hard_budget() -> None:
+    args = cli.parse_args(["--goal", "x"])
+
+    assert cli._reject_unusable_arguments(args) is None
