@@ -570,3 +570,34 @@ def test_a_long_goal_still_produces_a_readable_skill(tmp_path: Path) -> None:
     assert summary.description.endswith("…")
     # Stage 2 keeps the whole thing; only the context-budgeted view shrinks.
     assert registry.load("textedit.long-goal").description == goal
+
+
+def test_cross_site_routes_never_mount_over_the_goal_site() -> None:
+    """A route distilled on one site must not steer a goal about another.
+
+    Regression for the X.com zoom incident's sibling failure: a skill learned
+    on Hacker News, filed under the same app (Google Chrome), matched an
+    X.com goal on generic workflow words ('read', 'post') and the model's
+    reasoning began with \"the irrelevant Hacker News instructions should be
+    ignored\". When a goal names a site and the stored route names a
+    *different* site, the route cannot transfer and must be refused at mount.
+    """
+    from computeruse.skills.registry import routes_disagree_on_site, site_markers
+
+    goal = "open x.com and read my timeline"
+    hn_route = "open Hacker News and read the top post's comments"
+    assert routes_disagree_on_site(goal, hn_route)
+    assert site_markers(goal) == frozenset({"x"})
+    assert site_markers(hn_route) == frozenset({"hacker news"})
+
+    # Same site (old name Twitter) is the same property — never refused.
+    x_route = "open twitter and read the trending posts"
+    assert not routes_disagree_on_site(goal, x_route)
+    # A generic goal that names no site cannot be refused by site.
+    assert not routes_disagree_on_site("read the first three posts", hn_route)
+    # A route that names no site has nothing to disagree with.
+    assert not routes_disagree_on_site(goal, "scroll the page and read the posts")
+    # A goal naming Reddit and a route naming Hacker News disagree.
+    assert routes_disagree_on_site(
+        "open reddit.com/r/mac and read the top post", hn_route
+    )

@@ -307,20 +307,48 @@ def test_to_logical_resolution_passthrough_at_scale_one() -> None:
     assert to_logical_resolution(capture) is capture
 
 
-def test_downscale_to_max_side_creates_the_vlm_map() -> None:
-    """The screenshot map matches what OpenAI `detail: low` will show (512px)."""
+def test_downscale_to_max_side_caps_the_longest_side() -> None:
+    """A frame wider than the cap is resampled, aspect preserved, scale 1.0."""
     from computeruse.vision.capture import downscale_to_max_side
 
-    # 1024x600 -> 512x300 (longest side capped, aspect preserved, scale 1.0).
+    # 1024x600 capped at 512 -> 512x300. An explicit cap keeps this test
+    # independent of the product's default map size.
     width, height = 1024, 600
     capture = ScreenCapture(
         display_id=0, width=width, height=height, scale=1.0, data=bytes(width * height * 4)
     )
-    mapped = downscale_to_max_side(capture)
+    mapped = downscale_to_max_side(capture, max_side=512)
     assert (mapped.width, mapped.height) == (512, 300)
     assert mapped.scale == 1.0
     # The coordinate gate's factor: screen points per image pixel.
     assert mapped.width * 2.0 == width
+
+
+def test_default_vlm_map_keeps_a_laptop_display_at_its_real_size() -> None:
+    """The product default must NOT squash typical displays to mush.
+
+    Regression for the X.com zoom-loop incident: the map used to be capped at
+    512px, which shrank 13pt tweet text to ~4px per glyph; the model could not
+    read a single post and answered by zooming the page fifteen times. A
+    typical MacBook logical frame (1512x982 from a Retina 3024x1964 capture)
+    must pass through the default map unchanged so text keeps its real size.
+    """
+    from computeruse.vision.capture import SCREENSHOT_MAP_MAX_SIDE
+
+    width, height = 3024, 1964
+    capture = ScreenCapture(
+        display_id=0, width=width, height=height, scale=2.0, data=bytes(width * height * 4)
+    )
+    logical = to_logical_resolution(capture)
+    assert (logical.width, logical.height) == (1512, 982)
+    # ScreenMap treats this as identity: one image pixel == one logical point,
+    # so an AX centre (image space) is the exact screen point to click.
+    assert SCREENSHOT_MAP_MAX_SIDE >= 1568
+    # model_capture rebuilds the logical frame (value-equal, not the same
+    # object): dimensions and scale 1.0 are what make ScreenMap identity.
+    mapped = model_capture(capture, SCREENSHOT_MAP_MAX_SIDE)
+    assert mapped.width == logical.width and mapped.height == logical.height
+    assert mapped.scale == 1.0
 
 
 def test_downscale_to_max_side_sampled_content_stays_grounded() -> None:
@@ -329,19 +357,20 @@ def test_downscale_to_max_side_sampled_content_stays_grounded() -> None:
 
     width, height = 1024, 600
     buf = bytearray(width * height * 4)
-    # Paint a 200x100 white block at logical (300, 200) -> image (150, 100).
+    # Paint a 200x100 white block at logical (300, 200) -> image (150, 100)
+    # under a 512 cap.
     for y in range(200, 300):
         base = (y * width + 300) * 4
         buf[base : base + 200 * 4] = b"\xff\xff\xff\xff" * 200
     capture = ScreenCapture(display_id=0, width=width, height=height, scale=1.0, data=bytes(buf))
-    mapped = downscale_to_max_side(capture)
+    mapped = downscale_to_max_side(capture, max_side=512)
     # The block's top-left lands at the mapped pixel (150, 100) and is white.
     i = (100 * mapped.width + 150) * 4
     assert mapped.data[i : i + 4] == b"\xff\xff\xff\xff"
 
 
 def test_downscale_to_max_side_passthrough_when_small() -> None:
-    """A display already within 512px is not resampled (factor stays 1.0)."""
+    """A display already within the cap is not resampled (factor stays 1.0)."""
     from computeruse.vision.capture import downscale_to_max_side
 
     capture = ScreenCapture(
@@ -351,6 +380,7 @@ def test_downscale_to_max_side_passthrough_when_small() -> None:
         scale=1.0,
         data=bytes(480 * 320 * 4),
     )
+    assert downscale_to_max_side(capture, max_side=512) is capture
     assert downscale_to_max_side(capture) is capture
 
 

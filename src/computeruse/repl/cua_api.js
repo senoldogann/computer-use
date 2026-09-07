@@ -194,21 +194,35 @@ class AppTarget {
   }
 
   async pressKey(key, modifiers = []) {
+    let finalKey = key;
+    let finalMods = Array.isArray(modifiers) ? [...modifiers] : [];
+    if (typeof key === "string" && key.includes("+")) {
+      const parts = key.split("+").map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        finalKey = parts.pop();
+        finalMods = [...finalMods, ...parts];
+      }
+    }
     return await sendRpc("pressKey", {
       app: this.name,
-      key,
-      modifiers,
+      key: finalKey,
+      modifiers: finalMods,
     });
   }
 
   async pressHotkey(modifiers, key) {
-    return await this.pressKey(key, modifiers);
+    if (typeof modifiers === "string" && key === undefined) {
+      return await this.pressKey(modifiers);
+    }
+    return await this.pressKey(key, Array.isArray(modifiers) ? modifiers : [modifiers]);
   }
 
-  async typeText(text) {
+  async typeText(text, options = {}) {
+    const wpm = typeof options === "number" ? options : options?.wpm;
     return await sendRpc("typeText", {
       app: this.name,
       text,
+      ...(wpm ? { wpm } : {}),
     });
   }
 
@@ -242,6 +256,12 @@ class AppTarget {
 
   async getScreenshot() {
     return await sendRpc("getScreenshot", {
+      app: this.name,
+    });
+  }
+
+  async activate() {
+    return await sendRpc("activateApp", {
       app: this.name,
     });
   }
@@ -295,6 +315,37 @@ globalThis.cua = {
 globalThis.getApp = globalThis.cua.getApp;
 globalThis.sleep = globalThis.cua.sleep;
 globalThis.wait = globalThis.cua.wait;
+
+// Standard web/node timer polyfills mapped onto the host-backed sleep RPC
+let _timerSeq = 0;
+const _activeTimers = new Map();
+
+globalThis.setTimeout = function (fn, ms) {
+  const id = ++_timerSeq;
+  let cancelled = false;
+  _activeTimers.set(id, () => {
+    cancelled = true;
+  });
+  cua.sleep(Math.max(0, Number(ms) || 0)).then(() => {
+    if (!cancelled && typeof fn === "function") {
+      try {
+        fn();
+      } catch (err) {
+        // Unhandled callback errors inside guest setTimeout
+      }
+    }
+    _activeTimers.delete(id);
+  });
+  return id;
+};
+
+globalThis.clearTimeout = function (id) {
+  const cancel = _activeTimers.get(id);
+  if (cancel) {
+    cancel();
+    _activeTimers.delete(id);
+  }
+};
 
 function prepareCode(code) {
   const trimmed = code.trim();

@@ -12,15 +12,18 @@ highlighted region on screen and a line in the list are the same mark, and the
 model can select a target by its number (``click_mark``) instead of estimating
 a coordinate.
 
-No digits are drawn into the image, deliberately. The frame reaches the model
-at OpenAI ``detail: "low"`` — the whole screenshot is about 85 tokens — where a
-glyph a few pixels tall is not resolvable at all. The number lives in the text
-list, which is exact and free; the drawing's job is to show *which* regions are
-grounded, and a coloured box survives that resolution where a numeral does not.
+No digits are drawn into the image, deliberately. The index lives in the text
+list, which is exact and free; a digit painted over a button would overlap its
+label and duplicate information the list already names precisely. The
+drawing's job is to show *which* regions are grounded — and the screenshot now
+reaches the model at full logical resolution (``detail: "high"``), so the
+boxes themselves stay crisp against real text instead of vanishing into a
+512px thumbnail.
 
 Benefits:
 - A mark resolves to the element's own centre in logical points, so a click by
-  mark skips image-space rounding entirely (~3.3 points per image pixel).
+  mark skips image-space rounding entirely (up to ~3.3 points per image pixel
+  when a large display is downscaled to the map's cap).
 - Lets weak and strong models refer to visually grounded element regions.
 - Pure pixel transformations with zero external heavy dependencies.
 """

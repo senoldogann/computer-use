@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from computeruse.atomic import write_atomic
 from computeruse.orchestrator.schemas import Action
+from computeruse.skills.registry import routes_disagree_on_site, site_markers
 from computeruse.slug import ascii_slug
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -49,6 +50,56 @@ class SemanticEntry(BaseModel):
     kind: EntryKind = "preference"
     tags: tuple[str, ...] = Field(default=(), description="Search keywords.")
     description: str | None = Field(default=None)
+    #: The web property this fact was learned on, when the run's goal named
+    #: one (e.g. "x" for an X.com task, "hacker news" for a HN task). A
+    #: browser holds facts from many sites, and a fact learned on one site is
+    #: not a fact about another — this field is what lets retrieval tell them
+    #: apart instead of poisoning an X.com run with Hacker News patterns.
+    #: ``None`` for non-web goals and for entries written before the field
+    #: existed (schema vow: old records keep validating).
+    site: str | None = Field(default=None)
+
+
+def _fact_text(entry: SemanticEntry) -> str:
+    """The full searchable text of one entry (pure)."""
+    return " ".join(
+        (entry.key, entry.value, entry.app, *entry.tags)
+    ).lower()
+
+
+def site_of_goal(goal: str) -> str | None:
+    """The single canonical web property a goal names, or None (pure).
+
+    ``None`` for goals naming no site and for goals naming several (a
+    comparison task cannot claim one learning site, so its facts stay
+    site-agnostic rather than guessing).
+    """
+    marked = site_markers(goal)
+    if len(marked) == 1:
+        return next(iter(marked))
+    return None
+
+
+def entry_aligned_with_goal(entry: SemanticEntry, goal: str) -> bool:
+    """Is a fact learned somewhere compatible with the goal's site (pure)?
+
+    The domain-isolation rule behind Law 4.2 for browsers: a Chrome store
+    holds facts learned on X.com, Hacker News, Reddit and GitHub under one
+    app name, and staging all of them for an X.com goal replayed other sites'
+    patterns into the prompt. An entry is refused when the goal names at
+    least one known site AND the entry is provably about a different one —
+    either it was stamped with a site at learning time (``entry.site``) or its
+    own text names one (the legacy check, so entries written before the field
+    existed still cannot poison a run). A goal naming no site refuses nothing,
+    and an entry naming no site (or the goal's own site) always passes: there
+    is no disagreement to protect against.
+    """
+    goal_sites = site_markers(goal)
+    if not goal_sites:
+        return True
+    if entry.site is not None and goal_sites.isdisjoint({entry.site}):
+        return False
+    return not routes_disagree_on_site(goal, _fact_text(entry))
 
 
 def search_entries(
@@ -56,26 +107,34 @@ def search_entries(
     query: str,
     *,
     app: str | None = None,
+    goal: str | None = None,
 ) -> tuple[SemanticEntry, ...]:
     """Score entries against a query, optionally scoped to one app (pure).
 
-    Tokens may match the key, value, app, or tags — a shortcut's *meaning*
-    (``key``/``tags``) and its *answer* (``value``) are both searchable. An
-    empty query returns everything for the app (sorted by id): the RETRIEVE
-    step asks "what do we know about this app?" with no specific question.
+    Tokens may match the key, value, app, site, or tags — a shortcut's
+    *meaning* (``key``/``tags``) and its *answer* (``value``) are both
+    searchable. An empty query returns everything for the app (sorted by id):
+    the RETRIEVE step asks "what do we know about this app?" with no specific
+    question.
 
-    Deterministic ordering: score desc, then id asc (stable across runs).
+    ``goal`` applies the domain-isolation rule: entries provably learned on a
+    web property the goal does not name are dropped before scoring (see
+    :func:`entry_aligned_with_goal`). Deterministic ordering: score desc,
+    then id asc (stable across runs).
     """
     tokens = {token for token in query.lower().split() if token}
     scored: list[tuple[int, SemanticEntry]] = []
     for entry in entries:
         if app is not None and entry.app != app:
             continue
+        if goal is not None and not entry_aligned_with_goal(entry, goal):
+            continue
         if not tokens:
             scored.append((0, entry))
             continue
+        site_words = (entry.site,) if entry.site else ()
         haystack = " ".join(
-            (entry.key, entry.value, entry.app, *entry.tags)
+            (entry.key, entry.value, entry.app, *entry.tags, *site_words)
         ).lower()
         score = sum(1 for token in tokens if token in haystack)
         if score > 0:
@@ -142,15 +201,51 @@ class SemanticStore:
         path = self._store_dir / f"{entry.entry_id}.json"
         write_atomic(path, entry.model_dump_json(indent=2) + "\n")
 
-    def search(self, query: str, *, app: str | None = None) -> tuple[SemanticEntry, ...]:
+    def search(
+        self,
+        query: str,
+        *,
+        app: str | None = None,
+        goal: str | None = None,
+    ) -> tuple[SemanticEntry, ...]:
         """Convenience: query the on-disk index (pure scoring underneath)."""
-        return search_entries(self.entries(), query, app=app)
+        return search_entries(self.entries(), query, app=app, goal=goal)
+
+    def prune_corrupt(self) -> tuple[str, ...]:
+        """Delete entries that no longer parse as :class:`SemanticEntry`.
+
+        ``entries()`` only skips a corrupt file with a warning, which keeps one
+        bad record from hiding every other fact — but it also leaves the bad
+        record on disk forever, re-warned on every read. This is the explicit
+        cleanup half: a file that cannot be parsed as a typed semantic entry
+        (broken JSON, or a shape the model rejects) is removed and its name
+        returned, so the caller can report what was swept. Parsing failures
+        for a single file never abort the sweep of the rest.
+        """
+        removed: list[str] = []
+        if not self._store_dir.is_dir():
+            return ()
+        for path in sorted(self._store_dir.glob("*.json")):
+            try:
+                SemanticEntry.model_validate(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("pruning corrupt semantic entry %s: %s", path.name, exc)
+                try:
+                    path.unlink()
+                except OSError as exc2:  # pragma: no cover - race with the filesystem
+                    LOGGER.warning("could not remove corrupt entry %s: %s", path, exc2)
+                    continue
+                removed.append(path.name)
+        return tuple(removed)
 
 
 def extract_facts_from_run(
     app: str,
     steps: tuple[Action, ...],
     step_descriptions: tuple[str, ...] = (),
+    site: str | None = None,
 ) -> tuple[SemanticEntry, ...]:
     """Derive stable UI patterns/shortcuts from an executed trajectory (pure).
 
@@ -158,6 +253,10 @@ def extract_facts_from_run(
     semantic memory across runs (Law 4.2). Typed on :class:`Action` (the
     discriminated union), never ``object``: the union's fields are read through
     ``model_dump`` so every attribute access is type-safe (Law 6.2).
+
+    ``site`` stamps each fact with the web property the run was about (see
+    :func:`site_of_goal`), so facts learned under one browser site are never
+    staged for a goal on a different one.
 
     Coordinates are deliberately excluded: a point that was correct on this
     display is stale on the next, and replaying it replays yesterday's
@@ -196,6 +295,7 @@ def extract_facts_from_run(
                 value=val,
                 kind="pattern",
                 tags=tuple(token for token in desc.lower().split() if len(token) > 2),
+                site=site,
             )
         )
     return tuple(facts)

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import selectors
+import shutil
 import subprocess
 import time
 from collections.abc import Callable
@@ -213,6 +214,17 @@ class CuaReplResult:
 class CuaReplEngine:
     """Manages the Node.js bridge process and handles callbacks from JavaScript."""
 
+    #: Where to look for the ``node`` binary when it is not on PATH. A GUI
+    #: launcher (menu-bar app) runs with a minimal PATH (/usr/bin:/bin:…), so
+    #: Homebrew and ~/.local installs are invisible to a bare ``"node"`` —
+    #: the bridge spawn then dies with FileNotFoundError before the first
+    #: step and every task reads as "starts then instantly stops".
+    NODE_FALLBACK_PATHS: tuple[str, ...] = (
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        str(Path.home() / ".local" / "bin"),
+    )
+
     def __init__(
         self,
         *,
@@ -233,21 +245,53 @@ class CuaReplEngine:
         self._proc: subprocess.Popen[str] | None = None
         self._last_content: str = ""
 
+    def _resolve_node(self) -> str:
+        """Absolute path to the node binary, searching fallback dirs (pure).
+
+        A bare name is resolved against PATH *and* the fallback dirs, so a
+        GUI-spawned run (minimal PATH) still finds a Homebrew node. An
+        absolute or relative path with a separator is honoured as given.
+        Raises FileNotFoundError with the searched locations named, so the
+        failure names its fix instead of dying one level down in Popen.
+        """
+        if os.sep in self.node_binary:
+            return self.node_binary
+        searched = [self.node_binary]
+        if found := shutil.which(self.node_binary):
+            return found
+        for directory in self.NODE_FALLBACK_PATHS:
+            candidate = Path(directory) / self.node_binary
+            searched.append(str(candidate))
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        raise FileNotFoundError(
+            f"node binary {self.node_binary!r} not found; searched: {', '.join(searched)}"
+        )
+
     def start(self) -> None:
         """Spawn the background Node.js bridge process."""
         if self._proc is not None:
             return
 
+        # Widen PATH with the fallback dirs for the child too: the bridge may
+        # itself spawn tools by bare name.
+        child_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in {"PATH", "SYSTEMROOT", "LANG", "LC_ALL", "TMPDIR"}
+        }
+        extra = ":".join(self.NODE_FALLBACK_PATHS)
+        child_env["PATH"] = f"{child_env.get('PATH', '')}{':' if child_env.get('PATH') else ''}{extra}"
+
         self._proc = subprocess.Popen(
-            [self.node_binary, str(BRIDGE_SCRIPT_PATH)],
+            [self._resolve_node(), str(BRIDGE_SCRIPT_PATH)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             # The bridge does not need credentials or Node preload hooks.
-            env={key: value for key, value in os.environ.items()
-                 if key in {"PATH", "SYSTEMROOT", "LANG", "LC_ALL", "TMPDIR"}},
+            env=child_env,
         )
 
         # Wait for the "ready" signal

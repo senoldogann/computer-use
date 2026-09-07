@@ -36,6 +36,17 @@ LOGGER: Final = logging.getLogger(__name__)
 # with covering the first actionable page elements.
 AX_MAX_ELEMENTS: Final[int] = 64
 
+#: Law 4.3 bound on the app-knowledge facts injected into one run's context.
+#: The semantic store keeps everything this app ever taught a run, which is
+#: exactly the pollution the incident exposed: a Chrome store that has learned
+#: from Hacker News, X and a dozen other tasks would stage all of those facts
+#: beside a goal about one of them. Facts are per-app and app-scoped already,
+#: and the keeper of the newest entries is the distiller's insertion order (id
+#: sort = lexicographic = insertion order), so keeping the head bounds the
+#: working context to the established facts without deciding which ones the
+#: goal cares about.
+APP_KNOWLEDGE_MAX_ENTRIES: Final[int] = 16
+
 from computeruse.mcp import DEFAULT_CONFIG_PATH, McpRegistry, load_server_configs
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
 from computeruse.memory.schemas import Episode, EpisodeOutcome
@@ -405,6 +416,15 @@ class Agent:
         skills_registry = SkillRegistry(self._config.store_dir / "skills")
         playbook_registry = PlaybookRegistry()
         semantic_store = SemanticStore(self._config.store_dir / "semantic")
+        # Corrupt entries are skipped on read but left behind, to be re-warned
+        # on every run forever. Sweep them once at startup so the store only
+        # holds facts that parse (Law 4.2: a memory that cannot be read is
+        # garbage, not knowledge) and one bad file can never poison the index.
+        swept = semantic_store.prune_corrupt()
+        if swept:
+            LOGGER.info(
+                "pruned %d corrupt semantic entries: %s", len(swept), ", ".join(swept)
+            )
         # Law 5.1 delegation: the user's standing capability grants. They apply
         # whenever any exist — a permission someone deliberately wrote, with an
         # expiry and a use count, should not also need a flag to be honoured,
@@ -499,12 +519,18 @@ class Agent:
                 )
             )
             if verified:
-                from computeruse.memory.semantic import extract_facts_from_run
+                from computeruse.memory.semantic import (
+                    extract_facts_from_run,
+                    site_of_goal,
+                )
 
                 for fact in extract_facts_from_run(
                     app=trajectory.app,
                     steps=trajectory.steps,
                     step_descriptions=trajectory.step_descriptions,
+                    # Stamp the run's site so a later goal on a different site
+                    # can refuse this fact instead of inheriting it.
+                    site=site_of_goal(trajectory.description),
                 ):
                     semantic_store.upsert(fact)
 
@@ -587,10 +613,26 @@ class Agent:
             # Law 4.2 RETRIEVE: the app's known preferences/patterns/shortcuts
             # are staged into the working context as compact strings, so the
             # provider makes decisions against what the system already knows
-            # about the (possibly just-discovered) app.
+            # about the (possibly just-discovered) app. The goal gates the
+            # stage (Law 4 domain isolation): a browser store holds facts
+            # learned on many sites, and only facts aligned with the site this
+            # goal names may enter the prompt — an X.com run is never handed
+            # Hacker News patterns learned under the same app.
+            app_knowledge = semantic_store.search(
+                "", app=app, goal=self._config.goal
+            )
+            if len(app_knowledge) > APP_KNOWLEDGE_MAX_ENTRIES:
+                LOGGER.info(
+                    "staging %d of %d app-knowledge entries for %r (bounded to %d)",
+                    APP_KNOWLEDGE_MAX_ENTRIES,
+                    len(app_knowledge),
+                    app,
+                    APP_KNOWLEDGE_MAX_ENTRIES,
+                )
+                app_knowledge = app_knowledge[:APP_KNOWLEDGE_MAX_ENTRIES]
             knowledge = tuple(
                 f"[{entry.app}] {entry.key}: {entry.value}"
-                for entry in semantic_store.search("", app=app)
+                for entry in app_knowledge
             )
             # ADR-2 grounding: the AX tree of the frontmost app,
             # summarized into the compact lines the provider sees every turn —

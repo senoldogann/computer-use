@@ -263,30 +263,44 @@ def verify_capture_region(
     return Verification(region=region, verdict=verdict(before_region, after_region))
 
 
-# The VLM screenshot is sent with OpenAI `detail: "low"`, which resizes any
-# image to 512px on its longest side. The coordinate gate (loop.py) therefore
-# scales every model-emitted coordinate by the map factor below — so the
-# image the model sees and the screen space the driver clicks in are linked
-# by one deterministic constant, never by model arithmetic.
-SCREENSHOT_MAP_MAX_SIDE: Final[int] = 512
+# Longest side of the screenshot map the VLM perceives. This is the ceiling
+# of the *logical*-resolution frame (Retina pixels already box-averaged down),
+# and it is deliberately large: text must stay readable. Measured against the
+# zoom-loop incident on X.com — the model pressed Cmd++ fifteen times because
+# a 512px map had shrunk 13pt tweet text to ~4px and no model can read that.
+# On a typical 1512x982 / 1728x1117 MacBook logical display the map is 1:1
+# with screen points (image px == logical pt), so body text keeps its real
+# size and the coordinate gate is identity. Screens wider than this still
+# downscale, but only down to the constant below, which is far inside the
+# provider's own `detail: "high"` ceiling (~2048px) so the API never
+# re-shrinks what we send. The coordinate gate (loop.py) scales every
+# model-emitted coordinate through ScreenMap, so any value here keeps the
+# image the model sees and the space the driver clicks in linked by one
+# deterministic conversion, never by model arithmetic.
+SCREENSHOT_MAP_MAX_SIDE: Final[int] = 1568
 
 
 def downscale_to_max_side(capture: ScreenCapture, max_side: int = SCREENSHOT_MAP_MAX_SIDE) -> ScreenCapture:
     """Resample a capture so its longest side is at most ``max_side`` (pure).
 
-    This is the *exact* image the VLM will perceive: OpenAI's ``detail:
-    "low"`` resizes every attached image to 512px on its longest dimension,
-    so pre-resampling here makes image space deterministic and known to the
-    orchestrator. The returned capture keeps ``scale=1.0`` — it is a plain
-    bitmap map whose pixels map back to logical screen points via the factor
-    ``logical_width / mapped_width`` (computed by the caller).
+    This is the *exact* image the VLM will perceive: the map is sent to the
+    provider with ``detail: "high"``, so pre-resampling here makes image
+    space deterministic and known to the orchestrator — the provider does not
+    re-scale an image already inside its own ceiling. The returned capture
+    keeps ``scale=1.0`` — it is a plain bitmap map whose pixels map back to
+    logical screen points via the factor ``logical_width / mapped_width``
+    (computed by the caller).
 
-    Nearest-neighbour sampling (not box averaging) is deliberate: at this
-    scale small text is mush either way, and nearest-neighbour keeps crisp
-    edges, which is what the model reads coordinates off. The cost is
-    O(dst pixels) instead of O(src pixels) — ~50ms for a Retina frame.
+    Nearest-neighbour sampling (not box averaging) is deliberate at small
+    sizes: it keeps crisp edges, which is what the model reads coordinates
+    off, and the caller's Retina path (``model_capture``) has already box-
+    averaged physical pixels to logical ones. In the common case (a logical
+    display at or under :data:`SCREENSHOT_MAP_MAX_SIDE`) this function does
+    not resample at all, and the VLM sees every screen point as one pixel —
+    text at its true size. The cost is O(dst pixels) instead of O(src
+    pixels) when a huge display does need capping.
 
-    Captures already within ``max_side`` pass through unchanged, so a small
+    Captures already within ``max_side`` pass through unchanged, so a typical
     display (factor 1.0) never pays a resample.
     """
     if max_side <= 0:

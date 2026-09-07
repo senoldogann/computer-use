@@ -141,6 +141,54 @@ def content_tokens(text: str) -> frozenset[str]:
     )
 
 
+#: (aliases, canonical site) pairs naming web properties whose workflows are
+#: site-specific. When a goal names one site and a stored skill or playbook
+#: was distilled on a *different* one, the route cannot transfer: mounting it
+#: only injects an unrelated recipe into the model's context. Measured in the
+#: field — an X.com run was being steered by a skill learned on Hacker News
+#: because both routes lived under "Google Chrome" and their 'read' / 'post' /
+#: 'comments' tokens overlapped, so the same-app match passed the relevance
+#: floor and the model reasoned about "irrelevant Hacker News instructions".
+_SITE_ALIASES: Final[tuple[tuple[tuple[str, ...], str], ...]] = (
+    (("x.com", "twitter"), "x"),
+    (("hacker news", "hnews", "news.ycombinator", "ycombinator"), "hacker news"),
+    (("reddit",), "reddit"),
+    (("youtube", "youtu.be"), "youtube"),
+    (("github",), "github"),
+    (("linkedin",), "linkedin"),
+    (("instagram",), "instagram"),
+    (("facebook", "fb.com"), "facebook"),
+    (("medium.com",), "medium"),
+    (("wikipedia",), "wikipedia"),
+    (("stackoverflow", "stack overflow"), "stack overflow"),
+    (("amazon",), "amazon"),
+)
+
+
+def site_markers(text: str) -> frozenset[str]:
+    """Canonical web properties named by a piece of text (pure)."""
+    lowered = text.casefold()
+    marked = {canonical for aliases, canonical in _SITE_ALIASES if any(a in lowered for a in aliases)}
+    return frozenset(marked)
+
+
+def routes_disagree_on_site(goal: str, route_text: str) -> bool:
+    """Does ``route_text`` describe work on a site the goal does not name (pure)?
+
+    Deliberately narrow, so it can never block legitimate retrieval: both
+    texts must name at least one known web property, and their property sets
+    must be disjoint. A goal that names no site (or a route that names none)
+    passes, because there is no site to disagree about — and a route learned
+    on the same site the goal names passes by construction. Only a route that
+    is *provably about somewhere else* is refused at mount time.
+    """
+    goal_sites = site_markers(goal)
+    route_sites = site_markers(route_text)
+    if not goal_sites or not route_sites:
+        return False
+    return goal_sites.isdisjoint(route_sites)
+
+
 
 def search(
     summaries: Iterable[SkillSummary],

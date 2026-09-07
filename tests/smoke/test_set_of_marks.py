@@ -202,8 +202,10 @@ def test_a_mark_is_never_scaled_by_the_coordinate_gate() -> None:
     multiplication would send the click a third of the way up the display.
     """
     executed: list[Action] = []
+    # A display wider than the map cap (1568px), so a genuine points-per-pixel
+    # factor is in play instead of the 1:1 map a typical laptop now gets.
     logical = ScreenCapture(
-        display_id=0, width=1536, height=1024, scale=1.0, data=bytes(1536 * 1024 * 4)
+        display_id=0, width=2048, height=1536, scale=1.0, data=bytes(2048 * 1536 * 4)
     )
 
     def ax_probe() -> AxProbeResult:

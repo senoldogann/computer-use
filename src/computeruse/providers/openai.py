@@ -7,16 +7,18 @@ corrective hints on invalid JSON. This module is the *transport* half — a
 plain ``prompt -> text`` callable backed by OpenAI's Chat Completions API.
 
 Model choice (August 2026 lineup): the default is ``gpt-5.6-terra`` — the
-balanced tier of the GPT-5.6 family. OpenAI's July 30, 2026 price cut set
-Terra at $2/$12 per 1M tokens (input/output), Luna at $0.20/$1.20, and left
-Sol at $5/$30. Our loop makes one small JSON decision per turn against a
-compact context (goal, UI-element summaries, mounted skill, action
-contract), and the scaffold + visual verification already compensate for
-weaker models — so the flagship ``gpt-5.6-sol`` is ~2.5x Terra's price for
-marginal gain, while ``gpt-5.6-luna`` risks hallucinated coordinates on a
-*physical* host, where a miss costs real retries. Terra remains the
-cost/quality sweet spot; pass ``openai:gpt-5.6-luna`` (or any other id) to
-override.
+balanced tier of the GPT-5.6 family. OpenAI's live pricing (developers.openai.com
+``/api/docs/models/gpt-5.6-*`` + ``/api/docs/pricing``) sets Terra at $2/$12
+per 1M tokens (input/output), Luna at $0.20/$1.20, Sol at $4/$20
+(promotional through Nov 21, 2026), and GPT-6 Astra at $10/$50. Our loop
+makes one small JSON decision per turn against a compact context (goal,
+UI-element summaries, mounted skill, action contract), and the scaffold +
+visual verification already compensate for weaker models — so the flagship
+``gpt-5.6-sol`` is ~2x Terra's price for marginal gain on click decisions,
+while ``gpt-5.6-luna`` risks hallucinated coordinates on a *physical* host,
+where a miss costs real retries. Terra remains the cost/quality sweet spot;
+pass ``openai:gpt-5.6-luna`` (or any other id) to override. The panel only
+offers ``gpt-5.6-sol`` / ``gpt-5.6-terra`` / ``gpt-5.6-luna`` / ``gpt-6-astra``.
 
 Cost friendliness: the API key comes from ``OPENAI_API_KEY`` (never from the
 repo). The scaffold's ``decision_prompt`` keeps the stable prefix (application
@@ -135,17 +137,48 @@ class TokenPrice:
     output_per_million: float
 
 
-#: Published list prices, USD per 1M tokens, from OpenAI's July 30 2026 price
-#: cut (the same figures the module docstring reasons about). Used only for the
-#: CLI's ``--max-cost`` guardrail: it is a ceiling the operator sets so an
-#: unattended run cannot spend unboundedly, NOT an invoice. A model missing
+#: Published list prices, USD per 1M tokens, from OpenAI's live pricing page
+#: (developers.openai.com ``/api/docs/pricing`` + per-model pages). Used only
+#: for the CLI's ``--max-cost`` guardrail: it is a ceiling the operator sets so
+#: an unattended run cannot spend unboundedly, NOT an invoice. A model missing
 #: from this table has no price here, and the flag says so rather than
 #: guessing — a wrong number would be worse than no number.
+#: ``gpt-5.6`` is the alias that routes to ``gpt-5.6-sol``.
 MODEL_PRICES: Final[Mapping[str, TokenPrice]] = {
     "gpt-5.6-terra": TokenPrice(input_per_million=2.0, output_per_million=12.0),
     "gpt-5.6-luna": TokenPrice(input_per_million=0.20, output_per_million=1.20),
-    "gpt-5.6-sol": TokenPrice(input_per_million=5.0, output_per_million=30.0),
+    "gpt-5.6-sol": TokenPrice(input_per_million=4.0, output_per_million=20.0),
+    "gpt-5.6": TokenPrice(input_per_million=4.0, output_per_million=20.0),
+    "gpt-6-astra": TokenPrice(input_per_million=10.0, output_per_million=50.0),
 }
+
+
+#: Every ``reasoning_effort`` value the Chat Completions API accepts
+#: (developers.openai.com ``/api/reference/.../chat/.../create`` +
+#: ``/api/docs/guides/reasoning``). Per-model pages narrow this down:
+#: GPT-5.6 (sol/terra/luna) accepts none/low/medium/high/xhigh/max
+#: (default medium); GPT-6 Astra accepts low/medium/high/xhigh/max
+#: (``none`` returns HTTP 400). ``minimal`` survives only for pre-5.6
+#: reasoning models (o-series / original GPT-5).
+_REASONING_EFFORT_VALUES: Final[frozenset[str]] = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
+
+def _allows_reasoning_effort(model: str, effort: str) -> bool:
+    """Pure: may this effort be sent as ``reasoning_effort`` for this model?"""
+    if effort not in _REASONING_EFFORT_VALUES:
+        return False
+    if not model.startswith(("gpt-5", "gpt-6", "o1", "o3")):
+        return False
+    # GPT-6 Astra rejects ``none`` with HTTP 400
+    # (developers.openai.com ``/api/docs/guides/reasoning``).
+    if model.startswith("gpt-6-astra") and effort == "none":
+        return False
+    # GPT-5.6 / GPT-6 never documented ``minimal`` (per-model pages list only
+    # none/low/medium/high/xhigh/max and low/medium/high/xhigh/max); keep it
+    # for older o/GPT-5 models.
+    return not (effort == "minimal" and model.startswith(("gpt-5.6", "gpt-6")))
 
 
 def price_for(model: str) -> TokenPrice:
@@ -217,13 +250,15 @@ def openai_model(
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:image/png;base64,{image_b64}",
-                        # The frame is already a 512px-max screenshot map
-                        # (downscale_to_max_side), so "low" detail is a no-op:
-                        # the model sees exactly the map whose scale factor
-                        # the coordinate gate knows. ~85 tokens instead of
-                        # ~1,100 (512px tiling) per turn — a real latency/cost
-                        # win per step, with coordinates still exact.
-                        "detail": "low",
+                        # The frame is already a full-logical-resolution map
+                        # (max SCREENSHOT_MAP_MAX_SIDE), so "high" detail must
+                        # not be a lie about size: at "low" the API re-sizes
+                        # every image to 512px on its longest side and throws
+                        # the pixels away — the exact blindness that made a
+                        # model zoom a page fifteen times instead of reading
+                        # it. "high" keeps the map at the size we downscaled
+                        # to (~1568px longest), where body text is legible.
+                        "detail": "high",
                     },
                 },
             ]
@@ -250,6 +285,16 @@ def openai_model(
             # Newer OpenAI models require max_completion_tokens instead of max_tokens.
             "max_completion_tokens": max_tokens,
         }
+        # reasoning_effort is per-model: the panel picks the effort from the
+        # model's capability profile and exports it here. Send it only for
+        # models the API accepts it on, so an effort picked for one model can
+        # never be smuggled onto a model that would reject the whole request.
+        # Accepted set per developers.openai.com guides/reasoning + model pages.
+        reasoning_effort = os.environ.get("COMPUTERUSE_REASONING_EFFORT")
+        if reasoning_effort is not None and _allows_reasoning_effort(
+            selected, reasoning_effort
+        ):
+            body["reasoning_effort"] = reasoning_effort
         request = urllib.request.Request(
             base_url or OPENAI_CHAT_URL,
             data=json.dumps(body).encode("utf-8"),

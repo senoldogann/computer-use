@@ -19,9 +19,13 @@ from computeruse.orchestrator.loop import WorkingState
 from computeruse.orchestrator.prompts import ACTION_CONTRACT, state_context
 from computeruse.vision import AXElement
 from computeruse.vision.ax import (
+    RecognizedLine,
     detect_dialogs,
     dialogue_element_summaries,
     dialogue_notes,
+    ocr_dialog_notes,
+    ocr_dialog_summaries,
+    web_content_clipped_below,
 )
 from computeruse.vision.coordinates import Point, Rect, Size
 
@@ -416,13 +420,178 @@ def test_state_context_renders_dialog_section() -> None:
     assert "resolve these FIRST" in text
 
 
+def test_cloudflare_challenge_overlay_detected() -> None:
+    """A Cloudflare/CAPTCHA verification is a SecurityCheck, not a consent wall.
+
+    The consent gate can never catch these — the page says "verify you are
+    human", not "we use cookies" — which is exactly why the agent used to
+    stare at the checkbox without clicking it.
+    """
+    overlay = AXElement(
+        role="Group",
+        x=300,
+        y=150,
+        width=500,
+        height=350,
+        children=(
+            _text("Before you continue, check the box to verify you are human."),
+            AXElement(
+                role="CheckBox",
+                title="Verify you are human",
+                x=340,
+                y=420,
+                width=200,
+                height=24,
+            ),
+        ),
+    )
+    page = AXElement(
+        role="WebArea",
+        title="webtekno.com",
+        x=0,
+        y=0,
+        width=1000,
+        height=700,
+        children=(overlay,),
+    )
+
+    dialogs = detect_dialogs(page)
+
+    assert len(dialogs) == 1
+    assert dialogs[0].kind == "SecurityCheck"
+    assert dialogs[0].elements[0].title == "Verify you are human"
+
+
+def test_consent_overlay_keeps_overlay_kind() -> None:
+    """A consent wall stays an Overlay; only verification challenges become SecurityCheck."""
+    overlay = AXElement(
+        role="Group",
+        x=300,
+        y=150,
+        width=500,
+        height=350,
+        children=(_text("Çerezler ve kişisel verileriniz"), _button("Kabul Et", x=440, y=460)),
+    )
+    page = AXElement(
+        role="WebArea",
+        title="page",
+        x=0,
+        y=0,
+        width=1000,
+        height=700,
+        children=(overlay,),
+    )
+
+    dialogs = detect_dialogs(page)
+
+    assert len(dialogs) == 1
+    assert dialogs[0].kind == "Overlay"
+
+
+def _ocr_line(text: str, y: float) -> RecognizedLine:
+    """An OCR line at a given vertical position (fixture helper)."""
+    return RecognizedLine(
+        text=text,
+        confidence=0.9,
+        x=100.0,
+        y=y,
+        width=400.0,
+        height=24.0,
+    )
+
+
+def test_ocr_detects_consent_dialog_when_ax_is_blind() -> None:
+    """The blind-app path: OCR text alone must surface the cookie wall."""
+    lines = (
+        _ocr_line("Webtekno olarak kişisel verilerinizin güvenliğine önem veriyoruz", 300),
+        _ocr_line("Kabul Et", 340),
+        _ocr_line("Reddet", 340),
+        _ocr_line("Ana sayfaya dön", 500),
+    )
+
+    notes = ocr_dialog_notes(lines)
+    summaries = ocr_dialog_summaries(lines)
+
+    assert len(notes) == 1
+    assert notes[0].startswith('Overlay "')
+    assert "Kabul Et" in notes[0] and "Reddet" in notes[0]
+    # Decision lines become clickable marks; unrelated lines stay out.
+    assert len(summaries) == 2
+    assert "Kabul Et" in summaries[0]
+    assert "Ana sayfaya dön" not in summaries[0]
+
+
+def test_ocr_detects_security_check() -> None:
+    """OCR must also catch Cloudflare/CAPTCHA challenges."""
+    lines = (
+        _ocr_line("Checking your browser before accessing webtekno.com", 200),
+        _ocr_line("Verify you are human", 240),
+    )
+
+    notes = ocr_dialog_notes(lines)
+
+    assert len(notes) == 1
+    assert notes[0].startswith('SecurityCheck "')
+    assert "Verify you are human" in notes[0]
+
+
+def test_ocr_ignores_mentions_without_nearby_decisions() -> None:
+    """A page that merely mentions cookies next to an unrelated button is not flagged."""
+    lines = (
+        _ocr_line("Gizlilik Politikası", 100),
+        _ocr_line("İletişim", 800),  # far below the context line
+    )
+
+    assert ocr_dialog_notes(lines) == ()
+
+
+def test_web_content_clipped_below_detects_scrollable_pages() -> None:
+    """A page whose document extends past the viewport bottom must hint scrolling."""
+    viewport = Rect(Point(0, 0), Size(1200, 800))
+    long_page = AXElement(
+        role="WebArea",
+        title="long",
+        x=0,
+        y=0,
+        width=1200,
+        height=2400,
+    )
+    assert web_content_clipped_below(long_page, viewport) is True
+
+    fitting_page = AXElement(
+        role="WebArea",
+        title="short",
+        x=0,
+        y=0,
+        width=1200,
+        height=700,
+    )
+    assert web_content_clipped_below(fitting_page, viewport) is False
+    # No viewport observed: no hint, no false positive.
+    assert web_content_clipped_below(long_page, None) is False
+
+
 def test_action_contract_guides_dialog_handling() -> None:
     """The system contract instructs resolving dialogs before task actions."""
     assert "When POPUP DIALOGS are listed above, resolve them BEFORE any task action" in ACTION_CONTRACT
     assert "never try to reach content a dialog covers" in ACTION_CONTRACT
     assert "closed or dismissed, not filled in" in ACTION_CONTRACT
+    assert "SecurityCheck is a Cloudflare/CAPTCHA verification" in ACTION_CONTRACT
+    assert "the page extends below the visible area" in ACTION_CONTRACT
 
 
 def test_state_context_without_dialogs_mentions_none() -> None:
     text = state_context(WorkingState(goal="x", ui_elements=('Button "Hi" at (1,2) 3x4',)))
     assert "POPUP DIALOGS" not in text
+
+def test_manage_consent_launcher_is_not_a_blocking_overlay() -> None:
+    launcher = AXElement(
+        role="Group", x=1400, y=950, width=200, height=50,
+        children=(_button("Manage consent", x=1450, y=960),),
+    )
+    assert detect_dialogs(launcher) == ()
+    opened = AXElement(
+        role="Group", x=1000, y=700, width=600, height=300,
+        children=(_text("We use cookies"), _button("Accept"), _button("Manage consent")),
+    )
+    assert len(detect_dialogs(opened)) == 1

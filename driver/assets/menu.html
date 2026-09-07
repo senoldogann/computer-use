@@ -104,6 +104,26 @@
       user-select: text;
     }
 
+    /* Chat/log text must stay selectable: body disables selection app-wide,
+       so re-enable it on every read-only text surface. Without this the user
+       can type in inputs but can never select (and therefore never copy)
+       anything the agent printed. */
+    #log,
+    .feed-line,
+    .feed-sub,
+    .feed-text,
+    .stream-prose,
+    .stream-plan-item,
+    .cmd-full,
+    .obs-text,
+    .card-detail,
+    .history-goal,
+    .summary-text,
+    .confirm-msg {
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
     /* ----- Header Toolbar -------------------------------------------------- */
     .toolbar {
       position: relative;
@@ -2027,36 +2047,6 @@
      iOS 18 / visionOS Liquid Glass Components
      ========================================================================== */
 
-    /* Panic Emergency Stop Button */
-    .panic-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      background: rgba(255, 69, 58, 0.18);
-      border: 0.75px solid rgba(255, 69, 58, 0.45);
-      color: #FF6961;
-      padding: 3.5px 9px;
-      border-radius: var(--radius-pill);
-      font-size: 10px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-      box-shadow: 0 2px 8px rgba(255, 69, 58, 0.25), inset 0 1px 1px rgba(255, 255, 255, 0.35);
-      line-height: 1.2;
-    }
-
-    .panic-btn:hover {
-      background: rgba(255, 69, 58, 0.32);
-      border-color: rgba(255, 69, 58, 0.7);
-      color: #FFFFFF;
-      box-shadow: 0 4px 14px rgba(255, 69, 58, 0.45), inset 0 1px 1px rgba(255, 255, 255, 0.5);
-      transform: scale(1.02);
-    }
-
-    .panic-btn:active {
-      transform: scale(0.97);
-    }
-
     /* Liquid Budget & Token Gauge */
     .liquid-budget-gauge {
       flex: 0 0 auto;
@@ -3574,19 +3564,6 @@
       flex-shrink: 0 !important;
     }
 
-    .panic-btn {
-      flex-shrink: 0 !important;
-      padding: 2.5px 7px !important;
-      font-size: 9.5px !important;
-      height: 22px !important;
-      white-space: nowrap !important;
-      display: inline-flex !important;
-      align-items: center !important;
-      gap: 4px !important;
-      margin-right: 2px !important;
-      position: static !important;
-    }
-
     .status-pill {
       padding: 2px 7px !important;
       font-size: 9.5px !important;
@@ -4148,6 +4125,831 @@
       color: #FFB17F !important;
       padding: 6px 8px 3px !important;
     }
+
+    /* ========================================================================
+       COMPACT & CLEANER CHROME — final decluttering layer
+       One telemetry cluster + a single ⋯ menu in the header; one capsule
+       composer with inline Run/Stop and every secondary setting folded into
+       the “run options” popover.
+       ======================================================================== */
+
+    /* ---------- Header: tighter, merged telemetry, overflow ⋯ ---------- */
+    .toolbar {
+      height: 46px !important;
+      padding: 0 10px !important;
+    }
+
+    .header-actions {
+      gap: 4px !important;
+    }
+
+    /* Merged “⚡ 0 tok · ⏱ 0s” single pill */
+    .stat-cluster {
+      display: inline-flex !important;
+      align-items: center !important;
+      gap: 0 !important;
+      height: 22px !important;
+      padding: 0 9px !important;
+      border-radius: 999px !important;
+    }
+
+    .stat-cluster .stat-cell {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+
+    .stat-cluster .stat-cell svg {
+      width: 10px;
+      height: 10px;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .stat-cluster .stat-sep {
+      margin: 0 6px;
+      color: #55534E;
+      font-size: 10px;
+      line-height: 1;
+    }
+
+    /* Legacy utility icon buttons: hidden but kept for their JS bindings */
+    .legacy-header-btn {
+      display: none !important;
+    }
+
+    /* ⋯ overflow menu */
+    .header-more {
+      position: relative;
+      display: inline-flex;
+    }
+
+    #headerMoreBtn {
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+    }
+
+    .header-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      min-width: 198px;
+      padding: 4px;
+      background: #1E1D1B;
+      border: 0.5px solid #3A3834;
+      border-radius: 12px;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65);
+      display: none;
+      z-index: 800;
+    }
+
+    .header-menu.open {
+      display: block;
+    }
+
+    .header-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      background: transparent;
+      border: none;
+      border-radius: 8px;
+      padding: 6px 9px;
+      font-size: 11px;
+      color: #C9C7C2;
+      cursor: pointer;
+      text-align: left;
+      font-family: inherit;
+    }
+
+    .header-menu-item:hover {
+      background: #2B2A27;
+      color: #FFFFFF;
+    }
+
+    .header-menu-item svg {
+      color: #8A8782;
+      flex-shrink: 0;
+    }
+
+    .header-menu-item:hover svg {
+      color: #FFB17F;
+    }
+
+    .header-menu-sep {
+      height: 1px;
+      background: #2B2A27;
+      margin: 4px 6px;
+    }
+
+    /* ---------- Composer: single capsule + inline Run/Stop ---------- */
+    footer {
+      padding: 8px 12px 9px !important;
+      gap: 6px !important;
+    }
+
+    #composerWrapper {
+      gap: 6px;
+    }
+
+    #composerRow {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: #1B1A19;
+      border: 0.5px solid #2A2926;
+      border-radius: 14px;
+      padding: 5px 6px 5px 4px;
+      min-height: 44px;
+      box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(255, 255, 255, 0.03);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    #composerRow:focus-within {
+      border-color: rgba(255, 177, 127, 0.55);
+      box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 177, 127, 0.16);
+    }
+
+    .composer-options-btn {
+      flex: 0 0 auto;
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: none;
+      color: #7B7872;
+      cursor: pointer;
+    }
+
+    .composer-options-btn:hover {
+      background: #252422;
+      color: #F5F4F2;
+    }
+
+    #goal.composer-input {
+      flex: 1 1 auto;
+      min-width: 0;
+      background: transparent !important;
+      border: none !important;
+      box-shadow: none !important;
+      outline: none !important;
+      font-size: 12.5px;
+      color: #F5F4F2;
+      padding: 4px 2px;
+    }
+
+    #goal.composer-input:focus {
+      background: transparent !important;
+      border-color: transparent !important;
+      box-shadow: none !important;
+    }
+
+    #goal.composer-input::placeholder {
+      color: #6E6B63;
+    }
+
+    /* Inline circular action: Run (peach) / Stop (red), one visible at a time */
+    .composer-action-btn {
+      flex: 0 0 auto;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    #run.composer-run-btn {
+      background: linear-gradient(180deg, #FFB17F 0%, #E69866 100%);
+      border: none;
+      color: #121110;
+      box-shadow: 0 2px 8px rgba(255, 177, 127, 0.35);
+    }
+
+    #run.composer-run-btn:hover:not(:disabled) {
+      filter: brightness(1.06);
+      box-shadow: 0 3px 12px rgba(255, 177, 127, 0.5);
+    }
+
+    #run.composer-run-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+      box-shadow: none;
+    }
+
+    #run.composer-run-btn svg {
+      stroke: #121110 !important;
+      width: 14px;
+      height: 14px;
+    }
+
+    #run.composer-run-btn span,
+    #run.composer-run-btn .kbd-badge {
+      display: none !important;
+    }
+
+    #stop.composer-stop-btn {
+      background: #35201F;
+      border: 0.5px solid rgba(255, 107, 96, 0.45);
+      color: #FF6B60;
+      display: none;
+    }
+
+    #stop.composer-stop-btn:hover {
+      background: #452523;
+    }
+
+    #stop.composer-stop-btn svg {
+      width: 11px;
+      height: 11px;
+      color: #FF6B60;
+      fill: #FF6B60;
+    }
+
+    #stop.composer-stop-btn span {
+      display: none !important;
+    }
+
+    body.running-glow #run.composer-run-btn {
+      display: none;
+    }
+
+    /* ---------- Target-app field (only when toggled) ---------- */
+    #appField {
+      padding: 7px 8px 7px 12px;
+      background: #161513;
+      border: 0.5px solid #2A2926;
+      border-radius: 12px;
+      gap: 5px;
+    }
+
+    #appField .input-label {
+      font-size: 9px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: #75736E;
+    }
+
+    #appField .app-field-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    #appField .text-input {
+      flex: 1 1 auto;
+      background: transparent !important;
+      border: none !important;
+      box-shadow: none !important;
+      padding: 3px 2px;
+      font-size: 11.5px;
+    }
+
+    .app-field-done {
+      padding: 3px 10px;
+      border-radius: 7px;
+      background: rgba(255, 177, 127, 0.14);
+      color: #FFB17F;
+      border: 0.5px solid rgba(255, 177, 127, 0.32);
+      font-size: 10px;
+      font-weight: 650;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .app-field-done:hover {
+      background: rgba(255, 177, 127, 0.24);
+    }
+
+    /* ---------- Run options popover (anchored above the capsule) ---------- */
+    .composer-options-popover {
+      position: absolute;
+      left: 8px;
+      bottom: calc(100% + 8px);
+      width: 302px;
+      max-width: calc(100% - 16px);
+      background: #1C1B1A;
+      border: 0.5px solid #3A3834;
+      border-radius: 14px;
+      padding: 4px;
+      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.03);
+      z-index: 1500;
+      display: none;
+      font-size: 11px;
+    }
+
+    .composer-options-popover.open {
+      display: block;
+      animation: popoverFadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .opt-item {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      gap: 8px;
+      background: transparent;
+      border: none;
+      padding: 5px 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      color: #C9C7C2;
+      font-size: 11px;
+      text-align: left;
+      font-family: inherit;
+    }
+
+    .opt-item:hover {
+      background: #262523;
+      color: #FFFFFF;
+    }
+
+    .opt-item .opt-key {
+      flex: 1 1 auto;
+      min-width: 0;
+      color: #8A8782;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .opt-item .opt-val {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 550;
+      color: #EDEBE8;
+    }
+
+    .opt-item .opt-val .opt-spark {
+      color: #FFB17F;
+    }
+
+    .opt-item .opt-val svg {
+      width: 11px;
+      height: 11px;
+      color: #FFB17F;
+      flex-shrink: 0;
+    }
+
+    .opt-item .opt-chev {
+      color: #5F5D58;
+      flex-shrink: 0;
+    }
+
+    .opt-sep {
+      height: 1px;
+      background: #2A2926;
+      margin: 3px 10px;
+    }
+
+    .opt-item.opt-static {
+      cursor: default;
+    }
+
+    .opt-item.opt-static:hover {
+      background: transparent;
+    }
+
+    .composer-options-popover .mcp-toggle-btn,
+    .composer-options-popover .app-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 650;
+      cursor: pointer;
+      font-family: inherit;
+      background: rgba(255, 255, 255, 0.05);
+      color: #8A8782;
+      border: 0.5px solid #33312E;
+    }
+
+    .composer-options-popover .mcp-toggle-btn.on {
+      background: rgba(52, 211, 153, 0.16);
+      color: #34D399;
+      border-color: rgba(52, 211, 153, 0.42);
+    }
+
+    .composer-options-popover .mcp-toggle-btn.on:hover {
+      background: rgba(52, 211, 153, 0.24);
+    }
+
+    .composer-options-popover .mcp-toggle-btn.off:hover {
+      background: #262523;
+      color: #EDEBE8;
+    }
+
+    .composer-options-popover .app-toggle-btn {
+      background: rgba(255, 177, 127, 0.13);
+      color: #FFB17F;
+      border-color: rgba(255, 177, 127, 0.34);
+    }
+
+    .composer-options-popover .app-toggle-btn.active {
+      background: #FFB17F;
+      color: #121110;
+      border-color: rgba(255, 177, 127, 0.6);
+    }
+
+    .composer-options-popover .mcp-toggle-btn svg,
+    .composer-options-popover .app-toggle-btn svg {
+      width: 9px;
+      height: 9px;
+    }
+
+    /* ---------- Footer legend: quieter ---------- */
+    .footer-legend {
+      font-size: 8.5px !important;
+      color: #5F5D58 !important;
+      line-height: 1.3 !important;
+    }
+
+    /* ---------- Compact pill-bar keeps its look but through the new DOM ---------- */
+    body.compact-mode footer {
+      padding: 7px 10px !important;
+    }
+
+    body.compact-mode #composerWrapper {
+      flex-direction: row !important;
+      align-items: center !important;
+      height: 52px !important;
+      background: #1B1A19 !important;
+      border: 0.5px solid #252422 !important;
+      border-radius: 18px !important;
+      padding: 0 8px 0 12px !important;
+      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.55) !important;
+      gap: 6px !important;
+    }
+
+    body.compact-mode .compact-brand-group {
+      display: inline-flex !important;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    body.compact-mode #composerRow {
+      background: transparent !important;
+      border: none !important;
+      box-shadow: none !important;
+      padding: 0 !important;
+      min-height: 0 !important;
+      flex: 1 1 auto;
+    }
+
+    body.compact-mode .composer-options-btn {
+      display: none !important;
+    }
+
+    body.compact-mode #goal.composer-input {
+      font-size: 13px;
+      padding: 0 4px;
+      height: 32px;
+    }
+
+    body.compact-mode .composer-action-btn {
+      width: 30px;
+      height: 30px;
+    }
+
+    body.compact-mode main.tab-pane,
+    body.compact-mode #log {
+      display: none !important;
+    }
+
+    body.compact-mode .composer-options-popover {
+      display: none !important;
+    }
+
+    /* Luxury popovers: hover just above the shorter compose area */
+    .luxury-floating-popover {
+      bottom: 96px !important;
+    }
+
+    /* ========================================================================
+       MINIMAL SHELL v2: header ⋯ menu outside the clipped header, navigation
+       drawer, always-scrollable model palette, hamburger.
+       ======================================================================== */
+
+    /* Header ⋯ menu is fixed and positioned by JS (never clipped by .toolbar) */
+    .header-menu {
+      position: fixed !important;
+      top: 52px;
+      right: 12px;
+      min-width: 198px;
+      padding: 4px;
+      background: #1E1D1B;
+      border: 0.5px solid #3A3834;
+      border-radius: 12px;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.65);
+      display: none;
+      z-index: 2200;
+    }
+
+    .header-menu.open {
+      display: block;
+    }
+
+    /* Hamburger button (rightmost header action) */
+    .nav-menu-btn {
+      margin-left: 1px;
+    }
+
+    /* Navigation drawer: right slide-in */
+    .nav-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      -webkit-backdrop-filter: blur(2px);
+      backdrop-filter: blur(2px);
+      z-index: 2300;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+
+    .nav-backdrop.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .nav-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: min(300px, 84vw);
+      background: #161514;
+      border-left: 0.5px solid #2B2A27;
+      box-shadow: -18px 0 44px rgba(0, 0, 0, 0.5);
+      z-index: 2400;
+      transform: translateX(105%);
+      transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .nav-drawer.open {
+      transform: translateX(0);
+    }
+
+    .nav-drawer-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 18px 12px;
+      border-bottom: 0.5px solid #2A2926;
+    }
+
+    .nav-drawer-title {
+      font-size: 13px;
+      font-weight: 650;
+      color: #F5F4F2;
+    }
+
+    .nav-drawer-close {
+      background: transparent;
+      border: none;
+      color: #8A8782;
+      font-size: 12px;
+      cursor: pointer;
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+    }
+
+    .nav-drawer-close:hover {
+      background: #262523;
+      color: #F5F4F2;
+    }
+
+    .nav-drawer-body {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 12px;
+      overflow-y: auto;
+    }
+
+    .nav-drawer-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 10px;
+      background: transparent;
+      border: none;
+      color: #AAA8A3;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      font-family: inherit;
+    }
+
+    .nav-drawer-item svg {
+      width: 15px;
+      height: 15px;
+      color: #75736E;
+      flex-shrink: 0;
+    }
+
+    .nav-drawer-item:hover {
+      background: #242321;
+      color: #F5F4F2;
+    }
+
+    /* WKWebView only recomputes :hover on real mouse movement, so items the
+       cursor crossed keep the hover background after the drawer closes and
+       reopens. Focus must never paint the hover look on its own. */
+    .nav-drawer-item:focus {
+      outline: none;
+    }
+
+    .nav-drawer-item:focus:not(:hover):not(.active) {
+      background: transparent;
+      color: inherit;
+    }
+
+    .nav-drawer-item.active {
+      background: #2A2925;
+      color: #F5F4F2;
+      box-shadow: inset 0 0 0 0.5px #3A3834;
+    }
+
+    .nav-drawer-item.active svg {
+      color: #FFB17F;
+    }
+
+    body.compact-mode .nav-drawer,
+    body.compact-mode .nav-backdrop,
+    body.compact-mode #headerMenu {
+      display: none !important;
+    }
+
+    /* Model palette: fixed, viewport-capped, always scrollable */
+    .model-palette-popover {
+      position: fixed !important;
+      top: 64px !important;
+      bottom: auto !important;
+      left: 50% !important;
+      right: auto !important;
+      transform: translateX(-50%) !important;
+      width: min(400px, calc(100vw - 32px)) !important;
+      height: auto !important;
+      max-height: calc(100vh - 112px) !important;
+    }
+
+    .model-palette-popover.open {
+      display: flex !important;
+      animation: none !important;
+    }
+
+    .model-palette-popover .palette-main {
+      min-height: 0;
+      max-height: calc(100vh - 114px);
+    }
+
+    .model-palette-popover .palette-model-list {
+      min-height: 0;
+      flex: 1 1 auto !important;
+      overflow-y: auto !important;
+    }
+
+    /* Reasoning popover: small, opens above the composer */
+    .reasoning-popover {
+      left: 8px !important;
+      width: 210px !important;
+    }
+    /* ========================================================================
+       CHAT READABILITY & ICON COHERENCE — final pass
+       * Streaming text reads near-white (muted), matching the verified rows.
+       * Icons are one family: dark neutral glyphs; colour is reserved for
+         meaning (green = verified, red = error, amber = skill/token).
+       * Success / alert surfaces use solid (non-transparent) backgrounds.
+       ======================================================================== */
+
+    /* Near-white streaming text everywhere in the feed */
+    #log .feed-line {
+      color: #E7E5E0 !important;
+    }
+
+    #log .feed-line.feed-head {
+      color: #F4F2EE !important;
+      font-weight: 600 !important;
+    }
+
+    #log .feed-sub {
+      color: #D9D6D0 !important;
+    }
+
+    #log .feed-meta {
+      color: #8A867E !important;
+    }
+
+    #log code {
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.95em;
+      background: #23211D;
+      border: 0.5px solid #302E29;
+      border-radius: 4px;
+      padding: 0.5px 4px;
+      color: #FFC9A6;
+    }
+
+    /* Icons: dark neutral by default; muted tints only for meaning */
+    #log .feed-icon {
+      color: #7E7970 !important;
+    }
+
+    #log .feed-line.feed-head .feed-icon {
+      color: #A29C91 !important;
+    }
+
+    #log .feed-icon[style*="50A574"] {
+      color: #57A37B !important;
+    }
+
+    #log .feed-icon[style*="FFD060"] {
+      color: #C49C4A !important;
+    }
+
+    #log .feed-icon[style*="FF5A4E"] {
+      color: #C0574E !important;
+    }
+
+    /* Non-transparent success / alert / toast surfaces */
+    .toast-notification {
+      background: #28251F !important;
+      border: 0.5px solid #4A3D2B !important;
+      backdrop-filter: none !important;
+      box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55) !important;
+    }
+
+    .status-pill {
+      background: #201E1A !important;
+      backdrop-filter: none !important;
+    }
+
+    .history-card {
+      background: #1B1A17 !important;
+    }
+
+    .history-card:hover {
+      background: #22201C !important;
+    }
+
+    .tag-pill {
+      background: #25231F !important;
+    }
+
+    .tag-pill.success {
+      background: #17362A !important;
+      border-color: #2B5A42 !important;
+      color: #8FD9B1 !important;
+    }
+
+    .tag-pill.failed {
+      background: #3A211E !important;
+      border-color: #5F332E !important;
+      color: #FFA198 !important;
+    }
+
+    .card-confirm {
+      background: #251E13 !important;
+      border: 0.5px solid #57452A !important;
+    }
+
+    /* MCP store: stop un-sized plugin icons blowing up to huge glyphs */
+    .mcp-pill-icon svg,
+    .mcp-action-btn svg,
+    .mcp-remove-btn svg,
+    .mcp-modal-actions svg {
+      width: 11px !important;
+      height: 11px !important;
+    }
+
+    .mcp-installed-pill {
+      background: #201E1A !important;
+      border-color: #38352F !important;
+    }
+
+    .mcp-card-icon {
+      background: #23211D !important;
+      border-color: #312F2A !important;
+    }
   </style>
 </head>
 
@@ -4169,45 +4971,63 @@
     </div>
 
     <div class="header-actions">
-      <button class="panic-btn" id="panicBtn" style="display:none;"
-        title="Acil Durdur (Emergency Freeze) - Ajanı anında dondur" onclick="emergencyPanicStop()">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-          <rect x="6" y="6" width="12" height="12" rx="2" />
-        </svg>
-        <span>Acil Durdur</span>
-      </button>
       <div class="status-pill">
         <div class="status-dot ok" id="dot"></div>
         <span class="status-text" id="stLabel">Idle</span>
       </div>
-      <div class="stat-pill" id="statTokens" title="Toplam kullanılan token">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-        </svg>
-        <span id="statTokensVal">0 tok</span>
+      <div class="stat-pill stat-cluster" id="statCluster" title="Token ve süre">
+        <span class="stat-cell" id="statTokens">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+          <span id="statTokensVal">0 tok</span>
+        </span>
+        <span class="stat-sep">·</span>
+        <span class="stat-cell" id="statElapsed">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+          <span id="statElapsedVal">0s</span>
+        </span>
       </div>
-      <div class="stat-pill" id="statElapsed" title="Toplam geçen süre">
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-          <circle cx="12" cy="12" r="10" />
-          <polyline points="12 6 12 12 16 14" />
-        </svg>
-        <span id="statElapsedVal">0s</span>
+
+      <div class="header-more">
+        <button class="icon-btn" id="headerMoreBtn" title="Diğer eylemler" aria-haspopup="true" aria-expanded="false">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="5" cy="12" r="1.6" />
+            <circle cx="12" cy="12" r="1.6" />
+            <circle cx="19" cy="12" r="1.6" />
+          </svg>
+        </button>
       </div>
-      <button class="icon-btn" id="lensHeaderBtn" title="Görsel Odak Lensi / Set-of-Marks Reticle"
-        onclick="toggleWitnessLensModal()">
+      <button class="icon-btn nav-menu-btn" id="navMenuBtn" title="Menü" aria-haspopup="true" aria-expanded="false">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <line x1="4" y1="7" x2="20" y2="7" />
+          <line x1="4" y1="12" x2="20" y2="12" />
+          <line x1="4" y1="17" x2="20" y2="17" />
+        </svg>
+      </button>
+
+      <!-- Legacy utility buttons: kept hidden so existing JS bindings keep
+           working (copy flash, clear handler, collapse shortcut). -->
+      <button class="icon-btn legacy-header-btn" id="lensHeaderBtn"
+        title="Görsel Odak Lensi / Set-of-Marks Reticle" onclick="toggleWitnessLensModal()">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
           <circle cx="12" cy="12" r="3" />
           <path d="M3 7V5a2 2 0 0 1 2-2h2m10 0h2a2 2 0 0 1 2 2v2m0 10v2a2 2 0 0 1-2 2h-2m-10 0H5a2 2 0 0 1-2-2v-2" />
         </svg>
       </button>
-      <button class="icon-btn" id="copyBtn" title="Tüm logları kopyala / Copy session logs" onclick="copySessionLogs()">
+      <button class="icon-btn legacy-header-btn" id="copyBtn" title="Tüm logları kopyala / Copy session logs"
+        onclick="copySessionLogs()">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
         </svg>
       </button>
-      <button class="icon-btn" id="collapseBtn" title="Kompakt Çubuğa Küçült">
+      <button class="icon-btn legacy-header-btn" id="collapseBtn" title="Kompakt Çubuğa Küçült">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round">
           <polyline points="4 14 10 14 10 20" />
@@ -4216,7 +5036,7 @@
           <line x1="3" y1="21" x2="10" y2="14" />
         </svg>
       </button>
-      <button class="icon-btn" id="clearBtn" title="Clear current session">
+      <button class="icon-btn legacy-header-btn" id="clearBtn" title="Clear current session">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
@@ -4236,49 +5056,7 @@
     <span id="toastMsg">Tüm loglar panoya kopyalandı!</span>
   </div>
 
-  <!-- Segmented Navigation Tabs -->
-  <nav class="tab-bar">
-    <div class="tab-indicator" id="tabIndicator"></div>
-    <button class="tab-btn active" id="tabBtnLive" onclick="switchTab('live')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-        stroke-linejoin="round">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-      </svg>
-      <span>Live Agent</span>
-    </button>
-    <button class="tab-btn" id="tabBtnMcp" onclick="switchTab('mcp')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-        stroke-linejoin="round">
-        <path
-          d="M12 2v6m0 8v6M4.93 4.93l4.24 4.24m5.66 5.66 4.24 4.24M2 12h6m8 0h6M4.93 19.07l4.24-4.24m5.66-5.66 4.24-4.24" />
-      </svg>
-      <span>Eklentiler</span>
-    </button>
-    <button class="tab-btn" id="tabBtnHistory" onclick="switchTab('history')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-        stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10" />
-        <polyline points="12 6 12 12 16 14" />
-      </svg>
-      <span>History</span>
-    </button>
-    <button class="tab-btn" id="tabBtnControl" onclick="switchTab('control')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-        stroke-linejoin="round">
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      </svg>
-      <span>Kontrol</span>
-    </button>
-    <button class="tab-btn" id="tabBtnAnalytics" onclick="switchTab('analytics')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-        stroke-linejoin="round">
-        <line x1="18" y1="20" x2="18" y2="10" />
-        <line x1="12" y1="20" x2="12" y2="4" />
-        <line x1="6" y1="20" x2="6" y2="14" />
-      </svg>
-      <span>Analytics</span>
-    </button>
-  </nav>
+  <!-- Navigation lives in the header hamburger drawer -->
 
   <!-- TAB 1: Live Agent -->
   <main class="tab-pane active" id="tabLive">
@@ -4549,55 +5327,12 @@
 
   <!-- Footer Compose -->
   <footer>
-    <!-- PHOTO 2: Reasoning & Service Tier Popover -->
+    <!-- Reasoning-effort popover: options are rebuilt per selected model so only
+         the effort levels that model accepts are offered (reasoning_effort). -->
     <div class="luxury-floating-popover reasoning-popover" id="reasoningTierPopover" style="display:none;">
-      <div class="popover-section-label">Reasoning</div>
-      <div class="tier-list">
-        <div class="tier-item selected" data-reasoning="low"
-          onclick="selectReasoningOption('low', 'Low', 'Default', event)">
-          <span>Low</span>
-          <span class="tier-default-badge">Default</span>
-          <span class="tier-check">✓</span>
-        </div>
-        <div class="tier-item" data-reasoning="medium" onclick="selectReasoningOption('medium', 'Medium', '', event)">
-          <span>Medium</span>
-          <span class="tier-check">✓</span>
-        </div>
-        <div class="tier-item" data-reasoning="high" onclick="selectReasoningOption('high', 'High', '', event)">
-          <span>High</span>
-          <span class="tier-check">✓</span>
-        </div>
-        <div class="tier-item" data-reasoning="extra_high"
-          onclick="selectReasoningOption('extra_high', 'Extra High', '', event)">
-          <span>Extra High</span>
-          <span class="tier-check">✓</span>
-        </div>
-        <div class="tier-item" data-reasoning="max" onclick="selectReasoningOption('max', 'Max', '', event)">
-          <span>Max</span>
-          <span class="tier-check">✓</span>
-        </div>
-        <div class="tier-item" data-reasoning="ultra" onclick="selectReasoningOption('ultra', 'Ultra', '', event)">
-          <span>Ultra</span>
-          <span class="tier-check">✓</span>
-        </div>
-      </div>
-      <div class="popover-divider"></div>
-      <div class="popover-section-label">Service Tier</div>
-      <div class="tier-list">
-        <div class="tier-item selected" data-tier="standard"
-          onclick="selectServiceTier('standard', 'Standard', 'Default', event)">
-          <span>Standard</span>
-          <span class="tier-default-badge">Default</span>
-          <span class="tier-check">✓</span>
-        </div>
-        <div class="tier-item" data-tier="fast" onclick="selectServiceTier('fast', 'Fast', '2x speed', event)">
-          <div>
-            <div>Fast</div>
-            <div class="tier-desc">2x speed, increased usage</div>
-          </div>
-          <span class="tier-check">✓</span>
-        </div>
-      </div>
+      <div class="popover-section-label">Akıl Yürütme (reasoning_effort)</div>
+      <div class="tier-list" id="reasoningTierList"></div>
+      <div class="popover-section-label" id="reasoningUnsupportedLabel" style="display:none;">Bu model reasoning_effort desteklemiyor.</div>
     </div>
 
     <!-- PHOTO 3: Autonomy & Permissions Popover -->
@@ -4674,7 +5409,7 @@
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
           <input class="palette-search-input" id="paletteSearchInput"
-            placeholder="OpenAI ve Proje modellerinde ara... (luna, terra, gpt-4o)"
+            placeholder="Model ara... (terra, sol, luna, astra)"
             oninput="filterPaletteModels(this.value)">
           <button class="palette-close-btn"
             onclick="event.preventDefault(); event.stopPropagation(); window.closeAllLuxuryPopovers();"
@@ -4682,31 +5417,20 @@
         </div>
 
         <div class="palette-model-list" id="paletteModelList">
-          <div class="curated-section-header">PROJE YEREL & EN KARARLI MODELLER</div>
+          <div class="curated-section-header">MODELLER — GPT-5.6 + GPT-6 ASTRA</div>
 
-          <!-- Native Project Models -->
+          <!-- Curated: sadece GPT-5.6 ailesi + GPT-6 Astra (resmi API dokümanı:
+               developers.openai.com/api/docs/models/gpt-5.6-sol|terra|luna ve
+               /api/docs/models/gpt-6-astra). Başka model gösterilmez. -->
           <div class="palette-model-item selected" data-model="openai:gpt-5.6-terra"
             onclick="selectPaletteModel('openai:gpt-5.6-terra', 'gpt-5.6-terra', 'OpenAI', event)">
             <div>
               <div class="palette-model-title">gpt-5.6-terra</div>
-              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Varsayılan • Kararlı &
-                Optimize Actuation</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Varsayılan • Dengeli
+                & Optimize Actuation • $2/$12</div>
             </div>
             <div class="palette-model-actions">
               <span class="palette-shortcut">⌘1</span>
-              <span class="palette-star active">★</span>
-            </div>
-          </div>
-
-          <div class="palette-model-item" data-model="openai:gpt-5.6-luna"
-            onclick="selectPaletteModel('openai:gpt-5.6-luna', 'gpt-5.6-luna', 'OpenAI', event)">
-            <div>
-              <div class="palette-model-title">gpt-5.6-luna</div>
-              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Ultra Hızlı • Düşük
-                Gecikme & Hafif</div>
-            </div>
-            <div class="palette-model-actions">
-              <span class="palette-shortcut">⌘2</span>
               <span class="palette-star active">★</span>
             </div>
           </div>
@@ -4716,73 +5440,36 @@
             <div>
               <div class="palette-model-title">gpt-5.6-sol</div>
               <div class="palette-model-meta"><span class="provider-status-dot active"></span> Flagship • Maksimum
-                Çıkarım & Yüksek Akıl</div>
+                Çıkarım • $4/$20</div>
             </div>
             <div class="palette-model-actions">
-              <span class="palette-shortcut">⌘3</span>
+              <span class="palette-shortcut">⌘2</span>
               <span class="palette-star">★</span>
             </div>
           </div>
 
-          <div class="curated-section-header" style="margin-top:6px;">OPENAI CANLI MODELLER</div>
-
-          <div class="palette-model-item" data-model="openai:gpt-4o"
-            onclick="selectPaletteModel('openai:gpt-4o', 'gpt-4o', 'OpenAI', event)">
+          <div class="palette-model-item" data-model="openai:gpt-5.6-luna"
+            onclick="selectPaletteModel('openai:gpt-5.6-luna', 'gpt-5.6-luna', 'OpenAI', event)">
             <div>
-              <div class="palette-model-title">gpt-4o</div>
-              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Flagship Çok Modlu &
-                Hızlı</div>
+              <div class="palette-model-title">gpt-5.6-luna</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Ultra Hızlı • Düşük
+                Gecikme • $0.20/$1.20</div>
             </div>
             <div class="palette-model-actions">
-              <span class="palette-shortcut">⌘4</span>
+              <span class="palette-shortcut">⌘3</span>
               <span class="palette-star active">★</span>
             </div>
           </div>
 
-          <div class="palette-model-item" data-model="openai:gpt-4o-mini"
-            onclick="selectPaletteModel('openai:gpt-4o-mini', 'gpt-4o-mini', 'OpenAI', event)">
+          <div class="palette-model-item" data-model="openai:gpt-6-astra"
+            onclick="selectPaletteModel('openai:gpt-6-astra', 'gpt-6-astra', 'OpenAI', event)">
             <div>
-              <div class="palette-model-title">gpt-4o-mini</div>
-              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Düşük Maliyet & Hızlı
-                Tepki</div>
+              <div class="palette-model-title">gpt-6-astra</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> En Yetkin • Computer
+                Use & Araştırma • $10/$50</div>
             </div>
             <div class="palette-model-actions">
-              <span class="palette-shortcut">⌘5</span>
-              <span class="palette-star">★</span>
-            </div>
-          </div>
-
-          <div class="palette-model-item" data-model="openai:o3-mini"
-            onclick="selectPaletteModel('openai:o3-mini', 'o3-mini', 'OpenAI', event)">
-            <div>
-              <div class="palette-model-title">o3-mini</div>
-              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Akıl Yürütme & Kodlama
-              </div>
-            </div>
-            <div class="palette-model-actions">
-              <span class="palette-star">★</span>
-            </div>
-          </div>
-
-          <div class="palette-model-item" data-model="openai:o1"
-            onclick="selectPaletteModel('openai:o1', 'o1', 'OpenAI', event)">
-            <div>
-              <div class="palette-model-title">o1</div>
-              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Derin STEM & OS Akıl
-                Yürütme</div>
-            </div>
-            <div class="palette-model-actions">
-              <span class="palette-star">★</span>
-            </div>
-          </div>
-
-          <div class="palette-model-item" data-model="openai:gpt-4-turbo"
-            onclick="selectPaletteModel('openai:gpt-4-turbo', 'gpt-4-turbo', 'OpenAI', event)">
-            <div>
-              <div class="palette-model-title">gpt-4-turbo</div>
-              <div class="palette-model-meta"><span class="provider-status-dot active"></span> 128k Geniş Bağlam</div>
-            </div>
-            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘4</span>
               <span class="palette-star">★</span>
             </div>
           </div>
@@ -4819,99 +5506,103 @@
         <div class="compact-v-divider"></div>
       </div>
 
-      <div class="input-header">
-        <!-- Exact Windsurf / Cursor / Codex Footer Trigger Toolbar (Photos 2 & 3) -->
-        <div class="input-header-actions">
-          <!-- Button 1: Reasoning (Photo 2) -->
-          <button class="ide-popover-trigger" id="reasoningTriggerBtn" type="button"
-            onclick="toggleReasoningPopover(event)" title="Akıl Yürütme Seviyesi ve Hız Modu">
-            <span id="reasoningTriggerLabel">Low</span>
-            <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-
-          <div class="trigger-separator">|</div>
-
-          <!-- Button 2: Autonomy & Permissions (Photo 3) -->
-          <button class="ide-popover-trigger" id="autonomyTriggerBtn" type="button"
-            onclick="toggleAutonomyPopover(event)" title="İzin ve Otonomi Seviyesi">
-            <svg id="autonomyTriggerIcon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-              <path d="M7 11V7a5 5 0 0 1 9.9-1" />
-            </svg>
-            <span id="autonomyTriggerLabel">Full access</span>
-            <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-
-          <div class="trigger-separator">|</div>
-
-          <!-- Button 3: Model Picker (Photo 1) -->
-          <button class="ide-popover-trigger" id="modelTriggerBtn" type="button" onclick="toggleModelPalette(event)"
-            title="Yapay Zeka Modeli Seç">
-            <span style="color:#FFB17F;font-size:10px;">✦</span>
-            <span id="modelTriggerLabel">gpt-5.6-terra</span>
-            <svg width="7" height="7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </button>
-
-          <div class="trigger-separator">|</div>
-
-          <!-- Button 4: MCP Toggle -->
-          <button class="ide-popover-trigger active" id="mcpToggleBtn" type="button" onclick="toggleMcp()"
-            title="MCP Sunucuları: Eklenti araçlarını modele bağlar">
-            <span id="mcpLabel">MCP</span>
-          </button>
-
-          <!-- Button 5: Target App Toggle -->
-          <button class="app-toggle-btn" id="appToggleBtn" type="button" title="Hedef Uygulama Belirle">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            <span>App</span>
-          </button>
-        </div>
+      <div class="composer-row" id="composerRow">
+        <button class="composer-options-btn" id="composerOptionsBtn" type="button"
+          title="Çalıştırma seçenekleri: model, akıl yürütme, erişim, MCP, hedef uygulama" aria-haspopup="true"
+          aria-expanded="false">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3" />
+            <path d="M1 14h6M9 8h6M17 16h6" />
+          </svg>
+        </button>
+        <input class="text-input composer-input" id="goal" autocomplete="off" spellcheck="false"
+          placeholder="Ne yapmamı istersiniz? Örn: Chrome'da yapay zeka haberlerini ara…">
+        <button class="btn composer-action-btn composer-run-btn" id="run" type="button"
+          title="Görevi Başlat (⌘⏎)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
+            stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="19" x2="12" y2="5" />
+            <polyline points="5 12 12 5 19 12" />
+          </svg>
+          <span>Run Agent</span>
+          <span class="kbd-badge">⌘⏎</span>
+        </button>
+        <button class="btn composer-action-btn composer-stop-btn" id="stop" type="button"
+          title="Görevi Durdur">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+          </svg>
+          <span>Stop</span>
+        </button>
       </div>
-      <input class="text-input" id="goal" autocomplete="off" spellcheck="false"
-        placeholder="What can I help you with today? / Ne yapmamı istersiniz?">
-      <button class="compact-send-btn" id="compactSendBtn" type="button" title="Run Agent">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8"
-          stroke-linecap="round" stroke-linejoin="round">
-          <line x1="12" y1="19" x2="12" y2="5" />
-          <polyline points="5 12 12 5 19 12" />
+    </div>
+
+    <!-- Run options popover (Model / Reasoning / Access / MCP / Target App) -->
+    <div class="composer-options-popover" id="composerOptionsPopover" role="menu">
+      <button class="opt-item" type="button" data-opt="model">
+        <span class="opt-key">Model</span>
+        <span class="opt-val">
+          <span class="opt-spark">✦</span>
+          <span id="modelTriggerLabel">gpt-5.6-terra</span>
+        </span>
+        <svg class="opt-chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2.5">
+          <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
+      <button class="opt-item" type="button" data-opt="reasoning">
+        <span class="opt-key">Akıl Yürütme</span>
+        <span class="opt-val">
+          <span id="reasoningTriggerLabel">Medium</span>
+        </span>
+        <svg class="opt-chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2.5">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      <button class="opt-item" type="button" data-opt="autonomy">
+        <span class="opt-key">Erişim</span>
+        <span class="opt-val">
+          <svg id="autonomyTriggerIcon" width="12" height="12" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 9.9-1" />
+          </svg>
+          <span id="autonomyTriggerLabel">Full access</span>
+        </span>
+        <svg class="opt-chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2.5">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      <div class="opt-sep"></div>
+      <div class="opt-item opt-static">
+        <span class="opt-key">MCP Sunucuları</span>
+        <button id="mcpToggleBtn" class="mcp-toggle-btn on" type="button"
+          title="MCP Sunucuları: Açık. Tıklayarak kapatabilirsiniz.">
+          <span id="mcpLabel">Açık</span>
+        </button>
+      </div>
+      <div class="opt-item opt-static">
+        <span class="opt-key">Hedef Uygulama</span>
+        <button id="appToggleBtn" class="app-toggle-btn" type="button" title="Hedef Uygulama Belirle">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          <span>App</span>
+        </button>
+      </div>
     </div>
 
     <div class="input-wrapper app-field-container" id="appField" style="display:none;">
-      <div class="input-header">
-        <label class="input-label" for="app">Hedef Uygulama (İsteğe Bağlı)</label>
+      <label class="input-label" for="app">Hedef Uygulama</label>
+      <div class="app-field-row">
+        <input class="text-input" id="app" autocomplete="off" spellcheck="false"
+          placeholder="Örn: Google Chrome, Notes, Finder">
+        <button class="app-field-done" id="appDoneBtn" type="button" title="Uygula">OK</button>
       </div>
-      <input class="text-input" id="app" autocomplete="off" spellcheck="false"
-        placeholder="Örn: Google Chrome, Notes, Finder">
-    </div>
-
-    <div class="btn-row">
-      <button class="btn btn-primary" id="run">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-          stroke-linecap="round" stroke-linejoin="round">
-          <line x1="12" y1="19" x2="12" y2="5" />
-          <polyline points="5 12 12 5 19 12" />
-        </svg>
-        <span>Run Agent</span>
-        <span class="kbd-badge">⌘⏎</span>
-      </button>
-      <button class="btn btn-stop" id="stop">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-          <rect x="6" y="6" width="12" height="12" rx="2" />
-        </svg>
-        <span>Stop</span>
-      </button>
     </div>
 
     <div class="footer-legend">
@@ -4921,19 +5612,97 @@
     </div>
   </footer>
 
+  <!-- ⋯ actions dropdown (lives outside the header so it can never be clipped) -->
+  <div class="header-menu" id="headerMenu" role="menu">
+    <button class="header-menu-item" type="button" data-menu-action="lens">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M3 7V5a2 2 0 0 1 2-2h2m10 0h2a2 2 0 0 1 2 2v2m0 10v2a2 2 0 0 1-2 2h-2m-10 0H5a2 2 0 0 1-2-2v-2" />
+      </svg>
+      <span>Odak Lensi</span>
+    </button>
+    <button class="header-menu-item" type="button" data-menu-action="copy">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+      </svg>
+      <span>Logları Kopyala</span>
+    </button>
+    <button class="header-menu-item" type="button" data-menu-action="clear">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+      </svg>
+      <span>Oturumu Temizle</span>
+    </button>
+    <div class="header-menu-sep"></div>
+    <button class="header-menu-item" type="button" data-menu-action="collapse">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="4 14 10 14 10 20" />
+        <polyline points="20 10 14 10 14 4" />
+        <line x1="14" y1="10" x2="21" y2="3" />
+        <line x1="3" y1="21" x2="10" y2="14" />
+      </svg>
+      <span>Kompakt Çubuğa Küçült</span>
+    </button>
+  </div>
+
+  <!-- Right slide-in navigation drawer -->
+  <div class="nav-backdrop" id="navBackdrop"></div>
+  <aside class="nav-drawer" id="navDrawer" aria-label="Menü">
+    <div class="nav-drawer-head">
+      <span class="nav-drawer-title">Menü</span>
+      <button class="nav-drawer-close" id="navDrawerClose" type="button" title="Kapat (Esc)">✕</button>
+    </div>
+    <div class="nav-drawer-body">
+      <button class="nav-drawer-item active" id="tabBtnLive" type="button" data-tab="live">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+        </svg>
+        <span>Live Agent</span>
+      </button>
+      <button class="nav-drawer-item" id="tabBtnMcp" type="button" data-tab="mcp">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path
+            d="M12 2v6m0 8v6M4.93 4.93l4.24 4.24m5.66 5.66 4.24 4.24M2 12h6m8 0h6M4.93 19.07l4.24-4.24m5.66-5.66 4.24-4.24" />
+        </svg>
+        <span>Eklentiler</span>
+      </button>
+      <button class="nav-drawer-item" id="tabBtnHistory" type="button" data-tab="history">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+        <span>History</span>
+      </button>
+      <button class="nav-drawer-item" id="tabBtnControl" type="button" data-tab="control">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+        <span>Kontrol</span>
+      </button>
+      <button class="nav-drawer-item" id="tabBtnAnalytics" type="button" data-tab="analytics">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <line x1="18" y1="20" x2="18" y2="10" />
+          <line x1="12" y1="20" x2="12" y2="4" />
+          <line x1="6" y1="20" x2="6" y2="14" />
+        </svg>
+        <span>Analytics</span>
+      </button>
+    </div>
+  </aside>
+
   <script>
     (function () {
 
       /* ----- iOS Liquid Glass Helpers & Handlers ---------------------------- */
-      window.emergencyPanicStop = function () {
-        post({ cmd: "stop" });
-        showToast("🚨 Acil Durdurma! Ajan anında donduruldu.");
-        var panicBtn = document.getElementById("panicBtn");
-        if (panicBtn) panicBtn.style.display = "none";
-        var bStatus = document.getElementById("budgetStatusText");
-        if (bStatus) bStatus.textContent = "Acil Durduruldu";
-      };
-
       window.toggleWitnessLens = function () {
         var body = document.getElementById("lensBody");
         var chev = document.getElementById("lensChevron");
@@ -5071,12 +5840,236 @@
           summary: summary,
           raw: raw || summary
         });
+        if (sessionEvents.length > 300) sessionEvents.splice(0, sessionEvents.length - 300);
+      }
+
+      /* ----- Transparent streaming feed: scroll / prune / thinking --------- */
+      // One rAF-batched scroll keeps a 30-step run from forcing a layout per
+      // row, and never yanks the user away from a row they scrolled up to
+      // read — the feed follows only when it was already at the bottom.
+      var MAX_LOG_NODES = 800;
+      var scrollQueued = false;
+      function requestScroll() {
+        if (scrollQueued) return;
+        scrollQueued = true;
+        var raf = window.requestAnimationFrame || function (cb) { setTimeout(cb, 16); };
+        raf(function () {
+          scrollQueued = false;
+          try {
+            var nearBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 90;
+            if (nearBottom) log.scrollTop = log.scrollHeight;
+          } catch (e) { }
+          pruneLog();
+        });
+      }
+
+      function pruneLog() {
+        try {
+          while (log.children.length > MAX_LOG_NODES) {
+            var first = log.firstChild;
+            if (!first) break;
+            // The thinking row always stays last; stop rather than orphan it.
+            if (first.id === "thinkingRow") break;
+            log.removeChild(first);
+          }
+        } catch (e) { }
+      }
+
+      function ensureThinkingRow() {
+        if (!window.isAgentRunning) return;
+        var row = document.getElementById("thinkingRow");
+        if (!row) {
+          row = document.createElement("div");
+          row.id = "thinkingRow";
+          row.className = "thinking-row";
+          row.innerHTML =
+            '<span class="feed-icon">' + ICONS.brain + '</span>' +
+            '<span>Thinking<span class="thinking-dots"></span></span>';
+        }
+        // appendChild moves the existing node, so the row re-pins to the end
+        // after every streamed row without a second query.
+        log.appendChild(row);
+        requestScroll();
+      }
+
+      function clearThinkingRow() {
+        var row = document.getElementById("thinkingRow");
+        if (row && row.parentNode) row.parentNode.removeChild(row);
+      }
+
+      /* ----- Collapsible command groups ("Ran N commands") ------------------ */
+      // Consecutive actions without an intervening thought share one group:
+      // the header names the count like the reference feed, the rows stay
+      // dimmed single lines, and each row expands inline to its full text.
+      var actionGroup = null; // {el, listEl, countEl, count, hasTool}
+      var lastWindowSeen = null;
+
+      function isToolAction(actType) {
+        return actType === "call_tool" || actType === "web_search" || actType === "web_fetch";
+      }
+
+      function closeActionGroup() {
+        if (actionGroup && actionGroup.count > 3) {
+          actionGroup.el.classList.add("collapsed");
+        }
+        actionGroup = null;
+      }
+
+      function singleLinePreview(text, maxLen) {
+        var oneLine = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+        if (oneLine.length <= maxLen) return oneLine;
+        return oneLine.substring(0, maxLen).trim() + "…";
+      }
+
+      function appendActionToGroup(rowBtn, isTool) {
+        var host = currentGroup || log;
+        if (!actionGroup || actionGroup.host !== host) {
+          closeActionGroup();
+          var group = document.createElement("div");
+          group.className = "run-group";
+          group.innerHTML =
+            '<button type="button" class="run-group-header">' +
+            '<span class="feed-icon">' + ICONS.terminal + '</span>' +
+            '<span class="run-group-text"></span>' +
+            '<span class="run-group-chev">›</span>' +
+            '</button>' +
+            '<div class="run-group-list"></div>';
+          host.appendChild(group);
+          var headerBtn = group.querySelector(".run-group-header");
+          headerBtn.addEventListener("click", function () {
+            group.classList.toggle("collapsed");
+          });
+          actionGroup = {
+            el: group,
+            host: host,
+            listEl: group.querySelector(".run-group-list"),
+            countEl: group.querySelector(".run-group-text"),
+            count: 0,
+            hasTool: false
+          };
+        }
+        actionGroup.count += 1;
+        if (isTool) actionGroup.hasTool = true;
+        actionGroup.listEl.appendChild(rowBtn);
+        var n = actionGroup.count;
+        actionGroup.countEl.textContent = actionGroup.hasTool
+          ? ("Ran " + n + " command" + (n === 1 ? "" : "s"))
+          : ("Ran " + n + " step" + (n === 1 ? "" : "s"));
+        // A lone row reads better without a header echoing it: hide the
+        // header until the group actually groups something.
+        var header = actionGroup.el.querySelector(".run-group-header");
+        if (header) header.style.display = n > 1 ? "flex" : "none";
+        ensureThinkingRow();
+        requestScroll();
+      }
+
+      function makeCommandRow(iconSvg, previewText, fullHtml) {
+        var row = document.createElement("button");
+        row.type = "button";
+        row.className = "cmd-row";
+        row.innerHTML =
+          '<span class="feed-icon">' + iconSvg + '</span>' +
+          '<span class="cmd-preview"></span>' +
+          '<span class="cmd-chev">›</span>';
+        row.querySelector(".cmd-preview").textContent = previewText;
+        if (!fullHtml) {
+          row.querySelector(".cmd-chev").style.visibility = "hidden";
+          row.style.cursor = "default";
+          return { row: row, full: null };
+        }
+        var full = document.createElement("div");
+        full.className = "cmd-full";
+        full.innerHTML = fullHtml;
+        row.addEventListener("click", function () {
+          var show = !full.classList.contains("show");
+          full.classList.toggle("show", show);
+          row.classList.toggle("open", show);
+          row.querySelector(".cmd-chev").textContent = show ? "‹" : "›";
+          if (show) requestScroll();
+        });
+        return { row: row, full: full };
+      }
+
+      function renderPlanCard(plan) {
+        closeActionGroup();
+        closeGroup();
+        var subs = (plan && plan.sub_goals) || [];
+        recordSessionEvent("Plan", (plan && plan.goal) || "");
+        var card = document.createElement("div");
+        card.className = "stream-plan";
+        var head = document.createElement("div");
+        head.className = "stream-plan-head";
+        head.innerHTML = '<span class="feed-icon">' + ICONS.target + '</span>';
+        var headText = document.createElement("span");
+        headText.textContent = "Plan · " + subs.length + " adım";
+        head.appendChild(headText);
+        card.appendChild(head);
+        subs.slice(0, 8).forEach(function (sg) {
+          var item = document.createElement("div");
+          var st = sg.status || "pending";
+          item.className = "stream-plan-item" + (st === "completed" ? " done" : (st === "in_progress" ? " active" : ""));
+          var check = document.createElement("span");
+          check.className = "stream-plan-check";
+          check.textContent = st === "completed" ? "✓" : (st === "in_progress" ? "➤" : "○");
+          item.appendChild(check);
+          var label = document.createElement("span");
+          label.textContent = sg.description || "";
+          item.appendChild(label);
+          card.appendChild(item);
+        });
+        log.appendChild(card);
+        ensureThinkingRow();
+        requestScroll();
+      }
+
+      function updateRunStatsStructured(ev) {
+        var touched = false;
+        if (ev.total_tokens != null && isFinite(ev.total_tokens)) {
+          window._lastTokens = ev.total_tokens;
+          touched = true;
+        }
+        if (ev.elapsed_seconds != null && isFinite(ev.elapsed_seconds)) {
+          window._lastElapsedS = ev.elapsed_seconds;
+          touched = true;
+        }
+        if (ev.calls != null && isFinite(ev.calls)) {
+          window._lastCalls = ev.calls;
+          touched = true;
+        }
+        if (!touched) return;
+        try {
+          statsTokens.innerHTML = BOLT_ICON + ' <span>' + Number(window._lastTokens || 0).toLocaleString("tr-TR") + ' tok</span>';
+          statsElapsed.innerHTML = CLOCK_ICON + ' <span>' + Math.round(window._lastElapsedS || 0) + 's</span>';
+          var budgetMaxTokens = 25000;
+          var pct = Math.min(100, Math.round(((window._lastTokens || 0) / budgetMaxTokens) * 100));
+          var fillEl = document.getElementById("budgetFill");
+          if (fillEl) {
+            fillEl.style.width = pct + "%";
+            if (pct > 80) fillEl.className = "budget-fill danger";
+            else if (pct > 50) fillEl.className = "budget-fill warn";
+            else fillEl.className = "budget-fill";
+          }
+          var bMeta = document.getElementById("budgetMetaVal");
+          if (bMeta) {
+            bMeta.textContent = Number(window._lastTokens || 0).toLocaleString("tr-TR") + " / 25,000 tok · " + Math.round(window._lastElapsedS || 0) + "s";
+          }
+        } catch (e) { }
+      }
+
+      function renderWindowLine(windowText) {
+        if (!windowText || windowText === lastWindowSeen) return;
+        lastWindowSeen = windowText;
+        recordSessionEvent("Observe", windowText);
+        appendNested(
+          '<div class="feed-line"><span class="feed-icon">' + ICONS.globe + '</span>' +
+          '<span class="feed-text">' + escapeHtml(singleLinePreview("Görüldü: " + windowText, 110)) + '</span></div>'
+        );
       }
 
       // SVG Icon Templates
       var ICONS = {
         bulb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5"/></svg>',
-        globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+        globe: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
         laptop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="10" rx="2"/><line x1="2" y1="19" x2="22" y2="19"/></svg>',
         flag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
         target: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>',
@@ -5109,6 +6102,7 @@
       /* ----- Tab Management -------------------------------------------------- */
       function switchTab(tabName) {
         document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.remove("active"); });
+        document.querySelectorAll(".nav-drawer-item").forEach(function (b) { b.classList.remove("active"); });
         document.querySelectorAll(".tab-pane").forEach(function (p) { p.classList.remove("active"); });
 
         var activeBtn = null;
@@ -5151,8 +6145,39 @@
         if (activeBtn && typeof updateTabIndicator === "function") {
           updateTabIndicator(activeBtn);
         }
+        // Navigation now lives in the drawer: switching views closes it.
+        closeNavDrawer();
       }
       window.switchTab = switchTab;
+
+      // Drawer helpers (open from the hamburger, close on backdrop / Esc).
+      function openNavDrawer() {
+        var d = document.getElementById("navDrawer");
+        var b = document.getElementById("navBackdrop");
+        var btn = document.getElementById("navMenuBtn");
+        if (d) {
+          // Force WebKit to drop stale :hover backgrounds: items the cursor
+          // crossed on a previous open keep the hover paint until the mouse
+          // physically moves again, because hover state is only recomputed
+          // on mousemove. A display toggle invalidates it at open time.
+          d.style.display = "none";
+          void d.offsetHeight;
+          d.style.display = "";
+          d.classList.add("open");
+        }
+        if (b) b.classList.add("open");
+        if (btn) btn.setAttribute("aria-expanded", "true");
+      }
+      function closeNavDrawer() {
+        var d = document.getElementById("navDrawer");
+        var b = document.getElementById("navBackdrop");
+        var btn = document.getElementById("navMenuBtn");
+        if (d) d.classList.remove("open");
+        if (b) b.classList.remove("open");
+        if (btn) btn.setAttribute("aria-expanded", "false");
+      }
+      window.openNavDrawer = openNavDrawer;
+      window.closeNavDrawer = closeNavDrawer;
 
       // Bind click listeners explicitly
       var btnLive = document.getElementById("tabBtnLive");
@@ -5438,6 +6463,9 @@
           window.webkit.messageHandlers.bridge.postMessage(JSON.stringify(m));
         }
       }
+      // Later script blocks (popovers, DOMContentLoaded refreshes) call post()
+      // from the top level, so it must be reachable globally.
+      window.post = post;
 
       function setStatus(text, cls) {
         if (stLabel) stLabel.textContent = text;
@@ -5457,13 +6485,30 @@
 
       appToggleBtn.addEventListener("click", toggleAppField);
 
+      function updateTargetAppPill() {
+        if (!appToggleBtn) return;
+        var t = app.value.trim();
+        appToggleBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span>' + (t ? escapeHtml(t) : "App") + '</span>';
+      }
+      if (app) app.addEventListener("input", updateTargetAppPill);
+
+      var appDoneBtn = document.getElementById("appDoneBtn");
+      if (appDoneBtn) {
+        appDoneBtn.addEventListener("click", function () {
+          appField.style.display = "none";
+          appToggleBtn.classList.remove("active");
+          if (goal) goal.focus();
+        });
+      }
+
       window.usePreset = function (promptText, appText) {
         window.expandWindow();
         goal.value = promptText;
         if (appText) {
           app.value = appText;
           appField.style.display = "flex";
-          appToggleBtn.textContent = "− Target App";
+          appToggleBtn.classList.add("active");
+          updateTargetAppPill();
         }
         window.switchTab("live");
         goal.focus();
@@ -5474,7 +6519,8 @@
         if (appText) {
           app.value = appText;
           appField.style.display = "flex";
-          appToggleBtn.textContent = "− Target App";
+          appToggleBtn.classList.add("active");
+          updateTargetAppPill();
         }
         window.switchTab("live");
         submit();
@@ -5530,15 +6576,21 @@
         var g = goal.value.trim();
         if (!g) return;
         var m = { cmd: "run", goal: g, level: currentAutonomyLevel, trust: trustMode, mcp: window._mcpEnabled };
-        var mSel = document.getElementById("modelSelect");
-        if (mSel && mSel.value) { m.model = mSel.value; }
+        // Send the model the user actually picked (openai:gpt-5.6-...) so the
+        // agent drives that model instead of silently defaulting.
+        if (window.selectedModelId) m.model = window.selectedModelId;
+        // reasoning_effort is only sent for models whose profile accepts it;
+        // applyModelCapabilities keeps _reasoningEffort null otherwise.
+        if (window._reasoningEffort) m.reasoning_effort = window._reasoningEffort;
         var a = app.value.trim();
         if (a) m.app = a;
 
         if (emptyHero) emptyHero.style.display = "none";
         currentTree = null;
-        // Fresh run, fresh stream state: the previous run's collapsed groups
-        // and seen-window memory must not leak into the new feed.
+        // Fresh run, fresh stream state: the previous run's collapsed groups,
+        // seen-window memory, buffered prose and structured-mode flag must not
+        // leak into the new feed (a stale eventsSeen would swallow an old
+        // driver's entire prose feed).
         closeActionGroup();
         closeGroup();
         lastWindowSeen = null;
@@ -5723,11 +6775,11 @@
         card.className = "user-goal-card";
 
         var autoBadge = (level === 2)
-          ? '<span style="font-size:9px;font-weight:600;color:#D4A359;background:rgba(212,163,89,0.12);padding:1.5px 5px;border-radius:4px;border:0.5px solid rgba(212,163,89,0.3);display:inline-flex;align-items:center;gap:3px;">Guarded</span>'
-          : '<span style="font-size:9px;font-weight:600;color:#FFB17F;background:rgba(255,177,127,0.12);padding:1.5px 5px;border-radius:4px;border:0.5px solid rgba(255,177,127,0.3);display:inline-flex;align-items:center;gap:3px;"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Full Auto</span>';
+          ? '<span style="font-size:9px;font-weight:600;color:#E0B26B;background:#2E2415;padding:1.5px 5px;border-radius:4px;border:0.5px solid #6B5326;display:inline-flex;align-items:center;gap:3px;">Guarded</span>'
+          : '<span style="font-size:9px;font-weight:600;color:#FFC9A3;background:#312315;padding:1.5px 5px;border-radius:4px;border:0.5px solid #6B4A2A;display:inline-flex;align-items:center;gap:3px;"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Full Auto</span>';
 
         var trustBadge = window.trustModeActive
-          ? '<span style="font-size:9px;font-weight:600;color:#50A574;background:rgba(80,165,116,0.12);padding:1.5px 5px;border-radius:4px;border:0.5px solid rgba(80,165,116,0.3);display:inline-flex;align-items:center;">Trust</span>'
+          ? '<span style="font-size:9px;font-weight:600;color:#7ED6A8;background:#16301F;padding:1.5px 5px;border-radius:4px;border:0.5px solid #2A5539;display:inline-flex;align-items:center;">Trust</span>'
           : '';
 
         var appSub = appText
@@ -5743,7 +6795,7 @@
           appSub;
 
         log.appendChild(card);
-        log.scrollTop = log.scrollHeight;
+        requestScroll();
       }
 
       function appendBranch(nodeType, contentHtml) {
@@ -5879,20 +6931,24 @@
 
       function renderActionCard(stepLabel, actionPayload) {
         var actType = "action";
-        var iconSvg = ICONS.click;
-        var detail = "";
+        var iconSvg = ICONS.terminal;
+        // Plain-text preview for the dimmed row + session log; fullHtml holds
+        // the expandable escaped detail (code block / full text) or null.
+        var preview = "";
+        var fullHtml = null;
 
         if (currentRunRecord) currentRunRecord.steps++;
 
         var totals = getStoredTotals();
+        var parsed = null;
 
         try {
-          var parsed = typeof actionPayload === "string" ? JSON.parse(actionPayload) : actionPayload;
+          parsed = typeof actionPayload === "string" ? JSON.parse(actionPayload) : actionPayload;
           actType = parsed.type || "action";
 
           if (actType === "mouse_click") {
             iconSvg = ICONS.click;
-            detail = "Click at <code>(" + parsed.x + ", " + parsed.y + ")</code> · " + (parsed.button || "left") + " (" + (parsed.click_count || 1) + "x)";
+            preview = "Click at (" + parsed.x + ", " + parsed.y + ") · " + (parsed.button || "left");
             if (currentRunRecord) currentRunRecord.actions.clicks++;
             totals.clicks++;
           } else if (actType === "mouse_move") {
@@ -5922,13 +6978,13 @@
             totals.pastes++;
           } else if (actType === "press_hotkey") {
             iconSvg = ICONS.hotkey;
-            var mods = (parsed.modifiers || []).map(function (m) { return "[" + m + "]"; }).join("+");
-            detail = "Hotkey: <code>" + (mods ? mods + "+" : "") + "[" + parsed.key + "]</code>";
+            var mods = (parsed.modifiers || []).join("+");
+            preview = "Hotkey " + (mods ? mods + "+" : "") + String(parsed.key || "");
             if (currentRunRecord) currentRunRecord.actions.hotkeys++;
             totals.hotkeys++;
           } else if (actType === "activate_app") {
             iconSvg = ICONS.app;
-            detail = "Bring App to Front: <b>" + escapeHtml(parsed.app) + "</b>";
+            preview = "Open " + String(parsed.app || "");
             if (currentRunRecord) currentRunRecord.actions.apps++;
             totals.apps++;
           } else if (actType === "web_search") {
@@ -6069,7 +7125,7 @@
           '<div class="feed-line feed-head"><span class="feed-icon" style="color:#50A574;">' + ICONS.flag + '</span>' +
           '<span class="feed-text">Tamamlandı · ' + escapeHtml(clean) + '</span></div>';
         log.appendChild(card);
-        log.scrollTop = log.scrollHeight;
+        requestScroll();
 
         // Reference-feed trailing group: a magnifier "totals" header with its
         // token / time / step children as indented rows (the "N arama çalıştırıldı"
@@ -6247,6 +7303,7 @@
         if (ev.verdict && ev.verdict !== "inconclusive") {
           renderVerificationCard(ev.action.type + ": " + ev.verdict);
         }
+        ensureThinkingRow();
       }
 
       function processIncomingLine(lineText, kind) {
@@ -6271,9 +7328,12 @@
         }
 
         /* Facts the structured stream carries are rendered from it instead, so a
-           run that emits events does not draw every card twice. */
+           run that emits events does not draw every card twice. "ooda observe:"
+           belongs in this list: the window line already renders from the event,
+           and without it every step draws its observation twice. */
         if (eventsSeen && (trimmed.startsWith("ooda thought:") ||
           trimmed.startsWith("ooda sub_goal:") ||
+          trimmed.startsWith("ooda observe:") ||
           trimmed.startsWith("ooda step_") ||
           trimmed.startsWith("ooda verified") ||
           trimmed.startsWith("ooda step "))) {
@@ -6501,8 +7561,6 @@
         }
         runBtn.disabled = r;
         stopBtn.style.display = r ? "inline-flex" : "none";
-        var panicBtn = document.getElementById("panicBtn");
-        if (panicBtn) panicBtn.style.display = r ? "inline-flex" : "none";
         dot.className = "status-dot " + (r ? "busy" : (window._lastErr ? "err" : "ok"));
         var st = r ? "Running..." : (window._lastErr ? "Error" : "Idle");
         setStatus(st, r ? "w" : (window._lastErr ? "e" : ""));
@@ -6522,230 +7580,6 @@
           updateTrustUI();
           showToast(trustMode ? "Trust Açık: kesintisiz otonomi (--yes)" : "Trust Kapalı: onay istenecek");
         });
-        if (sessionEvents.length > 300) sessionEvents.splice(0, sessionEvents.length - 300);
-      }
-
-      /* ----- Transparent streaming feed: scroll / prune / thinking --------- */
-      // One rAF-batched scroll keeps a 30-step run from forcing a layout per
-      // row, and never yanks the user away from a row they scrolled up to
-      // read — the feed follows only when it was already at the bottom.
-      var MAX_LOG_NODES = 800;
-      var scrollQueued = false;
-      function requestScroll() {
-        if (scrollQueued) return;
-        scrollQueued = true;
-        var raf = window.requestAnimationFrame || function (cb) { setTimeout(cb, 16); };
-        raf(function () {
-          scrollQueued = false;
-          try {
-            var nearBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 90;
-            if (nearBottom) log.scrollTop = log.scrollHeight;
-          } catch (e) { }
-          pruneLog();
-        });
-      }
-
-      function pruneLog() {
-        try {
-          while (log.children.length > MAX_LOG_NODES) {
-            var first = log.firstChild;
-            if (!first) break;
-            // The thinking row always stays last; stop rather than orphan it.
-            if (first.id === "thinkingRow") break;
-            log.removeChild(first);
-          }
-        } catch (e) { }
-      }
-
-      function ensureThinkingRow() {
-        if (!window.isAgentRunning) return;
-        var row = document.getElementById("thinkingRow");
-        if (!row) {
-          row = document.createElement("div");
-          row.id = "thinkingRow";
-          row.className = "thinking-row";
-          row.innerHTML =
-            '<span class="feed-icon">' + ICONS.brain + '</span>' +
-            '<span>Thinking<span class="thinking-dots"></span></span>';
-        }
-        // appendChild moves the existing node, so the row re-pins to the end
-        // after every streamed row without a second query.
-        log.appendChild(row);
-        requestScroll();
-      }
-
-      function clearThinkingRow() {
-        var row = document.getElementById("thinkingRow");
-        if (row && row.parentNode) row.parentNode.removeChild(row);
-      }
-
-      /* ----- Collapsible command groups ("Ran N commands") ------------------ */
-      // Consecutive actions without an intervening thought share one group:
-      // the header names the count like the reference feed, the rows stay
-      // dimmed single lines, and each row expands inline to its full text.
-      var actionGroup = null; // {el, listEl, countEl, count, hasTool}
-      var lastWindowSeen = null;
-
-      function isToolAction(actType) {
-        return actType === "call_tool" || actType === "web_search" || actType === "web_fetch";
-      }
-
-      function closeActionGroup() {
-        if (actionGroup && actionGroup.count > 3) {
-          actionGroup.el.classList.add("collapsed");
-        }
-        actionGroup = null;
-      }
-
-      function singleLinePreview(text, maxLen) {
-        var oneLine = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
-        if (oneLine.length <= maxLen) return oneLine;
-        return oneLine.substring(0, maxLen).trim() + "…";
-      }
-
-      function appendActionToGroup(rowBtn, isTool) {
-        var host = currentGroup || log;
-        if (!actionGroup || actionGroup.host !== host) {
-          closeActionGroup();
-          var group = document.createElement("div");
-          group.className = "run-group";
-          group.innerHTML =
-            '<button type="button" class="run-group-header">' +
-            '<span class="feed-icon">' + ICONS.terminal + '</span>' +
-            '<span class="run-group-text"></span>' +
-            '<span class="run-group-chev">›</span>' +
-            '</button>' +
-            '<div class="run-group-list"></div>';
-          host.appendChild(group);
-          var headerBtn = group.querySelector(".run-group-header");
-          headerBtn.addEventListener("click", function () {
-            group.classList.toggle("collapsed");
-          });
-          actionGroup = {
-            el: group,
-            host: host,
-            listEl: group.querySelector(".run-group-list"),
-            countEl: group.querySelector(".run-group-text"),
-            count: 0,
-            hasTool: false
-          };
-        }
-        actionGroup.count += 1;
-        if (isTool) actionGroup.hasTool = true;
-        actionGroup.listEl.appendChild(rowBtn);
-        var n = actionGroup.count;
-        actionGroup.countEl.textContent = actionGroup.hasTool
-          ? ("Ran " + n + " command" + (n === 1 ? "" : "s"))
-          : ("Ran " + n + " step" + (n === 1 ? "" : "s"));
-        // A lone row reads better without a header echoing it: hide the
-        // header until the group actually groups something.
-        var header = actionGroup.el.querySelector(".run-group-header");
-        if (header) header.style.display = n > 1 ? "flex" : "none";
-        ensureThinkingRow();
-        requestScroll();
-      }
-
-      function makeCommandRow(iconSvg, previewText, fullHtml) {
-        var row = document.createElement("button");
-        row.type = "button";
-        row.className = "cmd-row";
-        row.innerHTML =
-          '<span class="feed-icon">' + iconSvg + '</span>' +
-          '<span class="cmd-preview"></span>' +
-          '<span class="cmd-chev">›</span>';
-        row.querySelector(".cmd-preview").textContent = previewText;
-        if (!fullHtml) {
-          row.querySelector(".cmd-chev").style.visibility = "hidden";
-          row.style.cursor = "default";
-          return { row: row, full: null };
-        }
-        var full = document.createElement("div");
-        full.className = "cmd-full";
-        full.innerHTML = fullHtml;
-        row.addEventListener("click", function () {
-          var show = !full.classList.contains("show");
-          full.classList.toggle("show", show);
-          row.classList.toggle("open", show);
-          row.querySelector(".cmd-chev").textContent = show ? "‹" : "›";
-          if (show) requestScroll();
-        });
-        return { row: row, full: full };
-      }
-
-      function renderPlanCard(plan) {
-        closeActionGroup();
-        closeGroup();
-        var subs = (plan && plan.sub_goals) || [];
-        recordSessionEvent("Plan", (plan && plan.goal) || "");
-        var card = document.createElement("div");
-        card.className = "stream-plan";
-        var head = document.createElement("div");
-        head.className = "stream-plan-head";
-        head.innerHTML = '<span class="feed-icon">' + ICONS.target + '</span>';
-        var headText = document.createElement("span");
-        headText.textContent = "Plan · " + subs.length + " adım";
-        head.appendChild(headText);
-        card.appendChild(head);
-        subs.slice(0, 8).forEach(function (sg) {
-          var item = document.createElement("div");
-          var st = sg.status || "pending";
-          item.className = "stream-plan-item" + (st === "completed" ? " done" : (st === "in_progress" ? " active" : ""));
-          var check = document.createElement("span");
-          check.className = "stream-plan-check";
-          check.textContent = st === "completed" ? "✓" : (st === "in_progress" ? "➤" : "○");
-          item.appendChild(check);
-          var label = document.createElement("span");
-          label.textContent = sg.description || "";
-          item.appendChild(label);
-          card.appendChild(item);
-        });
-        log.appendChild(card);
-        ensureThinkingRow();
-        requestScroll();
-      }
-
-      function updateRunStatsStructured(ev) {
-        var touched = false;
-        if (ev.total_tokens != null && isFinite(ev.total_tokens)) {
-          window._lastTokens = ev.total_tokens;
-          touched = true;
-        }
-        if (ev.elapsed_seconds != null && isFinite(ev.elapsed_seconds)) {
-          window._lastElapsedS = ev.elapsed_seconds;
-          touched = true;
-        }
-        if (ev.calls != null && isFinite(ev.calls)) {
-          window._lastCalls = ev.calls;
-          touched = true;
-        }
-        if (!touched) return;
-        try {
-          statsTokens.innerHTML = BOLT_ICON + ' <span>' + Number(window._lastTokens || 0).toLocaleString("tr-TR") + ' tok</span>';
-          statsElapsed.innerHTML = CLOCK_ICON + ' <span>' + Math.round(window._lastElapsedS || 0) + 's</span>';
-          var budgetMaxTokens = 25000;
-          var pct = Math.min(100, Math.round(((window._lastTokens || 0) / budgetMaxTokens) * 100));
-          var fillEl = document.getElementById("budgetFill");
-          if (fillEl) {
-            fillEl.style.width = pct + "%";
-            if (pct > 80) fillEl.className = "budget-fill danger";
-            else if (pct > 50) fillEl.className = "budget-fill warn";
-            else fillEl.className = "budget-fill";
-          }
-          var bMeta = document.getElementById("budgetMetaVal");
-          if (bMeta) {
-            bMeta.textContent = Number(window._lastTokens || 0).toLocaleString("tr-TR") + " / 25,000 tok · " + Math.round(window._lastElapsedS || 0) + "s";
-          }
-        } catch (e) { }
-      }
-
-      function renderWindowLine(windowText) {
-        if (!windowText || windowText === lastWindowSeen) return;
-        lastWindowSeen = windowText;
-        recordSessionEvent("Observe", windowText);
-        appendNested(
-          '<div class="feed-line"><span class="feed-icon">' + ICONS.globe + '</span>' +
-          '<span class="feed-text">' + escapeHtml(singleLinePreview("Görüldü: " + windowText, 110)) + '</span></div>'
-        );
       }
 
       /* ----- MCP Store Logic & State ---------------------------------------- */
@@ -7192,12 +8026,12 @@
         if (!btn || !label) return;
         if (window._mcpEnabled) {
           btn.className = "mcp-toggle-btn on";
-          label.textContent = "MCP";
-          btn.title = "MCP Sunucuları: Aktif. Tıklayarak kapatabilirsiniz.";
+          label.textContent = "Açık";
+          btn.title = "MCP Sunucuları: Açık. Tıklayarak kapatabilirsiniz.";
         } else {
           btn.className = "mcp-toggle-btn off";
-          label.textContent = "MCP";
-          btn.title = "MCP Sunucuları: Devre dışı. Tıklayarak açabilirsiniz.";
+          label.textContent = "Kapalı";
+          btn.title = "MCP Sunucuları: Kapalı. Tıklayarak açabilirsiniz.";
         }
       }
 
@@ -7243,9 +8077,6 @@
       window.Native = {
         log: function (line) {
           processIncomingLine(line, "out");
-          if (line.indexOf("step_") !== -1 || line.indexOf("Action:") !== -1) {
-            log.scrollTop = log.scrollHeight;
-          }
         },
         event: function (t) {
           try { renderStepEvent(JSON.parse(t)); }
@@ -7491,7 +8322,6 @@
         } else {
           window.collapseWindow();
         }
-        ensureThinkingRow();
       }
 
       if (goalInputEl) {
@@ -7565,11 +8395,80 @@
     /* ==========================================================================
        High-End IDE Popover Logic (Reasoning, Autonomy, Multi-Provider Model Palette)
        ========================================================================== */
-    window.selectedReasoning = "low";
+    window.selectedReasoning = "medium";
     window.selectedServiceTier = "standard";
     window.selectedAutonomyMode = "full";
     window.selectedModelId = "openai:gpt-5.6-terra";
     window.selectedModelName = "gpt-5.6-terra";
+
+    /* ========================================================================
+       Per-model API capabilities: which reasoning_effort levels each model
+       accepts. Kaynak: developers.openai.com/api/docs/models/gpt-5.6-sol,
+       .../gpt-5.6-terra, .../gpt-5.6-luna ("none, low, medium (default),
+       high, xhigh, max") ve .../gpt-6-astra ("low, medium, high, xhigh,
+       max" — `none` HTTP 400 döner). Popup sadece modelin kabul ettiğini
+       listeler, run sadece profil izin verirse gönderir.
+       ======================================================================== */
+    var MODEL_CAPS = {
+      "gpt-5.6-sol": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" },
+      "gpt-5.6-terra": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" },
+      "gpt-5.6-luna": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" },
+      "gpt-6-astra": { reasoning: ["low", "medium", "high", "xhigh", "max"], def: "medium" },
+      "gpt-5.6": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" }
+    };
+    var EFFORT_LABELS = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
+
+    window.capsForModel = function (modelId) {
+      var base = String(modelId || "").replace(/^openai:/, "");
+      if (MODEL_CAPS[base]) return MODEL_CAPS[base];
+      // Bilinmeyen ID'ler: sadece izin verilen 4 model ailesi effort alır.
+      // GPT-5.6 varyantları tam set, GPT-6 varyantları `none` hariç tam set.
+      if (base.indexOf("gpt-5.6") === 0) {
+        return { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" };
+      }
+      if (base.indexOf("gpt-6") === 0) {
+        return { reasoning: ["low", "medium", "high", "xhigh", "max"], def: "medium" };
+      }
+      return { reasoning: [] };
+    };
+
+    // (Re)build the reasoning popup list for the current model and remember the
+    // effort to send with the run. Nothing here touches the wire.
+    window.buildReasoningOptions = function (modelId) {
+      var caps = window.capsForModel(modelId);
+      var list = document.getElementById("reasoningTierList");
+      var unsupported = document.getElementById("reasoningUnsupportedLabel");
+      var row = document.querySelector("[data-opt=\"reasoning\"]");
+      if (!list) return;
+      list.innerHTML = "";
+      var eff = null;
+      if (caps.reasoning && caps.reasoning.length) {
+        (caps.reasoning || []).forEach(function (val) {
+          var label = EFFORT_LABELS[val] || val;
+          var item = document.createElement("div");
+          item.className = "tier-item" + (val === caps.def ? " selected" : "");
+          item.setAttribute("data-reasoning", val);
+          item.innerHTML = '<span>' + label + '</span>'
+            + (val === caps.def ? '<span class="tier-default-badge">Varsayılan</span>' : '')
+            + '<span class="tier-check">✓</span>';
+          item.onclick = function (ev) {
+            window.selectReasoningOption(val, label, "", ev);
+          };
+          list.appendChild(item);
+        });
+        eff = caps.def;
+      }
+      if (unsupported) unsupported.style.display = eff ? "none" : "block";
+      if (row) row.style.display = eff ? "flex" : "none";
+      var lbl = document.getElementById("reasoningTriggerLabel");
+      if (lbl) lbl.textContent = eff ? (EFFORT_LABELS[eff] || eff) : "—";
+      window._reasoningEffort = eff;
+      window.selectedReasoning = eff || "";
+      return eff;
+    };
+    window.applyModelCapabilities = function (modelId) {
+      window.buildReasoningOptions(modelId);
+    };
 
     window.closeAllLuxuryPopovers = function () {
       var r = document.getElementById("reasoningTierPopover");
@@ -7639,6 +8538,7 @@
     window.selectReasoningOption = function (val, label, defaultTag, e) {
       if (e) { e.preventDefault(); e.stopPropagation(); }
       window.selectedReasoning = val;
+      window._reasoningEffort = val;
       var lbl = document.getElementById("reasoningTriggerLabel");
       if (lbl) lbl.textContent = label;
       document.querySelectorAll("#reasoningTierPopover .tier-item[data-reasoning]").forEach(function (el) {
@@ -7702,6 +8602,9 @@
         else el.classList.remove("selected");
       });
 
+      // The effort options offered for a model must follow that model's own
+      // capabilities (what the API will accept as reasoning_effort).
+      window.applyModelCapabilities(modelId);
       window.closeAllLuxuryPopovers();
     };
 
@@ -7745,6 +8648,9 @@
     };
 
     // Dynamic Model Loader from Rust / OpenAI API
+    // Sadece GPT-5.6 + GPT-6 Astra gösterilir: /v1/models ham listeyi
+    // döndürür ({"object":"list","data":[{"id":...}]}), Rust tarafı zaten
+    // filtreler; burada ikinci kapı olarak izin listesi dışındakiler atılır.
     window.onModelsLoaded = function (data) {
       if (!data) return;
       var list = data.models || [];
@@ -7752,10 +8658,11 @@
       if (!container) return;
       container.innerHTML = "";
 
-      var curatedIds = ["gpt-4o", "gpt-4o-mini", "o3-mini", "o1", "gpt-4-turbo"];
+      var curatedIds = ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.6"];
+      var allowedRe = /^(gpt-5\.6(-(sol|terra|luna))?|gpt-6-astra(-|$))/;
       var extraModels = list.filter(function (m) {
         var id = m.name || m.id.replace("openai:", "");
-        return curatedIds.indexOf(id) === -1;
+        return curatedIds.indexOf(id) === -1 && allowedRe.test(id);
       });
 
       extraModels.forEach(function (m) {
@@ -7797,7 +8704,7 @@
       }
     });
 
-    // Global keyboard shortcuts (Escape and Cmd+1..5)
+    // Global keyboard shortcuts (Escape and Cmd+1..4 → 4 curated models)
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
         window.closeAllLuxuryPopovers();
@@ -7805,26 +8712,25 @@
       }
       if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey) {
         if (e.key === "1") {
-          window.selectPaletteModel("openai:gpt-4o", "gpt-4o", "OpenAI");
+          window.selectPaletteModel("openai:gpt-5.6-terra", "gpt-5.6-terra", "OpenAI");
           e.preventDefault();
         } else if (e.key === "2") {
-          window.selectPaletteModel("openai:gpt-4o-mini", "gpt-4o-mini", "OpenAI");
+          window.selectPaletteModel("openai:gpt-5.6-sol", "gpt-5.6-sol", "OpenAI");
           e.preventDefault();
         } else if (e.key === "3") {
-          window.selectPaletteModel("openai:o3-mini", "o3-mini", "OpenAI");
+          window.selectPaletteModel("openai:gpt-5.6-luna", "gpt-5.6-luna", "OpenAI");
           e.preventDefault();
         } else if (e.key === "4") {
-          window.selectPaletteModel("openai:o1", "o1", "OpenAI");
-          e.preventDefault();
-        } else if (e.key === "5") {
-          window.selectPaletteModel("openai:gpt-4-turbo", "gpt-4-turbo", "OpenAI");
+          window.selectPaletteModel("openai:gpt-6-astra", "gpt-6-astra", "OpenAI");
           e.preventDefault();
         }
       }
     });
 
-    // Fetch real models on DOM ready
+    // Fetch real models on DOM ready and initialize the effort options for the
+    // default model (gpt-5.6-terra) before the user opens the picker.
     document.addEventListener("DOMContentLoaded", function () {
+      if (window.applyModelCapabilities) window.applyModelCapabilities(window.selectedModelId);
       post({ cmd: "get_models" });
     });
 
@@ -7880,6 +8786,126 @@
       </div>
     </div>
   </div>
+
+  <script>
+    /* ========================================================================
+       Decluttered-chrome wiring: header ⋯ menu + composer run-options popover.
+       Pure UI shell — every action still routes to the pre-existing handler.
+       ======================================================================== */
+    (function () {
+      function el(id) { return document.getElementById(id); }
+
+      var moreBtn = el("headerMoreBtn");
+      var headerMenu = el("headerMenu");
+      var optBtn = el("composerOptionsBtn");
+      var optPop = el("composerOptionsPopover");
+
+      function setAria(btn, open) {
+        if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+      }
+      function closeHeaderMenu() {
+        if (headerMenu) headerMenu.classList.remove("open");
+        setAria(moreBtn, false);
+      }
+      function closeOptions() {
+        if (optPop) optPop.classList.remove("open");
+        setAria(optBtn, false);
+      }
+      window.closeChromeMenus = function () { closeHeaderMenu(); closeOptions(); };
+
+      if (moreBtn && headerMenu) {
+        moreBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          var open = headerMenu.classList.toggle("open");
+          setAria(moreBtn, open);
+          closeOptions();
+        });
+        headerMenu.querySelectorAll(".header-menu-item").forEach(function (item) {
+          item.addEventListener("click", function () {
+            var a = item.getAttribute("data-menu-action");
+            if (a === "lens") window.toggleWitnessLensModal();
+            else if (a === "copy") window.copySessionLogs();
+            else if (a === "clear") { var cb = el("clearBtn"); if (cb) cb.click(); }
+            else if (a === "collapse") window.collapseWindow();
+            closeHeaderMenu();
+          });
+        });
+      }
+
+      if (optBtn && optPop) {
+        optBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          var open = optPop.classList.toggle("open");
+          setAria(optBtn, open);
+          closeHeaderMenu();
+        });
+        optPop.querySelectorAll(".opt-item[data-opt]").forEach(function (item) {
+          item.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var a = item.getAttribute("data-opt");
+            closeOptions();
+            if (a === "model") window.toggleModelPalette(e);
+            else if (a === "reasoning") window.toggleReasoningPopover(e);
+            else if (a === "autonomy") window.toggleAutonomyPopover(e);
+          });
+        });
+      }
+
+      // Right slide-in navigation drawer (opened from the header hamburger).
+      var navBtn = el("navMenuBtn");
+      var navClose = el("navDrawerClose");
+      var navBackdrop = el("navBackdrop");
+      var navDrawerEl = el("navDrawer");
+      function drawerOpen() {
+        return !!(navDrawerEl && navDrawerEl.classList.contains("open"));
+      }
+      if (navBtn) {
+        navBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (drawerOpen()) window.closeNavDrawer();
+          else window.openNavDrawer();
+          closeHeaderMenu();
+          closeOptions();
+        });
+      }
+      if (navClose) {
+        navClose.addEventListener("click", function () { window.closeNavDrawer(); });
+      }
+      if (navBackdrop) {
+        navBackdrop.addEventListener("click", function () { window.closeNavDrawer(); });
+      }
+
+      // Close either menu on outside click
+      document.addEventListener("click", function (e) {
+        if (headerMenu && headerMenu.classList.contains("open") && moreBtn &&
+          !moreBtn.contains(e.target) && !headerMenu.contains(e.target)) {
+          closeHeaderMenu();
+        }
+        if (optPop && optPop.classList.contains("open") && optBtn &&
+          !optBtn.contains(e.target) && !optPop.contains(e.target)) {
+          closeOptions();
+        }
+      });
+
+      // Escape closes these menus first (capture so it wins over other handlers)
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+          if (drawerOpen()) {
+            window.closeNavDrawer();
+            e.stopPropagation();
+            return;
+          }
+          var anyOpen = (headerMenu && headerMenu.classList.contains("open")) ||
+            (optPop && optPop.classList.contains("open"));
+          if (anyOpen) {
+            closeHeaderMenu();
+            closeOptions();
+            e.stopPropagation();
+          }
+        }
+      }, true);
+    })();
+  </script>
 
 </body>
 

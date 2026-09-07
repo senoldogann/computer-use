@@ -647,3 +647,33 @@ def test_contract_states_the_paste_rule_and_fast_default() -> None:
 
     assert "MUST be clipboard_paste" in ACTION_CONTRACT
     assert TypeText.model_fields["wpm"].default == 120
+
+
+def test_contract_forbids_zoom_and_prescribes_scroll_read_order() -> None:
+    """The web-reading reflexes are part of the contract, not advice.
+
+    Regression for the X.com doom-loop: a model that could not read a 512px
+    thumbnail answered by zooming, because nothing in its instructions said
+    zoom was forbidden or that page text is meant to be read by scrolling. The
+    contract now hard-bans viewport zoom, orders scroll -> select/copy ->
+    visual scan, and tells the model not to loop on AX queries for body text.
+    """
+    from computeruse.orchestrator.prompts import ACTION_CONTRACT
+
+    assert "NEVER use browser zoom to read" in ACTION_CONTRACT
+    assert "zoom-in followed by its undo" in ACTION_CONTRACT
+    assert "SCROLL:" in ACTION_CONTRACT and "SELECT+COPY:" in ACTION_CONTRACT
+    assert "VISUAL SCAN:" in ACTION_CONTRACT
+    assert "Never enter a query-AX loop" in ACTION_CONTRACT
+
+
+def test_primary_perception_note_states_the_real_map_size() -> None:
+    """The map note the model reads must agree with the actual capture cap."""
+    from computeruse.orchestrator.prompts import state_context
+    from computeruse.vision.capture import SCREENSHOT_MAP_MAX_SIDE
+
+    rendered = state_context(
+        WorkingState(goal="read", screenshot_b64="cGF5bG9hZA=="),
+    )
+    assert f"{SCREENSHOT_MAP_MAX_SIDE}px" in rendered
+    assert "never zoom the browser" in rendered
