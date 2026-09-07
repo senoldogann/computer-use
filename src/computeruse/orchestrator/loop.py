@@ -233,7 +233,7 @@ MAX_FINISH_REJECTIONS: Final[int] = 2
 #: refusal, not the model's claim. Kept in the operator's language because it
 #: is a user-facing summary, like the browser fallback copy below.
 STALEMATE_RETROSPECTIVE: Final[str] = (
-    "Görev tamamlanamadı: ekran kanıtı doğrulanamadı ve auditor reddetti."
+    "Görev tamamlanamadı: tamamlanma kanıtı bağımsız olarak doğrulanamadı."
 )
 
 #: Consecutive target-app AX probe failures that declare the app frozen.
@@ -3223,18 +3223,16 @@ class OodaRunner:
     def _audit_completion(self, state: WorkingState, finish: Finish) -> str | None:
         """Challenge a success claim; return the rejection reason, or None.
 
-        A model that claims success is the least reliable witness to its own
-        success. Two gates apply, cheapest first: the run must have observable
-        perception at all, and — when an auditor is configured — a fresh,
-        narrowly-scoped re-read of the current screen must agree that the goal
-        is satisfied. A rejected claim is folded back as a normal recoverable
-        error, so the loop keeps working instead of ending on a fiction.
+        A configured completion checker is an independent verification boundary.
+        If it cannot answer, the actor's own success claim cannot substitute for
+        evidence. Verification outages and empty evidence are therefore bounded
+        recoverable rejections; after the existing rejection budget is exhausted,
+        the run closes as an honest unverified failure.
         """
         if self.sensor is None and self.window_probe is None and self.ax_probe is None:
-            # No perception at all: there is nothing to audit against, and
-            # inventing a rejection would trap the run. Production wiring
-            # always supplies probes (``Agent.run`` fails fast at startup when
-            # the sensor is unavailable), so this is the headless/test shape.
+            # Headless/scripted callers intentionally have no observable surface.
+            # Preserve that legacy shape: when there is nothing to verify and no
+            # production perception is wired, the model claim remains accepted.
             return None
         if self.vision_enabled and not state.screenshot_b64:
             raise RuntimeError(
@@ -3242,50 +3240,58 @@ class OodaRunner:
             )
         if self.completion_check is None:
             return None
+
         if self._rejected_finishes >= MAX_FINISH_REJECTIONS:
-            # The auditor has rejected earlier claims, but the agent may have acted
-            # and repaired the screen state before this attempt. Verify one last time:
-            # if the screen now genuinely satisfies the goal, accept it as verified.
-            # Otherwise, terminate as an honest unverified stalemate failure.
+            # One final verification attempt lets an actor that repaired the state
+            # after earlier rejections still finish normally.
             try:
                 verdict = self.completion_check(state, finish.summary)
             except Exception as exc:  # noqa: BLE001
                 self._forced_finish = True
-                LOGGER.warning("completion audit unavailable: %s", exc)
+                self._stalemate_rejected = True
+                LOGGER.warning(
+                    "completion audit unavailable after bounded retries: %s", exc
+                )
                 return None
-            if verdict.satisfied:
-                LOGGER.info("ooda completion audited (after recovery): %s", verdict.evidence)
+            evidence = verdict.evidence.strip()
+            if verdict.satisfied and evidence:
+                LOGGER.info("ooda completion audited (after recovery): %s", evidence)
                 return None
             self._forced_finish = True
             self._stalemate_rejected = True
             LOGGER.warning(
-                "completion claims rejected %d times; closing the run as unverified",
+                "completion claims remained unverifiable after %d rejections",
                 self._rejected_finishes,
             )
             return None
+
         try:
             verdict = self.completion_check(state, finish.summary)
-        except Exception as exc:  # noqa: BLE001 - the auditor must never kill a run
-            # The run continues — an unreachable auditor must not fail work that
-            # may well be finished. But it was *not* verified, and saying so is
-            # the whole point: the distill gate reads this flag, so leaving it
-            # unset let a provider outage turn every claimed success into a
-            # distilled skill. Measured: forced_finish=false with the auditor
-            # raising on every call. That is the memory poisoning P0-1 closed,
-            # reached by a second door.
-            self._forced_finish = True
+        except Exception as exc:  # noqa: BLE001 - verification failure is recoverable
+            self._rejected_finishes += 1
+            evidence = f"completion audit unavailable: {type(exc).__name__}: {exc}"
             LOGGER.warning("completion audit unavailable: %s", exc)
+            return (
+                "completion check could not verify this finish: "
+                f"{evidence} "
+                "The success claim is unverified. Continue only if another action can "
+                "produce observable evidence; otherwise emit finish with status "
+                "\"failed\" and explain the verification outage."
+            )
+
+        evidence = verdict.evidence.strip()
+        if verdict.satisfied and evidence:
+            LOGGER.info("ooda completion audited: %s", evidence)
             return None
-        if verdict.satisfied:
-            LOGGER.info("ooda completion audited: %s", verdict.evidence)
-            return None
+
         self._rejected_finishes += 1
+        reason = evidence or "completion auditor returned no evidence"
         return (
             "completion check rejected this finish: "
-            f"{verdict.evidence} "
-            "The goal is not yet observably satisfied on screen. Either continue "
-            "working toward it, or emit finish with status \"failed\" and explain "
-            "what blocked it."
+            f"{reason} "
+            "The goal is not yet independently verified. Either continue working "
+            "toward observable evidence, or emit finish with status \"failed\" and "
+            "explain what blocked verification."
         )
 
     def _finalize(

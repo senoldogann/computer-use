@@ -685,8 +685,8 @@ def test_accepted_completion_claim_ends_the_run() -> None:
     assert final.completed_steps == ("step_0:finish",)
 
 
-def test_broken_auditor_never_traps_a_finished_run() -> None:
-    """A checker that raises must not turn a completed task into a hung one."""
+def test_broken_auditor_fails_closed_without_hanging() -> None:
+    """A checker outage is bounded, but cannot verify a claimed success."""
     screen = FakeScreen()
 
     def provider(_state: WorkingState) -> AgentTurn:
@@ -703,7 +703,13 @@ def test_broken_auditor_never_traps_a_finished_run() -> None:
         max_steps=5,
     )
     final = runner.run(goal="rename")
-    assert final.completed_steps == ("step_0:finish",)
+    # Two rejected claims, then the existing bounded stalemate gate closes
+    # the third claim as an unverified failure instead of hanging forever.
+    assert final.completed_steps == ("step_2:finish",)
+    assert final.last_error is not None
+    assert "doğrulan" in final.last_error.casefold()
+    assert runner._forced_finish is True
+    assert runner._stalemate_rejected is True
 
 
 # --- Staleness and focus gates ----------------------------------------------

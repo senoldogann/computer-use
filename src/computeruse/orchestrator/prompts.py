@@ -1229,13 +1229,13 @@ def completion_prompt(state: WorkingState, claim: str, *, app: str) -> str:
 
 
 def parse_completion(raw: str) -> CompletionVerdict:
-    """Parse an auditor reply into a verdict (pure, with gate).
+    """Parse an auditor reply into a fully evidenced verdict.
 
-    A malformed reply raises :class:`InvalidDecisionError`. The caller treats
-    that as "the auditor could not answer" and accepts the finish rather than
-    blocking it: a broken checker must never trap a run that genuinely
-    completed. Refusing to *guess* a verdict here is what keeps that policy
-    decision in one place instead of buried in a parser default.
+    A completion verdict is a verification result, not a model opinion. Both
+    the boolean and a non-empty evidence string are therefore mandatory. A
+    malformed or unevidenced reply raises :class:`InvalidDecisionError`; the
+    loop treats that as a bounded verification failure and fails closed if the
+    independent checker never becomes available.
     """
     candidate = _first_json_object(raw.strip())
     if candidate is None:
@@ -1263,11 +1263,12 @@ def parse_completion(raw: str) -> CompletionVerdict:
             hint='"satisfied" must be exactly true or false',
         )
     evidence = typed.get("evidence")
-    return CompletionVerdict(
-        satisfied=satisfied,
-        evidence=evidence if isinstance(evidence, str) and evidence else "(no evidence given)",
-    )
-
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise InvalidDecisionError(
+            cause="'evidence' must be a non-empty string",
+            hint='"evidence" must state the independent observation supporting the verdict',
+        )
+    return CompletionVerdict(satisfied=satisfied, evidence=evidence.strip())
 
 def completion_auditor(
     model: Callable[..., str],
