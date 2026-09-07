@@ -8,8 +8,8 @@ permissions:
   contents: write
 
 jobs:
-  task2:
-    if: contains(github.event.head_commit.message, 'apply sovereign task2 fixed')
+  task3:
+    if: contains(github.event.head_commit.message, 'apply sovereign task3')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,76 +21,75 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Patch sovereign guard composition exactly
+      - name: Patch explicit sovereign CLI activation exactly
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path('src/computeruse/agent.py')
+          path = Path('src/computeruse/cli.py')
           text = path.read_text(encoding='utf-8')
 
-          old_import = (
-              "from computeruse.security.autonomy import (\n"
-              "    AutonomyLevel,\n"
-              "    PermissionDecision,\n"
-              "    Risk,\n"
-              "    classify_risk,\n"
-              ")\n"
+          level_block = (
+              "    parser.add_argument(\n"
+              "        \"--level\",\n"
+              "        type=int,\n"
+              "        choices=[0, 1, 2, 3],\n"
+              "        default=AutonomyLevel.FULL.value,\n"
+              "        help=\"Autonomy level 0-3 (default: 3 = full). Destructive actions still \"\n"
+              "        \"require explicit approval or a scoped grant, including with --yes.\",\n"
+              "    )\n"
           )
-          new_import = (
-              "from computeruse.security.autonomy import (\n"
-              "    AutonomyLevel,\n"
-              "    PermissionDecision,\n"
-              "    Risk,\n"
-              "    classify_risk,\n"
-              "    decide_permission,\n"
-              ")\n"
+          sovereign_block = level_block + (
+              "    parser.add_argument(\n"
+              "        \"--sovereign\",\n"
+              "        action=\"store_true\",\n"
+              "        help=\"Explicitly delegate destructive permission for this session. \"\n"
+              "        \"This selects Sovereign autonomy without exposing it through --level; \"\n"
+              "        \"kill-switch, budgets, verification, completion audit, trace and driver \"\n"
+              "        \"safety gates remain active.\",\n"
+              "    )\n"
           )
-          if text.count(old_import) != 1:
-              raise SystemExit('autonomy import marker not unique')
-          text = text.replace(old_import, new_import, 1)
+          if text.count(level_block) != 1:
+              raise SystemExit('level parser marker not unique')
+          text = text.replace(level_block, sovereign_block, 1)
 
-          old_guard = (
-              "        risk = classify_risk(turn, target_label=label)\n"
-              "        verdict = (\n"
-              "            authorize(turn, label)\n"
-              "            if authorize is not None and risk is Risk.DESTRUCTIVE\n"
-              "            else None\n"
-              "        )\n"
-              "        base = decide_with_grant(level, risk, verdict)\n"
+          parse_return = "    return parser.parse_args(argv)\n\n\ndef scripted_provider("
+          resolver = (
+              "    return parser.parse_args(argv)\n\n\n"
+              "def resolve_autonomy_level(args: argparse.Namespace) -> AutonomyLevel:\n"
+              "    \"\"\"Resolve the operator-selected autonomy mode.\n\n"
+              "    Sovereign is intentionally not part of the numeric --level surface: it\n"
+              "    requires the dedicated explicit switch so ordinary level selection cannot\n"
+              "    accidentally delegate destructive permission.\n"
+              "    \"\"\"\n"
+              "    if bool(getattr(args, \"sovereign\", False)):\n"
+              "        return AutonomyLevel.SOVEREIGN\n"
+              "    return AutonomyLevel(args.level)\n\n\n"
+              "def scripted_provider("
           )
-          new_guard = (
-              "        risk = classify_risk(turn, target_label=label)\n"
-              "        # Resolve base policy before consulting delegated authority.\n"
-              "        # Sovereign already permits destructive work by explicit session policy;\n"
-              "        # FULL/GUARDED consult grants only when confirmation is still required.\n"
-              "        base = decide_permission(level, risk)\n"
-              "        if (\n"
-              "            base is PermissionDecision.CONFIRM\n"
-              "            and risk is Risk.DESTRUCTIVE\n"
-              "            and authorize is not None\n"
-              "        ):\n"
-              "            base = decide_with_grant(level, risk, authorize(turn, label))\n"
-          )
-          if text.count(old_guard) != 1:
-              raise SystemExit('guard marker not unique')
-          text = text.replace(old_guard, new_guard, 1)
+          if text.count(parse_return) != 1:
+              raise SystemExit('parse return marker not unique')
+          text = text.replace(parse_return, resolver, 1)
+
+          old_config = "        autonomy_level=AutonomyLevel(args.level),\n"
+          new_config = "        autonomy_level=resolve_autonomy_level(args),\n"
+          if text.count(old_config) != 1:
+              raise SystemExit('AgentConfig autonomy marker not unique')
+          text = text.replace(old_config, new_config, 1)
 
           path.write_text(text, encoding='utf-8')
           PY
 
-      - name: Verify Task 2 GREEN and legacy permission paths
+      - name: Verify Task 3 GREEN
         run: |
-          uv run pytest -q \
-            tests/smoke/test_sovereign_mode.py \
-            tests/smoke/test_trust_mode_safety.py \
-            tests/smoke/test_grants.py \
-            tests/smoke/test_autonomy.py
+          uv run ruff check src/computeruse/cli.py tests/smoke/test_sovereign_mode.py
+          uv run pyright
+          uv run pytest -q tests/smoke/test_sovereign_mode.py tests/smoke/test_agent.py
 
-      - name: Commit verified Task 2
+      - name: Commit verified Task 3
         run: |
           git config user.name 'computer-use audit bot'
           git config user.email 'actions@users.noreply.github.com'
-          git add src/computeruse/agent.py
-          git commit -m 'refactor(security): isolate sovereign permission path'
+          git add src/computeruse/cli.py
+          git commit -m 'feat(cli): add explicit sovereign activation'
           git push origin HEAD:feat/sovereign-mode-core
