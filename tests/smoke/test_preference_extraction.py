@@ -22,20 +22,45 @@ def _extract(goal: str):
 
 
 @pytest.mark.parametrize(
-    ("goal", "expected_text"),
+    ("goal", "expected_text", "expected_key"),
     (
-        ("I prefer concise answers.", "I prefer concise answers"),
-        ("From now on use compact summaries.", "From now on use compact summaries"),
-        ("Always answer with short bullet points.", "Always answer with short bullet points"),
-        ("Tercihim kısa ve doğrudan cevaplar.", "Tercihim kısa ve doğrudan cevaplar"),
-        ("Kısa cevapları tercih ederim.", "Kısa cevapları tercih ederim"),
-        ("Bundan sonra kısa özetler kullan.", "Bundan sonra kısa özetler kullan"),
-        ("Her zaman önce doğrulama yap.", "Her zaman önce doğrulama yap"),
+        ("I prefer concise answers.", "I prefer concise answers", "response-style"),
+        (
+            "From now on use compact summaries.",
+            "From now on use compact summaries",
+            "summary-style",
+        ),
+        (
+            "Always answer with short bullet points.",
+            "Always answer with short bullet points",
+            "response-format",
+        ),
+        (
+            "Tercihim kısa ve doğrudan cevaplar.",
+            "Tercihim kısa ve doğrudan cevaplar",
+            "response-style",
+        ),
+        (
+            "Kısa cevapları tercih ederim.",
+            "Kısa cevapları tercih ederim",
+            "response-style",
+        ),
+        (
+            "Bundan sonra kısa özetler kullan.",
+            "Bundan sonra kısa özetler kullan",
+            "summary-style",
+        ),
+        (
+            "Her zaman önce doğrulama yap.",
+            "Her zaman önce doğrulama yap",
+            "verification-policy",
+        ),
     ),
 )
 def test_natural_durable_cues_create_explicit_general_evidence(
     goal: str,
     expected_text: str,
+    expected_key: str,
 ) -> None:
     evidence = _extract(goal)
 
@@ -45,7 +70,7 @@ def test_natural_durable_cues_create_explicit_general_evidence(
     assert item.source == "explicit"
     assert item.source_id == "run-extract-1"
     assert item.value == expected_text
-    assert item.key.startswith("instruction.")
+    assert item.key == expected_key
 
 
 def test_structured_english_preference_maps_key_directly() -> None:
@@ -80,6 +105,7 @@ def test_only_durable_clause_is_extracted_from_mixed_goal() -> None:
 
     assert len(evidence) == 1
     assert evidence[0].value == "From now on use compact summaries"
+    assert evidence[0].key == "summary-style"
 
 
 def test_long_natural_clause_is_bounded_to_240_characters() -> None:
@@ -105,3 +131,4 @@ def test_extraction_is_deterministic_and_deduplicates_equivalent_clauses() -> No
 
     assert len(evidence) == 1
     assert evidence[0].value == "I prefer concise answers"
+    assert evidence[0].key == "response-style"
