@@ -372,6 +372,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "require explicit approval or a scoped grant, including with --yes.",
     )
     parser.add_argument(
+        "--sovereign",
+        action="store_true",
+        help="Explicitly delegate destructive permission for this session. "
+        "This selects Sovereign autonomy without exposing it through --level; "
+        "kill-switch, budgets, verification, completion audit, trace and driver "
+        "safety gates remain active.",
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Trust mode: auto-approve non-destructive confirmations so routine "
@@ -496,6 +504,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "from for each step, as <trace-dir>/<run_id>/step-NNN.png.",
     )
     return parser.parse_args(argv)
+
+
+def resolve_autonomy_level(args: argparse.Namespace) -> AutonomyLevel:
+    """Resolve the operator-selected autonomy mode.
+
+    Sovereign is intentionally not part of the numeric --level surface: it
+    requires the dedicated explicit switch so ordinary level selection cannot
+    accidentally delegate destructive permission.
+    """
+    if bool(getattr(args, "sovereign", False)):
+        return AutonomyLevel.SOVEREIGN
+    return AutonomyLevel(args.level)
 
 
 def scripted_provider(goal: str) -> Callable[[WorkingState], AgentTurn]:
@@ -864,7 +884,7 @@ def build_config(
         provider=provider,
         socket_path=args.socket,
         store_dir=Path(args.store),
-        autonomy_level=AutonomyLevel(args.level),
+        autonomy_level=resolve_autonomy_level(args),
         confirm_handler=confirm_handler,
         auto_approve=trust_mode,
         enable_visual_verification=resolve_verify(args),
