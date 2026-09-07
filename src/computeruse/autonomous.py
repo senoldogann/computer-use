@@ -12,25 +12,23 @@ on afterwards:
 to whatever is frontmost, so an agent acting while its user types is not
 sharing the computer, it is corrupting whatever they were doing.
 
-*It proposes goals from its own memory, not from imagination.* A skill that has
-failed and never worked is a concrete, checkable thing to go and get right.
-"Do something useful" is not, and an agent asked to invent work from nothing
-will invent it from nothing.
+*It proposes goals from concrete evidence, not imagination.* A failed episode
+or a skill whose track record needs repair is specific, checkable work. "Do
+something useful" is not, and an agent asked to invent work from nothing will
+invent it from nothing.
 
 *It stops.* Every run carries the same wall-clock, token and spend ceilings a
 supervised one does, and the session itself has a run count. An unattended
 process without a bound is not autonomy, it is a leak.
 
-The permission guard is untouched: a destructive action still needs a human,
-which unattended means it does not happen. That is deliberate. Running while
-nobody is watching is exactly when the answer to "should I empty the trash?"
-must be no.
+The permission guard is untouched. The scheduler decides what is worth trying;
+it never decides whether an action may execute. FULL, Sovereign, grants,
+approvals and the runtime safety floor remain separate policy layers.
 """
 
 from __future__ import annotations
 
 import logging
-import random
 import time
 from collections.abc import Callable, Container
 from dataclasses import dataclass
@@ -39,6 +37,13 @@ from typing import Final
 from computeruse.memory.episodic import EpisodicStore
 from computeruse.orchestrator.budget import BudgetExceededError
 from computeruse.orchestrator.loop import KillSwitchTripped
+from computeruse.orchestrator.report import UsageRecord
+from computeruse.scheduler import (
+    GoalProposal,
+    estimate_expected_cost,
+    make_proposal,
+    rank_proposals,
+)
 from computeruse.skills.registry import SkillRegistry, is_demoted
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -67,20 +72,6 @@ class MachineActivity:
     cursor: tuple[float, float]
     frontmost: str
     idle_seconds: float | None = None
-
-
-@dataclass(frozen=True)
-class GoalProposal:
-    """A goal the agent chose for itself, and why (pure data).
-
-    The reason is carried because an unattended run has no one to ask what it
-    was thinking, and a log line that says only what it did is not enough to
-    judge whether it should have.
-    """
-
-    goal: str
-    app: str | None
-    reason: str
 
 
 def machine_is_idle(
@@ -117,75 +108,85 @@ def propose_goal(
     skills: SkillRegistry,
     episodes: EpisodicStore,
     *,
-    rng: random.Random,
+    usage: tuple[UsageRecord, ...],
     exclude: Container[str],
 ) -> GoalProposal | None:
-    """Choose something worth doing, from what memory says is unfinished.
+    """Rank grounded memory work and return the strongest candidate.
 
-    Ordered by how concrete the evidence is. A skill that has failed every time
-    it was mounted is a specific broken claim about how to do something, and
-    fixing it is checkable work. A failed episode is the next best thing: a
-    task that was attempted and lost. Only when neither exists does this fall
-    back to re-running a success, which is worth something — it is how a skill
-    that has been used once earns a second data point — but it is the weakest
-    of the three and is chosen last.
+    All eligible memory sources enter one candidate set. Source priority lives
+    in the scheduler's wide utility bands, while confidence and recorded cost
+    order peers inside those bands. Identical stores therefore produce the same
+    proposal without an ambient random choice.
 
-    ``exclude`` names goals decided against this session (parked questions,
-    already-worked operator orders). It filters the pools *before* the die is
-    cast: rejecting after ``rng.choice`` would throw away the legitimate
-    candidates left in the pool along with the excluded one.
+    ``exclude`` is applied before proposal construction. A parked or already
+    handled goal cannot win a score and then erase another legitimate candidate
+    merely because it happened to be considered first.
 
-    Returns ``None`` when memory has nothing to say. An agent with nothing
-    grounded to do should do nothing, not invent a task.
+    Returns ``None`` when memory has nothing grounded to say. An agent with no
+    evidence-backed work should do nothing, not invent a task.
     """
-    demoted = [
-        summary
-        for summary in skills.index()
-        if is_demoted(summary) and summary.description not in exclude
-    ]
-    if demoted:
-        target = rng.choice(demoted)
-        return GoalProposal(
-            goal=target.description,
-            app=target.app,
-            reason=(
-                f"skill {target.skill_id} has failed {target.uses} times and never "
-                "worked; retrying it is the only way to learn whether the recipe "
-                "is wrong or the screen was"
-            ),
+    candidates: list[GoalProposal] = []
+
+    for summary in skills.index():
+        if summary.description in exclude:
+            continue
+        expected_cost = estimate_expected_cost(summary.description, usage)
+        if is_demoted(summary):
+            candidates.append(
+                make_proposal(
+                    goal=summary.description,
+                    app=summary.app,
+                    source_type="skill_repair",
+                    source_id=summary.skill_id,
+                    confidence=min(1.0, summary.uses / 5.0),
+                    expected_cost=expected_cost,
+                    reason=(
+                        f"skill {summary.skill_id} has failed {summary.uses} times "
+                        "and never worked; retrying it tests whether the recipe "
+                        "or the observed screen was wrong"
+                    ),
+                )
+            )
+        elif summary.uses <= 1:
+            candidates.append(
+                make_proposal(
+                    goal=summary.description,
+                    app=summary.app,
+                    source_type="skill_validation",
+                    source_id=summary.skill_id,
+                    confidence=0.50 + 0.10 * min(summary.uses, 1),
+                    expected_cost=expected_cost,
+                    reason=(
+                        f"skill {summary.skill_id} has been used {summary.uses} "
+                        "time(s); another verified run adds evidence to its record"
+                    ),
+                )
+            )
+
+    for episode in episodes.episodes():
+        if (
+            episode.outcome != "failure"
+            or not episode.description
+            or episode.description in exclude
+        ):
+            continue
+        candidates.append(
+            make_proposal(
+                goal=episode.description,
+                app=episode.app,
+                source_type="episode_retry",
+                source_id=episode.episode_id,
+                confidence=0.75,
+                expected_cost=estimate_expected_cost(episode.description, usage),
+                reason=(
+                    f"episode {episode.episode_id} failed; retrying it is "
+                    "grounded work with a recorded failure to improve"
+                ),
+            )
         )
 
-    failures = [
-        episode
-        for episode in episodes.episodes()
-        if episode.outcome == "failure"
-        and episode.description
-        and episode.description not in exclude
-    ]
-    if failures:
-        target = rng.choice(failures)
-        return GoalProposal(
-            goal=target.description,
-            app=target.app,
-            reason=f"episode {target.episode_id} failed and was never retried",
-        )
-
-    unproven = [
-        summary
-        for summary in skills.index()
-        if summary.uses <= 1 and summary.description not in exclude
-    ]
-    if unproven:
-        target = rng.choice(unproven)
-        return GoalProposal(
-            goal=target.description,
-            app=target.app,
-            reason=(
-                f"skill {target.skill_id} has been used {target.uses} time(s); "
-                "another run is what turns it from a guess into a record"
-            ),
-        )
-    return None
+    ranked = rank_proposals(tuple(candidates))
+    return ranked[0] if ranked else None
 
 
 def wait_for_idle(
