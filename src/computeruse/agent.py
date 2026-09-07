@@ -83,6 +83,9 @@ from computeruse.vision import AXElement
 from computeruse.vision.ax import (
     asks_for_a_credential,
     content_digest,
+    detect_dialogs,
+    dialogue_element_summaries,
+    dialogue_notes,
     interactive_summaries,
     open_tabs_from_tree,
     recognized_summaries,
@@ -795,6 +798,21 @@ class Agent:
                     max_count=AX_MAX_ELEMENTS,
                     viewport=viewport,
                 )
+                # Consent walls and sign-in sheets stop a task dead when the
+                # model never sees them. Detect modal containers in the tree
+                # and put their controls at the FRONT of the grounding list:
+                # the dialog's buttons become the first numbered marks, so a
+                # blocked agent resolves the overlay instead of clicking
+                # through it at page content. Dedupe by rendered line — the
+                # same element can appear both inside the dialog subtree and
+                # in the regular web-first walk.
+                dialogs = detect_dialogs(tree, viewport=viewport)
+                dialog_lines = dialogue_element_summaries(dialogs)
+                if dialog_lines:
+                    seen: set[str] = set(dialog_lines)
+                    summaries = dialog_lines + tuple(
+                        line for line in summaries if line not in seen
+                    )
                 if len(summaries) >= AX_MAX_ELEMENTS:
                     # The DFS budget was exhausted: page content deeper in the
                     # tree is absent from this list. Say so explicitly so the
@@ -817,6 +835,7 @@ class Agent:
                     # password box that fell off the end of it is still a
                     # password box on the screen.
                     asks_for_credential=asks_for_a_credential(tree),
+                    dialog_notes=dialogue_notes(dialogs),
                 )
 
             def focused_text_value_probe() -> str | None:

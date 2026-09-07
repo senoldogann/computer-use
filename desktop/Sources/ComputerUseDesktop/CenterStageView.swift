@@ -43,7 +43,7 @@ struct CenterStageView: View {
 
     /// Single top row shared by the whole window chrome:
     /// traffic-light clearance & left-sidebar toggle on the left, breadcrumbs in the middle,
-    /// and right-panel toggle on the far right.
+    /// draggable empty space, and right-panel toggle on the far right.
     private var topBar: some View {
         HStack(spacing: 8) {
             if !panelsStore.isSidebarVisible {
@@ -63,26 +63,42 @@ struct CenterStageView: View {
                 .frame(width: 28, height: 28)
             }
 
-            Text(Theme.workspaceName)
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(Theme.textMuted)
+            HStack(spacing: 8) {
+                Text(Theme.workspaceName)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
 
-            Image(systemName: "chevron.right")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Theme.textMuted.opacity(0.6))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted.opacity(0.6))
 
-            Text(truncatedTaskTitle)
-                .font(.system(size: 12.5))
-                .foregroundStyle(Theme.textPrimary)
-                .fontWeight(.medium)
-                .lineLimit(1)
+                Text(truncatedTaskTitle)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Theme.textPrimary)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+            }
 
-            Spacer()
+            // Draggable space across the center of the top bar: empty area moves window,
+            // buttons stay completely separate and receive all mouse events.
+            TitleBarDragSurface()
+                .frame(maxWidth: .infinity, maxHeight: Theme.titleRowHeight)
 
             if runStore.isRunning && runStore.runningThreadID == threadsStore.selectedThreadID {
                 Text("Level \(state.autonomyLevel.cliLevel) · Trust \(state.trustMode ? "ON" : "OFF") · Verify \(state.verifyEnabled ? "ON" : "OFF")")
                     .font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.accent)
                     .padding(.horizontal, 7).padding(.vertical, 3).background(Theme.cardElevated).clipShape(Capsule())
+            }
+
+            // Console ⋯ menu — top-right of the window, never inside the chat
+            if threadsStore.activeThread?.entries.contains(where: { $0.kind == .console }) == true {
+                Theme.borderOverlay
+                    .frame(width: 1, height: 16)
+
+                ConsoleMenuButton(
+                    threadsStore: threadsStore,
+                    entries: threadsStore.activeThread?.entries ?? []
+                )
             }
 
             // Right panel toggle (live viewport)
@@ -101,7 +117,6 @@ struct CenterStageView: View {
         .padding(.horizontal, 12)
         .frame(height: Theme.titleRowHeight)
         .padding(.top, Theme.titleRowTopPadding)
-        .background(Color.clear)
     }
 
     private var emptyState: some View {
@@ -186,9 +201,12 @@ struct CenterStageView: View {
                 }
             }
 
-            // Glass composer docked at the bottom of the active task
+            // Glass composer docked at the bottom of the active task — same
+            // centered column and side margins as the messages above it.
             ComposerView(state: state, compact: true)
-                .padding(.horizontal, 24)
+                .frame(maxWidth: 780)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 28)
                 .padding(.bottom, 16)
         }
     }

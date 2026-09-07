@@ -1,132 +1,120 @@
 import AppKit
+import ObjectiveC.runtime
 import SwiftUI
 
-/// Standardized native title bar icon button.
-/// Subclasses NSButton with `mouseDownCanMoveWindow = false` to guarantee that clicks
-/// inside the macOS top titlebar area (y < 28pt) are never captured by window-dragging.
-struct NativeTitleBarButton: NSViewRepresentable {
+/// Ensures custom titlebar clicks reach SwiftUI views beneath NSTitlebarContainerView.
+/// By default in macOS, NSTitlebarContainerView swallows hit-tests across the top 28-30pt
+/// to handle system window dragging, which prevents clicks from reaching SwiftUI buttons.
+enum TitlebarHitTestHelper {
+    private static var isSwizzled = false
+
+    static func installTitlebarHitTestPassThrough() {
+        guard !isSwizzled else { return }
+        guard let containerClass = NSClassFromString("NSTitlebarContainerView") else { return }
+
+        let originalSelector = #selector(NSView.hitTest(_:))
+        let swizzledSelector = #selector(NSView.cu_titlebarHitTest(_:))
+
+        guard let originalMethod = class_getInstanceMethod(containerClass, originalSelector),
+              let swizzledMethod = class_getInstanceMethod(NSView.self, swizzledSelector) else {
+            return
+        }
+
+        method_exchangeImplementations(originalMethod, swizzledMethod)
+        isSwizzled = true
+    }
+}
+
+private extension NSView {
+    @objc func cu_titlebarHitTest(_ point: NSPoint) -> NSView? {
+        let hitView = self.cu_titlebarHitTest(point)
+        guard let hit = hitView else { return nil }
+
+        // Keep standard traffic lights (close, minimize, zoom) clickable
+        if hit is NSButton || hit.superview is NSButton {
+            return hit
+        }
+
+        let className = NSStringFromClass(type(of: hit))
+        if className.contains("Widget") || className.contains("Button") {
+            return hit
+        }
+
+        // Return nil on the titlebar container or background view so hit testing
+        // falls through to the underlying contentView hosting SwiftUI.
+        if className == "NSTitlebarContainerView" || className == "NSTitlebarView" {
+            return nil
+        }
+
+        return hit
+    }
+}
+
+/// Title-bar toggle button as a pure SwiftUI Button.
+///
+/// SwiftUI buttons hit-test exactly where they draw, avoiding NSViewRepresentable
+/// frame desync issues during animated panel transitions.
+struct NativeTitleBarButton: View {
     let iconName: String
     let isActive: Bool
     let tooltip: String
     let action: () -> Void
 
-    func makeNSView(context: Context) -> TitleBarNSButton {
-        let button = TitleBarNSButton(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
-        button.onClick = action
-        button.toolTip = tooltip
-        button.isActive = isActive
-        button.setIcon(name: iconName)
-        return button
-    }
+    @State private var isHovered = false
 
-    func updateNSView(_ button: TitleBarNSButton, context: Context) {
-        button.onClick = action
-        button.toolTip = tooltip
-        button.isActive = isActive
-        button.setIcon(name: iconName)
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: iconName)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(
+                    isActive || isHovered ? Theme.textPrimary : Theme.textSecondary
+                )
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(
+                            isHovered
+                                ? Theme.cardElevated
+                                : (isActive ? Color.white.opacity(0.08) : Color.clear)
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(
+                            isHovered || isActive ? Theme.borderOverlay : Color.clear,
+                            lineWidth: 1
+                        )
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHand()
+        .onHover { isHovered = $0 }
+        .help(tooltip)
     }
 }
 
-final class TitleBarNSButton: NSButton {
-    var isActive: Bool = false {
-        didSet { updateAppearance() }
-    }
-    var onClick: (() -> Void)?
-    private var isHovered = false
-    private var isPressed = false
-    private var trackingArea: NSTrackingArea?
-
-    override var mouseDownCanMoveWindow: Bool { false }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
+/// Draggable surface for custom titlebar areas:
+/// Clicking and dragging moves the window via `performDrag(with:)`.
+/// Double-clicking toggles window zoom (standard macOS behavior).
+/// Controls sitting alongside this view receive their mouse events normally.
+struct TitleBarDragSurface: NSViewRepresentable {
+    func makeNSView(context: Context) -> DragSurfaceView {
+        let view = DragSurfaceView(frame: .zero)
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        return view
     }
 
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
+    func updateNSView(_ nsView: DragSurfaceView, context: Context) {}
+}
 
-    private func setup() {
-        bezelStyle = .regularSquare
-        isBordered = false
-        title = ""
-        imagePosition = .imageOnly
-        imageScaling = .scaleProportionallyDown
-        wantsLayer = true
-        focusRingType = .none
-        layer?.cornerRadius = 6
-        layer?.masksToBounds = true
-        layer?.borderWidth = 1
-        updateAppearance()
-    }
-
-    func setIcon(name: String) {
-        if let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-            self.image = img.withSymbolConfiguration(config)
-        }
-    }
-
-    func updateAppearance() {
-        if isHovered || isPressed {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-            layer?.borderColor = NSColor(Theme.color97948E).withAlphaComponent(0.35).cgColor
-            contentTintColor = NSColor(Theme.colorF5F4F2)
-        } else {
-            // Idle state: absolutely NO background color and NO border
-            layer?.backgroundColor = NSColor.clear.cgColor
-            layer?.borderColor = NSColor.clear.cgColor
-            contentTintColor = NSColor(Theme.colorAAA8A3)
-        }
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        self.trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        isHovered = true
-        updateAppearance()
-        NSCursor.pointingHand.set()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        isHovered = false
-        isPressed = false
-        updateAppearance()
-        NSCursor.arrow.set()
-    }
-
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
+final class DragSurfaceView: NSView {
     override func mouseDown(with event: NSEvent) {
-        isPressed = true
-        updateAppearance()
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        isPressed = false
-        updateAppearance()
-        let location = convert(event.locationInWindow, from: nil)
-        if bounds.contains(location) {
-            onClick?()
+        if event.clickCount == 2 {
+            window?.zoom(nil)
+        } else {
+            window?.performDrag(with: event)
         }
     }
 }
@@ -141,7 +129,8 @@ struct CosmicSidebarHeader: View {
             Spacer()
                 .frame(width: Theme.trafficLightClearance)
 
-            Spacer()
+            TitleBarDragSurface()
+                .frame(maxWidth: .infinity, maxHeight: Theme.titleRowHeight)
 
             NativeTitleBarButton(
                 iconName: "sidebar.left",

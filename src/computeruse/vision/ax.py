@@ -19,6 +19,7 @@ top-left, Y grows down), so an element's rect feeds directly into
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Final
 
 from pydantic import BaseModel
@@ -606,3 +607,289 @@ def open_tabs_from_tree(root: AXElement) -> tuple[str, ...]:
 
     walk(root)
     return tuple(tabs)
+
+
+# ---------------------------------------------------------------------------
+# Popup / consent dialog detection
+# ---------------------------------------------------------------------------
+#
+# A consent banner, cookie wall or sign-in sheet stops a task dead: the model
+# sees the page behind it, plans a click on a link the dialog covers, and the
+# click lands on the overlay instead — then the recovery ladder calls it a
+# miss and the run spends its budget re-aiming at an obstacle it never named.
+# These helpers make the overlay *visible to the model*: they find modal
+# containers in the AX tree, surface their controls as the FIRST numbered
+# marks in the grounding list (so they always survive the element budget),
+# and annotate them in the prompt so the agent knows to resolve them first.
+
+
+@dataclass(frozen=True)
+class Dialogue:
+    """One detected modal container and the controls it offers (pure data).
+
+    ``kind`` is the container's AX role for native dialogs (``Sheet``,
+    ``Dialog``, ``Popover``) or ``Overlay`` for keyword-gated web overlays.
+    ``label`` is the container's own title when it has one, else the first
+    text found inside it — the fragment the prompt uses to name the dialog.
+    ``elements`` are the actionable descendants (buttons, links, checkboxes)
+    with real titles, ordered by tree traversal, each culled to the viewport.
+    """
+
+    kind: str
+    label: str
+    elements: tuple[AXElement, ...]
+
+
+#: Roles that are modal containers by construction on macOS. A Sheet, Dialog
+#: or Popover blocks its app until answered, so any actionable child inside
+#: one is a control the agent may need to press — no keyword gate needed.
+DIALOG_CONTAINER_ROLES: Final[frozenset[str]] = frozenset(
+    {"Sheet", "Dialog", "Popover"}
+)
+
+#: Subroles that also name a modal container. Some apps expose a dialog as a
+#: Window or Group with a dialog-ish subrole rather than a dedicated role;
+#: matching the subrole catches those without trusting the tree to always
+#: pick the same spelling (the driver strips the ``AX`` prefix, so these are
+#: ``Dialog``/``Sheet``/``Popover``).
+DIALOG_CONTAINER_SUBROLES: Final[frozenset[str]] = frozenset(
+    {"Dialog", "Sheet", "Popover"}
+)
+
+#: Container roles admitted to the *web-overlay* path. Web consent dialogs
+#: are plain page groups — the modal web has no dedicated role — so these
+#: are gated by content keywords (see below) instead of by role.
+WEB_OVERLAY_ROLES: Final[frozenset[str]] = frozenset({"Group", "Section"})
+
+#: Consent/privacy context terms that must appear somewhere inside a web
+#: overlay's subtree for it to count as a consent-style dialog. Matched
+#: across languages — a Turkish page says "çerez", an English one "cookie"
+#: — the same way the capability grants match verb families across languages
+#: (Law 5.1), so a consent wall can never dodge detection by speaking Turkish.
+CONSENT_CONTEXT_KEYWORDS: Final[tuple[str, ...]] = (
+    "consent",
+    "cookie",
+    "cerez",
+    "çerez",
+    "kabul",
+    "kvkk",
+    "gizlilik",
+    "privacy",
+    "oturum",
+    "login",
+    "sign in",
+    "giriş",
+    "giris",
+    "kişisel",
+    "kisisel",
+    "verilerinizin",
+    "izin",
+    "onay",
+)
+
+#: Decision terms that must appear on at least one actionable child of a web
+#: overlay for it to count. "Kabul Et" and "Reddet" are the common Turkish
+#: pair, "Consent" / "Do not consent" the English one, "Şenol olarak devam
+#: et" the sign-in sheet — the gate is deliberately the *pair* of context +
+#: decision keywords, so an ordinary page section that merely mentions
+#: cookies next to an unrelated button is never mistaken for a modal.
+WEB_DECISION_KEYWORDS: Final[tuple[str, ...]] = (
+    "accept",
+    "consent",
+    "reject",
+    "allow",
+    "kabul",
+    "reddet",
+    "onayla",
+    "manage",
+    "ayarlar",
+    "devam",
+    "continue",
+    "sign in",
+    "giriş",
+    "giris",
+    "close",
+    "kapat",
+    "dismiss",
+    "tamam",
+    "ok",
+)
+
+
+#: Cap on the actionable controls collected per dialogue. A settings sheet
+#: can carry a dozen buttons, but the model only needs the first handful to
+#: understand and resolve the dialog — the rest compete with the page for
+#: the element budget (Law 4.3) without adding a decision.
+DIALOGUE_MAX_ELEMENTS: Final[int] = 8
+
+
+def _container_kind(node: AXElement) -> str | None:
+    """The dialogue kind a node represents, or None (pure)."""
+    if node.role in DIALOG_CONTAINER_ROLES:
+        return node.role
+    if (node.subrole or "") in DIALOG_CONTAINER_SUBROLES:
+        return node.subrole
+    if node.role in WEB_OVERLAY_ROLES:
+        return "Overlay"
+    return None
+
+
+def _title_has_keyword(element: AXElement, keywords: tuple[str, ...]) -> bool:
+    """Whether an element's title contains any lowercase keyword (pure)."""
+    title = (element.title or "").lower()
+    return any(keyword in title for keyword in keywords)
+
+
+def _subtree_mentions_consent(node: AXElement) -> bool:
+    """Whether any text in the subtree names a consent/privacy concern (pure).
+
+    Short-circuits on the first hit and never builds the subtree text into
+    one string, so gating a page full of ordinary groups stays cheap.
+    """
+    def walk(current: AXElement) -> bool:
+        for text in (current.title, current.value):
+            if not text:
+                continue
+            lowered = text.lower()
+            if any(keyword in lowered for keyword in CONSENT_CONTEXT_KEYWORDS):
+                return True
+        return any(walk(child) for child in current.children)
+
+    return walk(node)
+
+
+def _collect_actionable(
+    node: AXElement, viewport: Rect | None, *, max_elements: int
+) -> tuple[AXElement, ...]:
+    """Actionable descendants of a container, culled to the viewport (pure)."""
+    collected: list[AXElement] = []
+
+    def walk(current: AXElement) -> None:
+        if len(collected) >= max_elements:
+            return
+        if (
+            current.role in INTERACTIVE_ROLES
+            and (current.title or current.value)
+            and is_actionable(current, viewport)
+        ):
+            collected.append(current)
+        for child in current.children:
+            walk(child)
+
+    walk(node)
+    return tuple(collected)
+
+
+def _first_text(node: AXElement) -> str:
+    """The first title or value found in a subtree (pure)."""
+    def walk(current: AXElement) -> str:
+        if current.title:
+            return current.title
+        if current.value:
+            return current.value
+        for child in current.children:
+            found = walk(child)
+            if found:
+                return found
+        return ""
+
+    return walk(node)
+
+
+def detect_dialogs(
+    root: AXElement, *, viewport: Rect | None = None, max_elements: int = DIALOGUE_MAX_ELEMENTS
+) -> tuple[Dialogue, ...]:
+    """Find modal / consent-style containers in an AX tree (pure).
+
+    Two tiers, matching how macOS and the web differ:
+
+    * **Native containers** — ``Sheet``, ``Dialog``, ``Popover`` roles, or any
+      node whose subrole names one — are modal by construction. Any actionable
+      child inside one is reported; no keyword evidence required.
+    * **Web overlays** — plain ``Group``/``Section`` nodes inside a page — are
+      reported only when their subtree mentions a consent/privacy concern
+      *and* at least one of their controls carries a decision word. The pair
+      gate keeps an ordinary page section that mentions cookies next to an
+      unrelated button from reading as a modal.
+
+    Containers nested inside a reported dialogue are skipped (their controls
+    are already part of the outer report), while sibling dialogues — a sign-in
+    sheet *and* a cookie wall on the same page — are each reported, which is
+    exactly the multi-overlay case observed in the field.
+
+    The container's own title, or the first text in it, becomes the label the
+    prompt names the dialog by. Deterministic DFS order throughout.
+    """
+    found: list[Dialogue] = []
+
+    def walk(node: AXElement, inside_dialogue: bool) -> None:
+        kind = _container_kind(node)
+        if kind is not None:
+            elements = _collect_actionable(node, viewport, max_elements=max_elements)
+            if elements and not inside_dialogue:
+                if kind == "Overlay" and not (
+                    _subtree_mentions_consent(node)
+                    and any(
+                        _title_has_keyword(element, WEB_DECISION_KEYWORDS)
+                        for element in elements
+                    )
+                ):
+                    # An ordinary page section wearing a dialog-ish shape:
+                    # not a modal — descend and keep looking.
+                    pass
+                else:
+                    label = node.title or node.value or ""
+                    if not label:
+                        label = _first_text(node)
+                    found.append(
+                        Dialogue(
+                            kind=kind,
+                            label=label[:120],
+                            elements=elements,
+                        )
+                    )
+                    for child in node.children:
+                        walk(child, inside_dialogue=True)
+                    return
+        for child in node.children:
+            walk(child, inside_dialogue)
+
+    walk(root, False)
+    return tuple(found)
+
+
+def dialogue_element_summaries(dialogs: tuple[Dialogue, ...]) -> tuple[str, ...]:
+    """Grounding lines for every control a detected dialog offers (pure).
+
+    Same format as :func:`element_summary`, so these lines prepend cleanly to
+    the interactive list and inherit the whole downstream pipeline: display
+    culling, the image-space rewrite, mark numbering and the click resolution.
+    Prepending is what makes the dialog's controls the FIRST numbered marks —
+    the easiest clicks in the whole list, exactly where a blocked agent needs
+    them.
+    """
+    return tuple(
+        element_summary(element)
+        for dialogue in dialogs
+        for element in dialogue.elements
+    )
+
+
+def dialogue_notes(dialogs: tuple[Dialogue, ...], *, max_buttons: int = 4) -> tuple[str, ...]:
+    """One prompt line per detected dialog, naming it and its controls (pure).
+
+    e.g. ``Sheet "Save changes?" — controls: Save, Don't Save`` or
+    ``Overlay "Webtekno.com asks for your consent…" — controls: Do not
+    consent, Consent, Manage options``. The label and the control titles are
+    page/app text and must stay inside the prompt's observed-data framing
+    (they are rendered through :mod:`computeruse.orchestrator.untrusted`),
+    never concatenated as instructions.
+    """
+    notes: list[str] = []
+    for dialogue in dialogs:
+        labels = [element.title or "(untitled)" for element in dialogue.elements]
+        if len(labels) > max_buttons:
+            labels = labels[:max_buttons] + ["…"]
+        label = dialogue.label or dialogue.kind
+        notes.append(f'{dialogue.kind} "{label}" — controls: {", ".join(labels)}')
+    return tuple(notes)

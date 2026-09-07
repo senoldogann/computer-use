@@ -52,13 +52,6 @@ struct TimelineView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // The console toolbar only appears once there is console output to
-            // manage; an empty conversation starts with the first message at
-            // the top instead of a row of buttons.
-            if entries.contains(where: { $0.kind == .console }) {
-                consoleToolbar
-            }
-
             ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
                 let isSubsequent = entry.kind == .userMessage && index > 0
                 TimelineRow(
@@ -71,41 +64,12 @@ struct TimelineView: View {
                 .id("entry-\(entry.id)")
             }
 
-            if let telemetry = threadsStore.activeThread?.telemetry {
-                Text(telemetry.label).font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.textSecondary)
-            }
             if isRunning {
                 progressLine
             } else if !entries.isEmpty && entries.contains(where: { $0.kind != .userMessage }) {
-                summaryLine
-                finishedFooterLine
+                runSummaryCard
             }
         }
-    }
-
-    private var consoleToolbar: some View {
-        HStack(spacing: 10) {
-            Button(threadsStore.hideConsole ? "Show console" : "Hide console") {
-                threadsStore.hideConsole.toggle()
-            }
-            TextField("Filter console", text: $threadsStore.consoleFilter)
-                .textFieldStyle(.plain)
-                .frame(maxWidth: 160)
-            Button("Copy log") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entries.filter { $0.kind == .console }.map(\.detail).joined(separator: "\n"), forType: .string)
-            }
-            Button("First error") {
-                threadsStore.hideConsole = false
-                threadsStore.consoleFilter = ""
-                threadsStore.scrollTargetID = entries.first(where: \.isFailure)?.id
-            }
-            .disabled(!entries.contains(where: \.isFailure))
-        }
-        .font(.system(size: 10))
-        .foregroundStyle(Theme.textSecondary)
-        .buttonStyle(.plain)
-        .hoverPointer(radius: 5)
     }
 
     // MARK: - Live Progress Line
@@ -130,20 +94,55 @@ struct TimelineView: View {
         .padding(.leading, 6)
     }
 
-    // MARK: - Summary Line
+    // MARK: - Run Summary Card
 
-    private var summaryLine: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "wrench.and.screwdriver")
-                .font(.system(size: 11))
+    /// One structured block shown when the run finishes: what it did (tools /
+    /// steps / duration / errors), what it cost (tokens · calls · cost) and
+    /// when it finished — with the single copy action.
+    private var runSummaryCard: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(Theme.success)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(summaryText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textPrimary)
+
+                if let telemetry = threadsStore.activeThread?.telemetry {
+                    Text(telemetry.label)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Text(finishTimeString)
+                .font(.system(size: 10.5, design: .monospaced))
                 .foregroundStyle(Theme.textMuted.opacity(0.85))
-            Text(summaryText)
-            Spacer(minLength: 0)
+
+            Button {
+                copyAllTranscript()
+            } label: {
+                Image(systemName: isOutputCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11))
+                    .foregroundStyle(isOutputCopied ? Theme.success : Theme.textMuted.opacity(0.85))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .hoverPointer(radius: 4)
+            .help("Copy entire response to clipboard")
         }
-        .font(.system(size: 11.5))
-        .foregroundStyle(Theme.textMuted.opacity(0.85))
-        .padding(.vertical, 2)
-        .padding(.leading, 6)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Theme.card)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.borderOverlay, lineWidth: 1)
+        )
     }
 
     private var summaryText: String {
@@ -152,47 +151,10 @@ struct TimelineView: View {
         if errorCount > 0 {
             text += ", \(errorCount) errors"
         }
-        return text
-    }
-
-    // MARK: - Finished Footer Line (Date, Copy, Steps, Duration)
-
-    private var finishedFooterLine: some View {
-        HStack(spacing: 7) {
-            Text(finishTimeString)
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textMuted.opacity(0.85))
-
-            Button {
-                copyAllTranscript()
-            } label: {
-                Image(systemName: isOutputCopied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(isOutputCopied ? Theme.success : Theme.textMuted.opacity(0.85))
-                    .frame(width: 20, height: 20)
-            }
-            .buttonStyle(.plain)
-            .hoverPointer(radius: 4)
-            .help("Copy entire response to clipboard")
-
-            Text("·")
-                .foregroundStyle(Theme.textMuted.opacity(0.4))
-
-            Text("\(actionCount) actions · \(commandCount) steps")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textMuted.opacity(0.85))
-
-            Text("·")
-                .foregroundStyle(Theme.textMuted.opacity(0.4))
-
-            Text(elapsedString.isEmpty ? "—" : elapsedString)
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textMuted.opacity(0.85))
-
-            Spacer(minLength: 0)
+        if !elapsedString.isEmpty {
+            text += " · \(elapsedString)"
         }
-        .padding(.top, 4)
-        .padding(.leading, 6)
+        return text
     }
 
     private var finishTimeString: String {
@@ -224,6 +186,69 @@ struct TimelineView: View {
         isOutputCopied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
             isOutputCopied = false
+        }
+    }
+}
+
+// MARK: - Console Menu (top-right of the window, outside the chat)
+
+/// Top-bar "⋯" menu for console management: hide/show, filter field, copy log
+/// and jump-to-first-error. Rendered only when the active thread has console
+/// output (see CenterStageView.topBar).
+struct ConsoleMenuButton: View {
+    @ObservedObject var threadsStore: ThreadsStore
+    let entries: [TimelineEntry]
+    @State private var showFilter: Bool = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if showFilter {
+                TextField("Filter console", text: $threadsStore.consoleFilter)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 130)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Theme.card)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(Theme.borderOverlay, lineWidth: 1)
+                    )
+            }
+
+            Menu {
+                Button(threadsStore.hideConsole ? "Show Console" : "Hide Console") {
+                    threadsStore.hideConsole.toggle()
+                }
+                Button(showFilter ? "Hide Filter" : "Filter Console…") {
+                    showFilter.toggle()
+                }
+                Button("Copy Log") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        entries.filter { $0.kind == .console }.map(\.detail).joined(separator: "\n"),
+                        forType: .string
+                    )
+                }
+                Button("First Error") {
+                    threadsStore.hideConsole = false
+                    threadsStore.consoleFilter = ""
+                    threadsStore.scrollTargetID = entries.first(where: \.isFailure)?.id
+                }
+                .disabled(!entries.contains(where: \.isFailure))
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 26, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Console options")
         }
     }
 }
@@ -272,17 +297,7 @@ private struct TimelineRow: View {
             case .plan:
                 PlanChecklistView(state: state, entry: entry)
             case .console:
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Text(entry.createdAt, format: .dateTime.hour().minute().second())
-                        Spacer()
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(entry.detail, forType: .string)
-                        }.buttonStyle(.plain).hoverPointer(radius: 4)
-                    }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.textMuted)
-                    StepLineView(threadsStore: threadsStore, entry: entry, isLiveLast: isLiveLast)
-                }
+                StepLineView(threadsStore: threadsStore, entry: entry, isLiveLast: isLiveLast)
             case .thinking, .action:
                 StepLineView(
                     threadsStore: threadsStore,
@@ -299,8 +314,6 @@ private struct TimelineRow: View {
 private struct UserMessageBubble: View {
     let text: String
     let createdAt: Date
-    @State private var isHovered = false
-    @State private var isCopied = false
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
@@ -320,35 +333,13 @@ private struct UserMessageBubble: View {
                     )
             }
 
-            HStack(spacing: 6) {
-                Text(formatTime(createdAt))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Theme.textMuted.opacity(0.55))
-
-                Group {
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                        isCopied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                            isCopied = false
-                        }
-                    } label: {
-                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11))
-                            .foregroundStyle(isCopied ? Theme.success : (isHovered ? Theme.textPrimary : Theme.textMuted.opacity(0.6)))
-                            .frame(width: 22, height: 22)
-                            .background(isHovered ? Theme.cardElevated : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .hoverPointer(radius: 4)
-                    .help("Copy message")
-                }
-            }
-            .padding(.trailing, 4)
+            // One copy action lives in the finished footer; per-message copy
+            // buttons only add noise.
+            Text(formatTime(createdAt))
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.textMuted.opacity(0.55))
+                .padding(.trailing, 4)
         }
-        .onHover { isHovered = $0 }
     }
 
     private func formatTime(_ date: Date) -> String {
