@@ -51,6 +51,42 @@ def test_goal_proposal_carries_auditable_provenance() -> None:
     assert proposal.reason == "episode episode-42 failed"
 
 
+def test_legacy_inbox_constructor_recovers_typed_provenance() -> None:
+    proposal = GoalProposal(
+        goal="operator task",
+        app="Finder",
+        reason="task file 'night shift.md' claimed from watched folder /tmp/inbox",
+    )
+
+    assert proposal.source_type == "operator_inbox"
+    assert proposal.source_id == "night shift.md"
+    assert proposal.confidence == 1.0
+    assert proposal.expected_cost is None
+    assert proposal.utility_score >= 500.0
+
+
+def test_legacy_mission_constructor_recovers_typed_provenance() -> None:
+    proposal = GoalProposal(
+        goal="finish export",
+        app="Finder",
+        reason=(
+            "mission mission-42 was started and never finished "
+            "(2 attempt(s) so far)"
+        ),
+    )
+
+    assert proposal.source_type == "mission_resume"
+    assert proposal.source_id == "mission-42"
+    assert proposal.confidence == pytest.approx(0.6)
+    assert proposal.expected_cost is None
+    assert 400.0 <= proposal.utility_score < 500.0
+
+
+def test_unknown_legacy_constructor_fails_closed() -> None:
+    with pytest.raises(ValueError, match="explicit provenance"):
+        GoalProposal(goal="x", app=None, reason="some unstructured source")
+
+
 @pytest.mark.parametrize("confidence", [-0.01, 1.01])
 def test_make_proposal_rejects_confidence_outside_unit_interval(
     confidence: float,
