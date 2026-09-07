@@ -337,15 +337,15 @@ def active_preferences(
 def _natural_clause_is_durable(clause: str) -> bool:
     """Recognize only explicit durable-language cues, not generic task prose."""
     lowered = clause.casefold()
-    return (
-        lowered.startswith("i prefer ")
-        or lowered.startswith("always ")
-        or lowered.startswith("from now on ")
-        or lowered.startswith("tercihim ")
-        or " tercih ederim" in lowered
-        or lowered.startswith("her zaman ")
-        or lowered.startswith("bundan sonra ")
+    prefixes = (
+        "i prefer ",
+        "always ",
+        "from now on ",
+        "tercihim ",
+        "her zaman ",
+        "bundan sonra ",
     )
+    return lowered.startswith(prefixes) or " tercih ederim" in lowered
 
 
 def _instruction_key(value: str) -> str:
