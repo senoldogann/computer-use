@@ -73,8 +73,7 @@ src/computeruse/
     ├── coordinates.py # ADR-2: pure retina/DPI scale + multi-display mapping
     ├── diff.py        # ADR-2: regional visual-diff core (anti-aliasing-safe)
     ├── capture.py     # ADR-2: driver response -> ScreenCapture + BGRA->luma
-    ├── som.py         # Set-of-Marks annotator (live: marks every OBSERVE frame)
-    ├── ax.py          # …also renders OCR lines into the same summary shape
+    ├── som.py         # Set-of-Marks annotator (live: marks every OBSERVE frame; OCR uses the same shape)
     └── focus.py       # focused-app discovery + activation
 driver/              # Rust actuation micro-driver (Unix-socket JSON-RPC)
                      #   main.rs    : socket accept loop (driver binary)
@@ -195,8 +194,9 @@ menu bar and a translucent emerald halo follows the cursor — so the user
 always sees where the agent is acting. Kill-switch: Command+Shift+Escape, or
 just grab the mouse.
 
-The smoke tests spawn the compiled driver (simulated backend) automatically,
-and skip if the binary isn't built, so pure-check workflows stay green.
+The smoke tests build and spawn the compiled driver (simulated backend)
+automatically. If the binary still cannot be built, the default is a usage
+error; `--allow-missing-driver` is the explicit opt-out for driverless checks.
 Never run those tests with `--real` — a real mouse in CI would be dangerous.
 
 ## Status
@@ -222,9 +222,9 @@ Working & tested:
   cursor halo while the real driver is active; app activation (`--app` brings
   the target to the front).
 - Law 5 kill-switch: an `OodaRunner` gate that raises `KillSwitchTripped` the
-  instant a human reclaims control, fed by the driver's global hotkey and by
-  Ctrl-C. A pure mouse-shake detector exists beside them and is *not* wired to
-  any entry point (`monitor=None` everywhere in production).
+  instant a human reclaims control, fed by the driver's global hotkey, its
+  HID-rate cursor-shake detector, and Ctrl-C. The simulated driver never
+  installs host listeners; its pure detector remains covered offline.
 - ADR-2 coordinate core: pure retina/DPI scaling and multi-display mapping in
   `vision/coordinates.py`, fully unit-tested without a display.
 - ADR-2 visual-diff core: `vision/diff.py` implements an anti-aliasing-safe,
@@ -325,8 +325,8 @@ Working & tested:
   consent-free "the click landed" confirmation the provider can act on
   without Screen Recording (verified live on Chrome's omnibox).
   `interactive_summaries` keeps the context minimal (actionable roles only,
-  depth 8 so deep trees like Chrome's omnibox — five levels down — are not
-  silently de-grounded, bounded by a 24-element count cap); a failed probe
+  depth 20 so deep browser trees are not silently de-grounded, bounded by a
+  64-element count cap); a failed probe
   degrades to the previous context with a warning, never aborts. The
   capstone test drives the loop from a provider that reads the Reload
   button's center off the summaries and clicks it — the full ADR-2 chain:
@@ -399,11 +399,9 @@ Working & tested:
   `KillSwitch.with_signal_predicate` OR-composes channels, so the agent wires
   the driver hotkey poll alongside the CLI's SIGINT catcher (or any caller's
   own switch) — a statically tripped switch cannot gain a live source (G2).
-  The matching rule is pinned by Rust unit tests; the simulated driver never
-  installs a tap (Law 1: no host interaction). Two of the three Law 5.2
-  channels are wired: the global hotkey and Ctrl-C. The mouse-shake detector
-  is implemented and tested but reaches no production entry point — see the
-  kill-switch note in AGENTS.md for what wiring it would take.
+  The matching rule, bounded shake detector, and self-posted-event filter are
+  pinned by Rust unit tests; the simulated driver never installs a tap (Law 1:
+  no host interaction).
 - v2 adversarial-audit hardening: internal-action handlers narrow through the
   union with `isinstance` (no `getattr` bypass); the kill-switch rejects
   conflicting signal sources (`signal_triggered` vs `signal_predicate`); the
@@ -413,9 +411,9 @@ Working & tested:
   `SkillRegistry` caches its summary index (invalidated on save); and drags
   follow the same Bezier trajectory plan as moves — every finding pinned by
   a regression test.
-**Not yet implemented:** nothing structural — the 6 laws, the 8 OODA steps,
-all three memory tiers, both ADR-2 grounding halves, and the three Law 5.2
-kill channels are implemented and tested. Multimodal vision input is live
+The 6 laws, the 8 OODA steps, all three memory tiers, both ADR-2 grounding
+halves, and the three Law 5.2 kill channels are implemented and tested.
+Multimodal vision input is live
 (screenshots feed the model via `screenshot_b64` + the OpenAI image_url
 route), Set-of-Marks annotation is wired into OBSERVE with a `click_mark`
 action that resolves a number to an element's own centre, and `--background`

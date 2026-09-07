@@ -147,7 +147,6 @@ class MouseShakeMonitor:
         # A bounded deque slides the window in O(1) per sample — ``list.pop(0)``
         # would shift every element on each poll of the OODA loop (G5).
         self._window: deque[CursorSample] = deque(maxlen=window_size)
-        self._window_size = window_size
         self._min_reversals = min_reversals
 
     def observe(self) -> bool:
@@ -222,22 +221,6 @@ class KillSwitch:
         else:
             combined = predicate
         return KillSwitch(monitor=self._monitor, signal_predicate=combined)
-
-    def run_blocking(self, on_trip: Callable[[], None] | None = None) -> None:
-        """Loop calling :meth:`tripped` forever (used from a worker thread).
-
-        For a real deployment this would live in a dedicated listener thread;
-        the hotkey hook or SIGINT catcher is wired through ``signal_predicate``
-        (or a :class:`MouseShakeMonitor`) and we honour the trip as soon as
-        tripped() next returns True.
-        """
-        while not self.tripped():
-            # Very light wait so the loop doesn't spin the CPU needlessly.
-            import time
-
-            time.sleep(0.02)
-        if on_trip is not None:
-            on_trip()
 
 
 def install_sigint_catcher() -> Callable[[], bool]:

@@ -88,7 +88,7 @@ def test_server_text_cannot_forge_the_structure_around_it() -> None:
 
 
 def test_control_characters_are_removed() -> None:
-    assert sanitize_for_prompt("a\x00b\x1bc\x7fd", limit=50) == "a b c d".replace(" ", " ")
+    assert sanitize_for_prompt("a\x00b\x1bc\x7fd", limit=50) == "a b c d"
 
 
 def test_long_descriptions_are_truncated_not_dropped() -> None:

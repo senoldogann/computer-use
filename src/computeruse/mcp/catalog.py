@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
 
+# Shared by catalog management and server discovery so both APIs always point
+# at the same user configuration file.
 DEFAULT_CONFIG_PATH: Final[Path] = Path.home() / ".computeruse" / "mcp.json"
 
 

@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from html import unescape
 from typing import Final
 
 LOGGER: Final = logging.getLogger(__name__)
@@ -98,7 +99,7 @@ def html_to_text(html: str) -> str:
         r"</(p|div|section|article|li|tr|h[1-6]|br)\s*>", "\n", without_code, flags=re.IGNORECASE
     )
     stripped = re.sub(r"<[^>]+>", " ", with_breaks)
-    unescaped = _unescape(stripped)
+    unescaped = unescape(stripped)
     lines = [_collapse(line) for line in unescaped.splitlines()]
     return "\n".join(line for line in lines if line)
 
@@ -224,9 +225,7 @@ def _is_http_url(url: str) -> bool:
     filesystem read the user never authorised; loopback/link-local/private
     ranges and cloud metadata would turn it into internal network access (pure)."""
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return False
-    return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
 def _is_fetchable_url(url: str) -> bool:
@@ -248,10 +247,3 @@ def _is_fetchable_url(url: str) -> bool:
 def _collapse(text: str) -> str:
     """Whitespace runs to single spaces (pure)."""
     return re.sub(r"\s+", " ", text).strip()
-
-
-def _unescape(text: str) -> str:
-    """Resolve HTML entities (pure)."""
-    from html import unescape
-
-    return unescape(text)

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import inspect
+import json
 import logging
 import os
 import random
@@ -99,6 +100,7 @@ from computeruse.orchestrator.mission import (
 from computeruse.orchestrator.planner import (
     GoalPlan,
     SessionCheckpoint,
+    decompose_goal,
     goal_from_sub_goals,
     outstanding_sub_goals,
 )
@@ -427,6 +429,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--store", default=str(DEFAULT_STORE), help="Episodes + skills directory."
     )
     parser.add_argument("--max-steps", type=int, default=100)
+    parser.add_argument("--plan-only", action="store_true", help="Print a deterministic plan without starting a driver or executing actions.")
     parser.add_argument(
         "--plan",
         action="store_true",
@@ -1808,6 +1811,11 @@ def _resolve_target_app(args: argparse.Namespace) -> tuple[bool, bool]:
     return named_app, explicit_app is not None
 
 
+def _emit_plan(plan: GoalPlan) -> None:
+    """Publish additive plan events without changing existing step records."""
+    print("@@CU " + json.dumps({"type": "plan", "plan": plan.model_dump(mode="json")}, ensure_ascii=False), flush=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, dispatch, and run one goal.
 
@@ -1825,6 +1833,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # happens". Stream the runner's lines to stderr so the run is observable
     # while the final summary block still lands on stdout at the end.
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+    if args.plan_only:
+        if not args.goal or not args.goal.strip():
+            print("error: --plan-only requires a non-empty --goal", file=sys.stderr)
+            return 2
+        _emit_plan(decompose_goal(args.goal, app=args.app, knowledge=()))
+        return 0
     dispatched = _dispatch_store_command(args)
     if dispatched is not None:
         return dispatched
@@ -1902,6 +1916,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if price is not None:
                     run_cost["usd"] += call_cost_usd(price, call)
             elapsed = time.monotonic() - run_started_at
+            print("@@CU " + json.dumps({
+                "type": "stats", "total_tokens": run_tokens["total"],
+                "cost_usd": run_cost["usd"] if price is not None else None,
+                "elapsed_seconds": elapsed, "calls": run_calls,
+            }), flush=True)
             print(
                 f"st : tok_total={run_tokens['total']} elapsed={elapsed:.1f}s calls={run_calls}",
                 file=sys.stderr,
@@ -1934,7 +1953,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             stats_sink=stats_sink,
             budget_guard=None if budget.is_unset else budget_guard,
             driver_recover=driver_recover,
+            on_plan_progress=_emit_plan,
         )
+        if args.plan:
+            _emit_plan(decompose_goal(args.goal, app=config.app, knowledge=()))
         # Spend is recorded on *both* endings. A run that failed still cost
         # what it cost, and that is exactly the run someone wants the number
         # for; recording only successes would make the report's total a
