@@ -91,10 +91,10 @@ ACTION_CONTRACT: Final[str] = (
     '- mouse_move: {"type": "mouse_move", "x": int, "y": int, "duration_ms": int (default 180)} — ONLY when hover, tooltip, or drag preparation is explicitly needed\n'
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'
     '- mouse_scroll: {"type": "mouse_scroll", "dx": int, "dy": int} — scrolls at the CURRENT cursor position; move the cursor over the target scrollable area first\n'
-    '- type_text: {"type": "type_text", "text": str, "wpm": int (default 40)}\n'
+    '- type_text: {"type": "type_text", "text": str, "wpm": int (default 120)} — ONLY for SHORT text (a few words, single keys). Anything longer than ~24 characters MUST be clipboard_paste.\n'
     '- web_search: {"type": "web_search", "query": str} — search the web through the connected MCP search tool when one exists; otherwise it answers with browser instructions.\n'
     '- web_fetch: {"type": "web_fetch", "url": str} — read a page\'s text. Server-rendered pages only.\n'
-    '- clipboard_paste: {"type": "clipboard_paste", "text": str} — preferred for URLs, search queries, and any long text (Cmd+V)\n'
+    '- clipboard_paste: {"type": "clipboard_paste", "text": str} — MANDATORY for URLs, search queries, and ANY text longer than ~24 characters (one instant Cmd+V instead of seconds of keystrokes)\n'
     '- press_hotkey: {"type": "press_hotkey", "modifiers": ["command|shift|alt|control"], "key": str} — key: "return", "enter", "tab", "escape", "space", "backspace", "l", "t", "w", "a", "c", "v", etc.\n'
     '- activate_app: {"type": "activate_app", "app": str} — brings an application (e.g. "Google Chrome", "Notes", "Finder") to the front\n'
     '- wait: {"type": "wait", "duration_ms": int, "reason": str}\n'
@@ -200,7 +200,7 @@ ACTION_CONTRACT: Final[str] = (
     "9. ACTION MINIMIZATION:\n"
     "   - Prefer the smallest reliable action that advances the goal.\n"
     "   - Do not emit mouse_move before mouse_click unless hover, tooltip inspection, or a drag needs it.\n"
-    "   - Prefer clipboard_paste for long text, queries, prompts, and URLs.\n"
+    "   - MUST use clipboard_paste (never type_text) for any text longer than ~24 characters — typing it key by key wastes tens of seconds.\n"
     "\n"
     "10. FINISHING — THE STRICTEST RULE:\n"
     "   - Emit finish with status 'success' ONLY when the CURRENT screenshot itself shows the goal is done.\n"
@@ -547,6 +547,16 @@ def _unescape_text_action(action: Action) -> Action:
     return action
 
 
+#: Text longer than this is pasted, not typed — unless the model explicitly
+#: chose a cadence. Keystrokes are paced one by one (a 100-character paragraph
+#: costs ~30 s at the default cadence) while a paste is one Cmd+V; the prompt
+#: already says this, but guidance alone does not move weak models, so the
+#: parser enforces it. Short strings stay on the keystroke path, where
+#: per-key behavior (single-key triggers, key-handling widgets) can matter.
+#: An explicit ``wpm`` is respected as deliberate model intent.
+LONG_TEXT_PASTE_CHARS: Final[int] = 24
+
+
 def _normalize_action_dict(action: dict[str, object]) -> dict[str, object]:
     """Normalize one action dict's common model alias variations (pure).
 
@@ -648,6 +658,18 @@ def _normalize_action_dict(action: dict[str, object]) -> dict[str, object]:
     # Text string casts
     if "text" in action and action["text"] is not None:
         action["text"] = str(action["text"])
+
+    # Long keystroke runs become one paste. Runs on the raw dict — before
+    # Pydantic fills the default — so a model-supplied ``wpm`` reads as intent
+    # and is honoured, while an unspecified cadence on bulk text is rerouted.
+    # The credential guards downstream cover both shapes identically, and the
+    # quiet background path writes both through the same AX value setter, so
+    # neither safety nor background mode distinguishes them.
+    if action.get("type") == "type_text" and "wpm" not in action:
+        text = action.get("text")
+        if isinstance(text, str) and len(text) > LONG_TEXT_PASTE_CHARS:
+            action["type"] = "clipboard_paste"
+            action.pop("wpm", None)
 
     return action
 
