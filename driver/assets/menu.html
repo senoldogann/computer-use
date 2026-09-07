@@ -7431,12 +7431,11 @@
         goalInputEl.addEventListener("input", evaluateAutoCollapse);
         goalInputEl.addEventListener("keyup", evaluateAutoCollapse);
         goalInputEl.addEventListener("change", evaluateAutoCollapse);
-        goalInputEl.addEventListener("blur", function () {
-          var text = (goalInputEl ? goalInputEl.value : "").trim();
-          if (!text && !window._isRunning) {
-            window.collapseWindow();
-          }
-        });
+        // No blur → collapse: losing focus means the user clicked somewhere
+        // *inside* the panel (a tab, a toggle, history), and collapsing first
+        // swallows that click. Collapse stays explicit (Escape, the collapse
+        // button, run end); the panel additionally hides on deactivate
+        // natively via setHidesOnDeactivate, so nothing is lost.
         goalInputEl.addEventListener("keydown", function (e) {
           if (e.key === "Escape") {
             goalInputEl.value = "";
