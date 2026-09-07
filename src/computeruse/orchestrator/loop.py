@@ -220,7 +220,7 @@ AX_FROZEN_AFTER_FAILURES: Final[int] = 3
 # is deliberately excluded: re-positioning the cursor to the same point is a
 # normal navigation pattern, not a lost-model signal.
 _REPETITION_SENSITIVE: Final[frozenset[str]] = frozenset(
-    {"mouse_click", "mouse_drag", "mouse_scroll", "type_text", "clipboard_paste", "press_hotkey"}
+    {"mouse_click", "click_mark", "mouse_drag", "mouse_scroll", "type_text", "clipboard_paste", "press_hotkey"}
 )
 
 #: Actions the *cycle* guard watches. Everything the repetition guard watches,
@@ -423,6 +423,12 @@ def _route_for(action: Action) -> Routing:
     if action.type == "mouse_move":
         return "physical"
     if action.type == "mouse_click":
+        return "physical"
+    if action.type == "click_mark":
+        # Resolved to a MouseClick before actuation, but the mark-resolution
+        # failure path traces the original decision through decide_step — an
+        # unresolved ClickMark must still route instead of raising ValueError
+        # and crashing the run out of the recovery ladder.
         return "physical"
     if action.type == "mouse_drag":
         return "physical"
@@ -633,6 +639,14 @@ def equivalent_action(left: Action, right: Action, *, tolerance: int = STUCK_REP
         return (
             abs(left.x - right.x) <= tolerance
             and abs(left.y - right.y) <= tolerance
+            and left.button == right.button
+            and left.click_count == right.click_count
+        )
+    if isinstance(left, ClickMark) and isinstance(right, ClickMark):
+        # Marks are discrete element identities, not screen points: the same
+        # mark is the same intent, a different mark is a different target.
+        return (
+            left.mark == right.mark
             and left.button == right.button
             and left.click_count == right.click_count
         )
@@ -1375,6 +1389,13 @@ class OodaRunner:
         # signature captured just before it ran.
         self._pending_action: Action | None = None
         self._pre_action_signature: str = ""
+        # The cycle signature (observation + content digest) captured just
+        # before the pending action ran. The coarse signature deliberately
+        # leaves content out, so a click that rewrites text without moving
+        # elements reads as "unchanged" — which is why a CONFIRMED verdict
+        # excuses it below. The cycle signature keeps the content, so a
+        # confirmed repeat that changed *nothing at all* still counts.
+        self._pre_action_cycle: str = ""
         # Screenshot encode cache, keyed by the exact frame fingerprint.
         self._last_capture_map: ScreenMap | None = None
         self._last_capture_hash: str | None = None
@@ -1423,8 +1444,11 @@ class OodaRunner:
         self._stuck_streak = 0
         self._last_tool = None
         self._tool_streak = 0
+        self._last_verdict = None
+        self._visited_transitions.clear()
         self._pending_action = None
         self._pre_action_signature = ""
+        self._pre_action_cycle = ""
         self._last_capture_hash = None
         self._last_screenshot_b64 = None
         self._last_error = None
@@ -2641,6 +2665,7 @@ class OodaRunner:
             return
         self._pending_action = action
         self._pre_action_signature = observation_signature(self._observation)
+        self._pre_action_cycle = cycle_signature(self._observation)
 
     def _settle_progress(self, state: WorkingState) -> WorkingState:
         """Score the previous action against the fresh observation (stuck guard).
@@ -2655,14 +2680,24 @@ class OodaRunner:
             return state
         self._pending_action = None
         moved = observation_signature(self._observation) != self._pre_action_signature
+        cycle_moved = cycle_signature(self._observation) != self._pre_action_cycle
         # The signature is the cheap change detector; the witnesses are the
         # careful one, and when they disagree the careful one is right. A click
         # into an already-focused text field moves no title and no element
         # list, so the signature calls it "nothing happened" — while
         # verification, which looked at the field itself, confirmed it. Three
         # such clicks used to convince the guard the run was stuck.
+        #
+        # But a bare CONFIRMED must not excuse a repeat that changed nothing
+        # at all — not the layout *and* not the content. Measured in Notes:
+        # the model clicked the same search result four times; focus landed
+        # every time (CONFIRMED) while elements, title and text stayed
+        # identical, so the streak never grew and the run clicked until the
+        # step budget. Content changing (the note-body revisions that pinned
+        # this rule) still resets the streak via cycle_moved.
         confirmed = self._last_verdict is Evidence.CONFIRMED
-        if self._same_physical(pending) and not moved and not confirmed:
+        confirmed_progress = confirmed and cycle_moved
+        if self._same_physical(pending) and not moved and not confirmed_progress:
             self._stuck_streak += 1
         else:
             self._stuck_streak = 0

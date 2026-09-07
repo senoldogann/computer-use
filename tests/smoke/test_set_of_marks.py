@@ -108,6 +108,36 @@ def test_an_unknown_mark_raises_instead_of_clicking_something_plausible() -> Non
         resolve_mark(ClickMark(type="click_mark", mark=4), marks)
 
 
+def test_an_unknown_mark_recovers_through_the_ladder_instead_of_crashing() -> None:
+    """A hallucinated mark index must not end the run with ValueError (regression).
+
+    Observed: the model named mark 257 with 34 elements listed. Resolution
+    correctly raised UnknownMarkError, but the handler traced the original
+    decision through decide_step, which did not know click_mark — so the run
+    died on "unrecognized action 'click_mark'" instead of climbing
+    RETRY -> ALTERNATE -> REPLAN -> ABORT.
+    """
+    executed: list[Action] = []
+
+    def ax_probe() -> AxProbeResult:
+        return AxProbeResult(summaries=('Button "Reload" at (232,68) 44x24',))
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(ClickMark(type="click_mark", mark=257))
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        ax_probe=ax_probe,
+        max_steps=4,
+    )
+    final = runner.run(goal="press the missing control")
+    assert executed == []
+    assert final.completed_steps, "the finish after the bad mark must still land"
+
+
 def test_non_mark_actions_pass_through_untouched() -> None:
     click = MouseClick(type="mouse_click", x=1, y=2)
     assert resolve_mark(click, ()) is click
