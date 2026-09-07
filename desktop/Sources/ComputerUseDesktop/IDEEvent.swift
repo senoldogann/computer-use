@@ -40,6 +40,9 @@ struct IDEEvent: Sendable {
                 status: object?["status"]?.text ?? "pending", targetEntryID: nil)
         }
     }
+    /// The goal a plan event decomposes (``plan.goal`` from the CLI), shown
+    /// in the plan card header so the user can recognise the plan at a glance.
+    var planGoal: String? { fields["plan"]?.object?["goal"]?.text }
     static func decode(_ json: String) throws -> IDEEvent {
         let fields = try JSONDecoder().decode([String: EventValue].self, from: Data(json.utf8))
         return IDEEvent(fields: fields["step"]?.object ?? fields)

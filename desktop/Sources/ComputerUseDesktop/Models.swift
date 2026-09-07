@@ -107,6 +107,11 @@ struct TimelineEntry: Identifiable, Sendable {
     var title: String
     var detail: String
     var planSteps: [PlanStep] = []
+    //: The goal the plan decomposes, shown in the plan card header. The steps
+    //: alone would make the card anonymous — every plan of the same shape
+    //: would look alike, and the header is where the user checks "is this the
+    //: plan I asked for?" before running it.
+    var planGoal: String? = nil
     var approvalID: String? = nil
     var isExpanded: Bool
     var isFailure: Bool

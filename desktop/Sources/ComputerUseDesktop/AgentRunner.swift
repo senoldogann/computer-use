@@ -199,7 +199,9 @@ final class AgentRunner {
                 elapsedSeconds: event.fields["elapsed_seconds"]?.number ?? 0))
             return
         }
-        if !event.plan.isEmpty { state.threadsStore.updatePlan(threadID: threadID, steps: event.plan) }
+        if !event.plan.isEmpty {
+            state.threadsStore.updatePlan(threadID: threadID, steps: event.plan, goal: event.planGoal)
+        }
         let signature = event.subGoal + "|" + (event.action["type"]?.text ?? "")
         if event.error != nil {
             consecutiveFailures = signature == failureSignature ? consecutiveFailures + 1 : 1

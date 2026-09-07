@@ -58,11 +58,18 @@ final class ThreadsStore: ObservableObject {
         }
     }
 
-    /// Reuses an idle thread for a new goal, or creates one. Returns the
-    /// thread id the run should attach to.
-    func resolveTargetThread(for goal: String) -> UUID {
-        if let active = activeThread, active.status == .idle {
-            return active.id
+    /// Creates a fresh conversation for a new goal, or — for a mission
+    /// resume — attaches to the thread that already carries that goal.
+    /// Returns the thread id the run should attach to.
+    ///
+    /// A new message ALWAYS becomes visible: either as the new thread's first
+    /// entry (new sidebar topic), or appended to the reused thread. The old
+    /// behaviour silently reused an idle thread WITHOUT appending the message
+    /// — the task started, the user's words appeared nowhere, and no new
+    /// topic was created.
+    func resolveTargetThread(for goal: String, reuseIdle: Bool = false) -> UUID {
+        if reuseIdle, let existing = threadID(forGoal: goal) {
+            return existing
         }
         let title = deriveTitle(from: goal)
         let thread = AgentThread(
@@ -79,6 +86,15 @@ final class ThreadsStore: ObservableObject {
         )
         threads.insert(thread, at: 0)
         return thread.id
+    }
+
+    /// The thread whose conversation carries exactly this goal message, or
+    /// nil. Used by mission resume to keep working in the conversation that
+    /// parked the work instead of scattering it into a new topic.
+    func threadID(forGoal goal: String) -> UUID? {
+        threads.first { thread in
+            thread.entries.contains { $0.kind == .userMessage && $0.title == goal }
+        }?.id
     }
 
     // MARK: - Runner-driven thread updates
@@ -128,6 +144,18 @@ final class ThreadsStore: ObservableObject {
         guard let index = threads.firstIndex(where: { $0.id == threadID }) else { return }
         if let entryIndex = threads[index].entries.firstIndex(where: { $0.id == entryID }) {
             threads[index].entries[entryIndex].isExpanded = expanded
+        }
+    }
+
+    /// Single-shot collapse/expand for the whole timeline group: sets every
+    /// entry that actually has detail to the same state. Entries without
+    /// detail have no chevron, so touching them would only dirty the store.
+    func setAllEntriesExpanded(threadID: UUID, expanded: Bool) {
+        guard let index = threads.firstIndex(where: { $0.id == threadID }) else { return }
+        for i in 0..<threads[index].entries.count {
+            if !threads[index].entries[i].detail.isEmpty {
+                threads[index].entries[i].isExpanded = expanded
+            }
         }
     }
 
@@ -182,7 +210,7 @@ final class ThreadsStore: ObservableObject {
         )
     }
 
-    func updatePlan(threadID: UUID, steps: [PlanStep]) {
+    func updatePlan(threadID: UUID, steps: [PlanStep], goal: String? = nil) {
         guard let index = threads.firstIndex(where: { $0.id == threadID }), !steps.isEmpty else { return }
         let linked = steps.map { step in
             PlanStep(
@@ -193,9 +221,11 @@ final class ThreadsStore: ObservableObject {
             )
         }
         if let planIndex = threads[index].entries.lastIndex(where: { $0.kind == .plan }) {
+            if let goal { threads[index].entries[planIndex].planGoal = goal }
             threads[index].entries[planIndex].planSteps = linked
         } else {
-            var entry = TimelineEntry(kind: .plan, title: "Plan")
+            var entry = TimelineEntry(kind: .plan, title: goal ?? "Plan")
+            entry.planGoal = goal
             entry.planSteps = linked
             appendTimeline(threadID: threadID, entry: entry)
         }

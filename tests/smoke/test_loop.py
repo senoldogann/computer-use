@@ -33,6 +33,7 @@ from computeruse.orchestrator.prompts import completion_auditor, completion_prom
 from computeruse.orchestrator.schemas import (
     AgentTurn,
     CallTool,
+    ClickMark,
     Finish,
     MouseClick,
     MouseMove,
@@ -80,6 +81,44 @@ def test_runner_executes_physical_then_finishes() -> None:
     final = runner.run(goal="demo")
     assert final.step_index == 2
     assert executed, "physical action was never dispatched"
+
+
+def test_plan_progress_streams_advanced_plan_to_callbacks() -> None:
+    """Phase 3: each sub-goal completion emits the ADVANCED plan.
+
+    This is the wire the IDE's live checklist rides on: a ``finish`` closes
+    the in-progress sub-goal, promotes the next one, and only then hands the
+    plan to ``on_sub_goal_complete`` — the caller (CLI ``_emit_plan``) streams
+    it to the UI, which repaints step statuses. A callback that fired before
+    the advance would show a checklist that never ticks, which is precisely
+    the "preview plan is not dynamic" failure mode.
+    """
+    from computeruse.orchestrator.planner import decompose_goal
+
+    plan = decompose_goal(
+        "open chrome then open youtube", app="Google Chrome", knowledge=()
+    )
+    assert [sub_goal.status for sub_goal in plan.sub_goals] == ["in_progress", "pending"]
+
+    emitted: list[list[str]] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _action: None,
+        max_steps=5,
+        plan=plan,
+        on_sub_goal_complete=lambda advanced: emitted.append(
+            [sub_goal.status for sub_goal in advanced.sub_goals]
+        ),
+    )
+    runner.run(goal="open chrome then open youtube")
+
+    # Exactly one transition: the first finish advanced the plan; the second
+    # finished it, and a finished plan fires no callback.
+    assert emitted == [["completed", "in_progress"]]
 
 
 def test_runner_folds_failure_into_state() -> None:
@@ -572,6 +611,60 @@ def test_jittered_repeats_without_progress_trip_the_guard() -> None:
     assert any(
         e is not None and "action repetition detected" in e for e in seen_errors
     )
+
+
+def test_confirmed_repeat_with_zero_change_trips_the_guard() -> None:
+    """A focus-confirmed repeat that changes nothing is still stuck (regression).
+
+    Observed in Notes: the model clicked the same search result four times.
+    Focus landed every time (CONFIRMED) while elements, title and text stayed
+    identical, so the streak never grew and the run clicked until the budget.
+    A CONFIRMED verdict excuses a repeat only when the content moved (the
+    note-body revisions pinned by test_a_confirmed_repeat_is_not_a_stuck_loop).
+    """
+    executed: list[tuple[int, int]] = []
+    seen_errors: list[str | None] = []
+
+    def ax_probe() -> AxProbeResult:
+        return AxProbeResult(
+            summaries=('Button "Hello world" at (100,100) 40x20 (focused)',),
+            content=("Hello world",),
+        )
+
+    def provider(state: WorkingState) -> AgentTurn:
+        seen_errors.append(state.last_error)
+        return _turn(_click(100, 100))
+
+    def execute_physical(action: object) -> None:
+        if isinstance(action, MouseClick):
+            executed.append((action.x, action.y))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=execute_physical,
+        ax_probe=ax_probe,
+        max_steps=50,
+    )
+    with pytest.raises(UnrecoverableFailureError):
+        runner.run(goal="delete the note")
+    assert len(executed) == 3
+    assert any(
+        e is not None and "action repetition detected" in e for e in seen_errors
+    )
+
+
+def test_decide_step_routes_click_mark_as_physical() -> None:
+    """A ClickMark must route instead of raising ValueError (regression).
+
+    The mark-resolution failure path traces the original decision through
+    decide_step; an unresolved ClickMark that cannot route crashes the run
+    out of the recovery ladder (observed: mark 257 with 34 elements listed).
+    """
+    outcome = decide_step(
+        WorkingState(goal="x"),
+        _turn(ClickMark(type="click_mark", mark=1)),
+    )
+    assert outcome.route == "physical"
 
 
 def test_mouse_move_repetition_is_not_a_stuck_signal() -> None:
