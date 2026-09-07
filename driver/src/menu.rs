@@ -11,6 +11,11 @@
 //! the *busy status icon* is suppressed for the spawned driver via
 //! ``COMPUTERUSE_NO_STATUS`` so exactly one menu-bar icon exists).
 //!
+//! While a run is in flight the status icon itself animates (an 8-frame
+//! spinner advanced by the drain timer) with a tooltip naming the state, and
+//! when the run ends on its own a macOS banner names the outcome — so a run
+//! started and left alone is observable without reopening the panel.
+//!
 //! The panel's UI never touches the OS input stream: all actuation still flows
 //! through the Rust driver over its Unix socket. This module is the *imperative
 //! shell* (Law 6): AppKit/WebKit hosting, process spawning, and path/env
@@ -31,8 +36,8 @@ use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject
 use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageRep, NSColor,
-    NSImage, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSWindow, NSWindowButton,
-    NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSImage, NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSWindow,
+    NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
     NSVisualEffectView, NSVisualEffectMaterial, NSVisualEffectBlendingMode, NSVisualEffectState,
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
@@ -349,12 +354,23 @@ pub fn run() -> ! {
     // Accessory: no Dock icon, never steals focus on its own.
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
+    // An accessory (status-bar-only) app ships no main menu, and AppKit routes
+    // Cmd+C/V/X/A/Z through the main menu's key equivalents: without an Edit
+    // menu those shortcuts never reach the WKWebView, so text in the panel's
+    // inputs can be typed but not copied, pasted, or selected by keyboard.
+    install_main_menu(mtm, &app);
+
     let status = NSStatusBar::systemStatusBar().statusItemWithLength(30.0);
     STATUS_ITEM_PTR.store(
         (&*status as *const objc2_app_kit::NSStatusItem).cast_mut().cast(),
         core::sync::atomic::Ordering::SeqCst,
     );
-    let menu_icon = menu_icon(mtm);
+    let idle_icon = menu_icon(mtm);
+    // Busy spinner frames: built once on the main thread, owned by the drain
+    // timer below. A frame that fails to allocate is skipped rather than
+    // aborting the launcher — fewer frames still animate.
+    let spinner_frames: Vec<Retained<NSImage>> =
+        (0..SPINNER_FRAMES).filter_map(spinner_frame_image).collect();
     let panel = build_panel(mtm);
     let effect = build_effect_view(mtm);
     let webview = build_webview(mtm);
@@ -375,7 +391,7 @@ pub fn run() -> ! {
     let target_ptr: *mut ScriptTarget = Retained::into_raw(target);
 
     if let Some(button) = status.button(mtm) {
-        attach_icon(&button, &menu_icon);
+        attach_icon(&button, &idle_icon);
         unsafe {
             // Receive both LeftMouseUp (1 << 1) and RightMouseUp (1 << 3) events
             let mask: NSInteger = (1 << 1) | (1 << 3);
@@ -385,10 +401,11 @@ pub fn run() -> ! {
         }
     }
 
-    // 30 Hz digital-timer: drain streamed lines into the webview and signal
-    // run completion. Runs on the AppKit main loop like the indicator's halo.
+    // 30 Hz digital-timer: drain streamed lines into the webview, animate the
+    // menu-bar icon while a run is in flight, and signal run completion.
+    // Runs on the AppKit main loop like the indicator's halo.
     let timer_block = block2::StackBlock::new(move |_: std::ptr::NonNull<NSTimer>| {
-        drain_to_webview(&webview);
+        drain_to_webview(&webview, &idle_icon, &spinner_frames);
     });
     let _timer = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 30.0, true, &timer_block)
@@ -491,6 +508,87 @@ define_class!(
         }
     }
 );
+
+/// The Edit menu contents: (title, selector name, key equivalent).
+///
+/// Pure data so the shortcut contract is unit-testable without AppKit: every
+/// entry must keep its Command-modified key, or the shortcut silently stops
+/// reaching the panel's web inputs again.
+fn edit_menu_items() -> [(&'static str, &'static str, &'static str); 5] {
+    [
+        ("Undo", "undo:", "z"),
+        ("Cut", "cut:", "x"),
+        ("Copy", "copy:", "c"),
+        ("Paste", "paste:", "v"),
+        ("Select All", "selectAll:", "a"),
+    ]
+}
+
+/// Minimal main menu so keyboard shortcuts reach the panel's web content.
+///
+/// The items carry no target: with a nil target AppKit walks the responder
+/// chain, so `copy:`/`paste:` land on the focused WKWebView input instead of
+/// on this module. Adding a target here would steal them from the webview.
+fn install_main_menu(mtm: MainThreadMarker, app: &NSApplication) {
+    let main = NSMenu::new(mtm);
+
+    let app_title = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Computer Use"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    let app_menu = NSMenu::new(mtm);
+    let quit = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Quit Computer Use"),
+            Some(sel!(terminate:)),
+            &NSString::from_str("q"),
+        )
+    };
+    app_menu.addItem(&quit);
+    app_title.setSubmenu(Some(&app_menu));
+    main.addItem(&app_title);
+
+    let edit_title = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Edit"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    let edit = NSMenu::new(mtm);
+    // The Command mask is set explicitly so the shortcut does not depend on
+    // NSMenuItem's default mask.
+    for (title, selector, key) in edit_menu_items() {
+        let action = match selector {
+            "undo:" => sel!(undo:),
+            "cut:" => sel!(cut:),
+            "copy:" => sel!(copy:),
+            "paste:" => sel!(paste:),
+            "selectAll:" => sel!(selectAll:),
+            _ => continue,
+        };
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            )
+        };
+        item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        edit.addItem(&item);
+    }
+    edit_title.setSubmenu(Some(&edit));
+    main.addItem(&edit_title);
+
+    app.setMainMenu(Some(&main));
+}
 
 fn show_context_menu(mtm: MainThreadMarker) {
     let menu = NSMenu::new(mtm);
@@ -781,7 +879,7 @@ fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
     panel.setBackgroundColor(Some(&NSColor::clearColor()));
     panel.setHasShadow(true);
     panel.setMovableByWindowBackground(true);
-    panel.setHidesOnDeactivate(false);
+    panel.setHidesOnDeactivate(true);
     panel.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces);
     panel
 }
@@ -829,24 +927,38 @@ fn call_js(webview: &WKWebView, js: &str) {
     }
 }
 
-fn drain_to_webview(webview: &WKWebView) {
-    let (batch, finished_now, was_stopped) = {
+fn drain_to_webview(webview: &WKWebView, idle_icon: &NSImage, busy_frames: &[Retained<NSImage>]) {
+    let (batch, finished_now, was_stopped, succeeded) = {
         let mut s = SHARED.lock().unwrap();
         let batch: Vec<(LineKind, String)> = s.lines.drain(..).collect();
         // A run finishes when: (a) exit is set AND (b) all lines have been
         // drained AND (c) we haven't already signalled completion.
         let done = s.exit.is_some() && !s.signalled && batch.is_empty() && s.lines.is_empty();
         let stopped = s.exit == Some(Some(130));
+        // The CLI exits 0 on success and non-zero otherwise, so the exit code
+        // is the run's verdict for both the panel pill and the banner.
+        let ok = s.exit == Some(Some(0));
         if done {
             s.signalled = true;
         }
-        (batch, done, stopped)
+        (batch, done, stopped, ok)
     };
+    update_status_icon(idle_icon, busy_frames);
     if !batch.is_empty() {
         let mut js = String::with_capacity(batch.len() * 64);
         for (kind, line) in &batch {
             if line.trim().is_empty() {
                 continue;
+            }
+            if matches!(kind, LineKind::Dim)
+                && line.starts_with("CONFIRMATION REQUIRED:")
+            {
+                let ptr = PANEL_PTR.load(core::sync::atomic::Ordering::SeqCst);
+                if !ptr.is_null() {
+                    let panel = unsafe { &*(ptr as *const NSWindow) };
+                    panel.makeKeyAndOrderFront(None);
+                    activate_app();
+                }
             }
             let f = match kind {
                 LineKind::Out => "window.Native.log(%s);",
@@ -861,11 +973,20 @@ fn drain_to_webview(webview: &WKWebView) {
         }
     }
     if finished_now {
-        // Distinguish stopped (user pressed Stop) from completed runs.
+        // Distinguish stopped (user pressed Stop) from completed runs. A
+        // failure clears the run but lights the panel's error state, so a
+        // run that died quietly does not read as idle success.
         if was_stopped {
             call_js(webview, "window.Native.done(false); window.Native.dim('\\u2014 agent stopped \\u2014');");
         } else {
-            call_js(webview, "window.Native.done(true); window.Native.dim('\\u2014 run finished \\u2014');");
+            if succeeded {
+                call_js(webview, "window.Native.done(true); window.Native.dim('\\u2014 run finished \\u2014');");
+            } else {
+                call_js(webview, "window.Native.done(false); window.Native.dim('\\u2014 run failed \\u2014');");
+            }
+            // A stopped run notifies nothing: the person who pressed Stop is
+            // at the keyboard. A run that ended on its own always banners.
+            notify_run_finished(succeeded);
         }
         let mut s = SHARED.lock().unwrap();
         s.child_pid = None;
@@ -917,7 +1038,26 @@ fn handle_script_message(message: &WKScriptMessage) {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
-            run_agent(&goal, app.as_deref(), level, trust, model.as_deref());
+            // reasoning_effort is only accepted for the values the API knows
+            // (developers.openai.com guides/reasoning: none/minimal/low/
+            // medium/high/xhigh/max; per-model pages narrow it: GPT-5.6 =
+            // none/low/medium/high/xhigh/max, Astra = low/medium/high/xhigh/
+            // max — `none` 400s on Astra, `minimal` is pre-5.6 only).
+            // The panel already offers exactly what the picked model supports;
+            // this filter is the second gate so a crafted message can't smuggle
+            // an unsupported effort onto a model that would reject it.
+            let reasoning = value
+                .get("reasoning_effort")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| {
+                    matches!(
+                        *s,
+                        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                    )
+                })
+                .map(str::to_string);
+            run_agent(&goal, app.as_deref(), level, trust, model.as_deref(), reasoning.as_deref());
         }
         Some("set_level") => {
             if let Some(level) = value.get("level").and_then(serde_json::Value::as_u64) {
@@ -1045,7 +1185,14 @@ fn handle_script_message(message: &WKScriptMessage) {
                                 if let Some(list) = json_resp.get("data").and_then(serde_json::Value::as_array) {
                                     for item in list {
                                         if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
-                                            if id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("chat") {
+                                            // Sadece GPT-5.6 + GPT-6 Astra: /v1/models ham
+                                            // {"object":"list","data":[{"id":...}]} döner;
+                                            // resmi model sayfaları (developers.openai.com
+                                            // /api/docs/models/gpt-5.6-* ve /gpt-6-astra)
+                                            // dışında hiçbir id panele çıkmaz.
+                                            if id.starts_with("gpt-5.6")
+                                                || id.starts_with("gpt-6-astra")
+                                            {
                                                 models.push(serde_json::json!({
                                                     "id": format!("openai:{}", id),
                                                     "name": id,
@@ -1063,8 +1210,23 @@ fn handle_script_message(message: &WKScriptMessage) {
                 }
             }
 
+            // Eski cache'ler gpt-4o/o1/o3 içerebilir: izin listesi dışını at.
+            models.retain(|m| {
+                m.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| {
+                        id.starts_with("gpt-5.6") || id.starts_with("gpt-6-astra")
+                    })
+            });
+
             if models.is_empty() {
-                for id in ["gpt-4o", "gpt-4o-mini", "o3-mini", "o1", "gpt-4-turbo"] {
+                // Çevrimdışı / anahtarsız fallback: sadece 4 curated model.
+                for id in [
+                    "gpt-5.6-terra",
+                    "gpt-5.6-sol",
+                    "gpt-5.6-luna",
+                    "gpt-6-astra",
+                ] {
                     models.push(serde_json::json!({
                         "id": format!("openai:{}", id),
                         "name": id,
@@ -1302,11 +1464,21 @@ fn agent_args(
     args
 }
 
-fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool, model: Option<&str>) {
+fn run_agent(
+    goal: &str,
+    app: Option<&str>,
+    level: u8,
+    trust: bool,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) {
     TRUST_MODE.store(trust, core::sync::atomic::Ordering::SeqCst);
-    // Guard: never double-run while one is in flight.
+    // Guard: never double-run while one is in flight. Tell the user instead
+    // of returning silently — a swallowed click here reads as "the agent is
+    // broken" (the panel accepts the goal but nothing ever starts).
     let already = SHARED.lock().unwrap().child_pid.is_some();
     if already {
+        push_dim("an agent is already running — stop it first (⌘. or the stop button)".to_string());
         return;
     }
     let Some(root) = project_root() else {
@@ -1363,6 +1535,20 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool, model: Optio
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
     cmd.env("OPENAI_API_KEY", key.expect("checked above"));
+    // A GUI process inherits the minimal launchd PATH (/usr/bin:/bin:…), so
+    // every bare-name lookup inside the agent (node, git, …) fails with
+    // FileNotFoundError and the run dies before its first step. Widen the
+    // child's PATH with the same dirs find_uv already searches.
+    if let Ok(home) = std::env::var("HOME") {
+        let extra = format!(
+            "{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"
+        );
+        let base = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{base}:{extra}"));
+    }
+    if let Some(effort) = reasoning_effort {
+        cmd.env("COMPUTERUSE_REASONING_EFFORT", effort);
+    }
     // Piped stdin is the panel's confirmation channel (M6): the CLI uses the
     // interactive confirm handler whenever COMPUTERUSE_MENU is set, and this
     // pipe carries the Approve/Deny answer back to the blocked read.
@@ -1392,6 +1578,9 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool, model: Optio
         s.signalled = false;
     }
     CHILD_ALIVE.store(true, core::sync::atomic::Ordering::SeqCst);
+    // Restart the spinner from frame 0 so a run always opens in motion
+    // rather than mid-cycle.
+    DRAIN_TICK.store(0, core::sync::atomic::Ordering::SeqCst);
     if let Some(reader) = stdout {
         std::thread::spawn(move || pump_lines(BufReader::new(reader), true));
     }
@@ -1630,15 +1819,146 @@ fn openai_key() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Status icon: sea-blue disc + white arrow (the app's visual signature)
+// Status icon: idle mark + busy spinner + run-finished banner
 // ---------------------------------------------------------------------------
 
+/// Tooltip while no run is in flight.
+const IDLE_TOOLTIP: &str = "Computer Use — click to give the agent a task";
+/// Tooltip while the agent holds the machine.
+const BUSY_TOOLTIP: &str = "Computer Use — ajan çalışıyor…";
+
+/// Frames of the menu-bar busy spinner: one full turn, 45° per frame.
+const SPINNER_FRAMES: usize = 8;
+/// Drain-timer ticks per spinner frame. The timer runs at 30 Hz, so 4 ticks
+/// is ~7.5 fps — visibly alive without swapping the image every tick.
+const SPINNER_TICKS_PER_FRAME: u64 = 4;
+
+/// Drain-tick counter feeding the spinner (main thread only).
+static DRAIN_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Whether the status item currently shows a spinner frame. Guards the
+/// restore: without it every idle tick would re-set the identical icon.
+static ICON_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Which spinner frame a drain-tick count shows (pure).
+///
+/// `frame_count` is the frames actually built (usually [`SPINNER_FRAMES`]);
+/// zero frames means no animation, never a division by zero.
+fn spinner_frame_for_tick(tick: u64, frame_count: usize) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+    ((tick / SPINNER_TICKS_PER_FRAME) % frame_count as u64) as usize
+}
+
+/// Title + message of the run-finished macOS banner (pure).
+fn completion_notification_text(succeeded: bool) -> (&'static str, &'static str) {
+    if succeeded {
+        ("Computer Use", "Görev tamamlandı — sonuç için panele bak")
+    } else {
+        ("Computer Use", "Görev tamamlanamadı — detay için panele bak")
+    }
+}
+
+/// Quote a string as an AppleScript literal (pure).
+///
+/// The callers only pass the static strings above, but quoting correctly
+/// anyway is what keeps a future interpolated goal from becoming script
+/// injection the day someone adds one.
+fn apple_script_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn attach_icon(button: &objc2_app_kit::NSStatusBarButton, icon: &NSImage) {
-    let tip = NSString::from_str("Computer Use — click to give the agent a task");
+    let tip = NSString::from_str(IDLE_TOOLTIP);
     unsafe {
         let _: () = msg_send![button, setImage: icon];
         let _: () = msg_send![button, setToolTip: &*tip];
     }
+}
+
+/// Swap the status-item image and tooltip (main thread only, best-effort).
+///
+/// A missing status item or an off-main-thread call is silence, not an
+/// error: the icon is decoration and must never disturb a run.
+fn set_status_image(image: &NSImage) {
+    let ptr = STATUS_ITEM_PTR.load(core::sync::atomic::Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let status = unsafe { &*(ptr as *const objc2_app_kit::NSStatusItem) };
+    if let Some(button) = status.button(mtm) {
+        unsafe {
+            let _: () = msg_send![&*button, setImage: image];
+        }
+    }
+}
+
+/// Reword the status-item tooltip (main thread only, best-effort; same
+/// silence-over-error contract as [`set_status_image`]).
+fn set_status_tooltip(text: &str) {
+    let ptr = STATUS_ITEM_PTR.load(core::sync::atomic::Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let status = unsafe { &*(ptr as *const objc2_app_kit::NSStatusItem) };
+    if let Some(button) = status.button(mtm) {
+        let tip = NSString::from_str(text);
+        unsafe {
+            let _: () = msg_send![&*button, setToolTip: &*tip];
+        }
+    }
+}
+
+/// Advance or park the menu-bar busy spinner. Called once per drain tick:
+///
+/// * run in flight → next spinner frame + busy tooltip;
+/// * run over → idle icon + idle tooltip, exactly once (the [`ICON_BUSY`]
+///   guard), so idle ticks cost two atomic loads and nothing else.
+fn update_status_icon(idle_icon: &NSImage, busy_frames: &[Retained<NSImage>]) {
+    use core::sync::atomic::Ordering::SeqCst;
+    let tick = DRAIN_TICK.fetch_add(1, SeqCst);
+    if CHILD_ALIVE.load(SeqCst) && !busy_frames.is_empty() {
+        let frame = spinner_frame_for_tick(tick, busy_frames.len());
+        set_status_image(&busy_frames[frame]);
+        set_status_tooltip(BUSY_TOOLTIP);
+        ICON_BUSY.store(true, SeqCst);
+    } else if ICON_BUSY.swap(false, SeqCst) {
+        set_status_image(idle_icon);
+        set_status_tooltip(IDLE_TOOLTIP);
+    }
+}
+
+/// Post a macOS banner when a run ends on its own (best-effort).
+///
+/// Off the main runloop on its own thread: `osascript` costs a process
+/// spawn, and the drain timer must never wait for it. A delivery failure is
+/// a log line, not a run failure — the panel already shows the outcome.
+fn notify_run_finished(succeeded: bool) {
+    let (title, message) = completion_notification_text(succeeded);
+    std::thread::Builder::new()
+        .name("menu-notify".to_string())
+        .spawn(move || {
+            let script = format!(
+                "display notification {} with title {} sound name \"Glass\"",
+                apple_script_string(message),
+                apple_script_string(title),
+            );
+            match std::process::Command::new("osascript").args(["-e", &script]).output() {
+                Ok(out) if out.status.success() => {}
+                Ok(out) => eprintln!(
+                    "[menu] notification failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+                Err(e) => eprintln!("[menu] could not post notification: {e}"),
+            }
+        })
+        .ok();
 }
 
 /// The menu-bar icon: a sea-blue squircle with a white paper airplane — the
@@ -1690,22 +2010,20 @@ fn menu_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
     }
 }
 
-/// Build the colored icon as raw RGBA in a bitmap rep. Returns None if the
-/// AppKit bitmap factory declines to allocate (never on macOS in practice).
-/// The backing pixel buffer is intentionally leaked: the icon is created once
-/// per launch and lives for the process lifetime, so a small leak (~5 KB) is
-/// a deliberate, documented trade for keeping the rep's pointer valid forever
-/// (avoiding a use-after-free on a static menu-bar icon).
-fn pixel_icon(_mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
+/// Brick one 36×36 icon from a pure per-pixel painter into an
+/// NSBitmapImageRep. Returns None if the AppKit bitmap factory declines to
+/// allocate (never on macOS in practice).
+/// The backing pixel buffer is intentionally leaked: icons are created once
+/// per launch and live for the process lifetime, so a small leak (~5 KB per
+/// icon) is a deliberate, documented trade for keeping the rep's pointer
+/// valid forever (avoiding a use-after-free on a static menu-bar icon).
+fn bitmap_icon(paint: impl Fn(f64, f64) -> (u8, u8, u8, f64)) -> Option<Retained<NSImage>> {
     const W: usize = 36;
     const H: usize = 36;
-    // Sea blue + white arrow are produced by `icon_pixel` (the agent's visual
-    // signature, same colours as the halo); this function only bricks the raw
-    // RGBA bytes into an NSBitmapImageRep.
     let mut pixels: Vec<u8> = Vec::with_capacity(W * H * 4);
     for y in 0..H {
         for x in 0..W {
-            let (r, g, b, a) = icon_pixel(x as f64, y as f64);
+            let (r, g, b, a) = paint(x as f64, y as f64);
             pixels.extend_from_slice(&[r, g, b, (a * 255.0).round() as u8]);
         }
     }
@@ -1733,6 +2051,19 @@ fn pixel_icon(_mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
     Some(image)
 }
 
+/// Build the idle mark through the shared bitmap bricklayer. The painter is
+/// [`icon_pixel`] (the agent's visual signature); this function only adapts
+/// its shape to the bricklayer.
+fn pixel_icon(_mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
+    bitmap_icon(icon_pixel)
+}
+
+/// One busy-spinner frame through the same bricklayer. A frame that fails to
+/// allocate is skipped by the caller, so this stays total over the Option.
+fn spinner_frame_image(frame: usize) -> Option<Retained<NSImage>> {
+    bitmap_icon(move |x, y| spinner_pixel(x, y, frame))
+}
+
 /// Colour of a single icon pixel: emerald green #50A574 rounded squircle, white paper
 /// airplane on top, transparent elsewhere. ``icon_pixel`` is pure and total
 /// (Law 6). The plane polygon is the exact shape of the SVG in menu.html
@@ -1754,6 +2085,39 @@ fn icon_pixel(x: f64, y: f64) -> (u8, u8, u8, f64) {
         (OBSIDIAN.0, OBSIDIAN.1, OBSIDIAN.2, 1.0)
     } else if in_rrect(x, y, 2.0, 2.0, 33.0, 33.0, 8.0) {
         (APRICOT.0, APRICOT.1, APRICOT.2, 1.0)
+    } else {
+        (0, 0, 0, 0.0)
+    }
+}
+
+/// Colour of a single busy-spinner pixel: dimmed apricot squircle with a
+/// rotating white arc, transparent elsewhere (pure).
+///
+/// Same 36-space and squircle geometry as [`icon_pixel`], so the busy icon
+/// reads as the idle mark in motion rather than a different glyph. The arc
+/// is a 100° sweep on a 9–13px ring whose centre advances 45° per frame —
+/// one full turn over [`SPINNER_FRAMES`] frames.
+fn spinner_pixel(x: f64, y: f64, frame: usize) -> (u8, u8, u8, f64) {
+    const APRICOT_DIM: (u8, u8, u8) = (150, 105, 78);
+    const RING_INNER: f64 = 9.0;
+    const RING_OUTER: f64 = 13.0;
+    const SWEEP_HALF_DEG: f64 = 50.0;
+    let dx = x - 18.0;
+    let dy = y - 18.0;
+    let dist = (dx * dx + dy * dy).sqrt();
+    let mut angle = dy.atan2(dx).to_degrees();
+    if angle < 0.0 {
+        angle += 360.0;
+    }
+    let centre = (frame as f64 * 45.0) % 360.0;
+    let mut gap = (angle - centre).abs() % 360.0;
+    if gap > 180.0 {
+        gap = 360.0 - gap;
+    }
+    if (RING_INNER..=RING_OUTER).contains(&dist) && gap <= SWEEP_HALF_DEG {
+        (255, 255, 255, 1.0)
+    } else if in_rrect(x, y, 2.0, 2.0, 33.0, 33.0, 8.0) {
+        (APRICOT_DIM.0, APRICOT_DIM.1, APRICOT_DIM.2, 1.0)
     } else {
         (0, 0, 0, 0.0)
     }
@@ -1870,7 +2234,9 @@ fn spawn_toggle_hotkey_listener() {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_args as args, collect_store_records, icon_pixel, stop_phase, StopPhase,
+        agent_args as args, apple_script_string, collect_store_records,
+        completion_notification_text, edit_menu_items, icon_pixel, spinner_frame_for_tick,
+        spinner_pixel, stop_phase, StopPhase, SPINNER_FRAMES, SPINNER_TICKS_PER_FRAME,
         STOP_FINAL_SIGNAL, STOP_FIRST_SIGNAL, STOP_GRACE_SECONDS,
     };
     use std::path::Path;
@@ -1916,6 +2282,22 @@ mod tests {
     }
 
     #[test]
+    fn edit_menu_keeps_copy_paste_select_all_shortcuts() {
+        // Without these five Command-modified entries the panel's inputs
+        // accept typing but Cmd+C/V/X/A/Z never reach the WKWebView.
+        let items = edit_menu_items();
+        for (_, _, key) in &items {
+            assert!(!key.is_empty(), "every Edit item needs a key equivalent");
+        }
+        let by_title = |title: &str| items.iter().find(|(t, _, _)| *t == title);
+        assert_eq!(by_title("Copy"), Some(&("Copy", "copy:", "c")));
+        assert_eq!(by_title("Paste"), Some(&("Paste", "paste:", "v")));
+        assert_eq!(by_title("Cut"), Some(&("Cut", "cut:", "x")));
+        assert_eq!(by_title("Select All"), Some(&("Select All", "selectAll:", "a")));
+        assert_eq!(by_title("Undo"), Some(&("Undo", "undo:", "z")));
+    }
+
+    #[test]
     fn menu_icon_is_sea_blue_squircle_with_white_paper_airplane() {
         // Center of the cursor pointer: obsidian glyph on the squircle.
         assert_eq!(icon_pixel(12.0, 14.0), (18, 17, 16, 1.0));
@@ -1925,6 +2307,60 @@ mod tests {
         assert_eq!(a, 1.0);
         // Outside the squircle (top-left corner): fully transparent.
         assert_eq!(icon_pixel(1.0, 1.0), (0, 0, 0, 0.0));
+    }
+
+    // --- Busy spinner + finished banner ----------------------------------
+    //
+    // The icon animation and the banner are the run's ambient presence: the
+    // frames are pure pixels and the banner text is static, so CI pins both
+    // without a live run.
+
+    #[test]
+    fn spinner_advances_one_frame_per_tick_window_and_wraps() {
+        assert_eq!(spinner_frame_for_tick(0, SPINNER_FRAMES), 0);
+        assert_eq!(spinner_frame_for_tick(SPINNER_TICKS_PER_FRAME - 1, SPINNER_FRAMES), 0);
+        assert_eq!(spinner_frame_for_tick(SPINNER_TICKS_PER_FRAME, SPINNER_FRAMES), 1);
+        assert_eq!(
+            spinner_frame_for_tick(SPINNER_TICKS_PER_FRAME * SPINNER_FRAMES as u64, SPINNER_FRAMES),
+            0,
+            "frame {SPINNER_FRAMES} must wrap back to the start of the turn"
+        );
+        // A partial build still animates; an empty one never divides by zero.
+        assert_eq!(spinner_frame_for_tick(100, 3), (100 / SPINNER_TICKS_PER_FRAME % 3) as usize);
+        assert_eq!(spinner_frame_for_tick(u64::MAX, 0), 0);
+    }
+
+    #[test]
+    fn spinner_frame_zero_carries_the_arc_on_the_ring() {
+        // Frame 0 centres its sweep at 0° (east): a point on the ring due
+        // east of the centre is the white arc, opaque.
+        assert_eq!(spinner_pixel(29.0, 18.0, 0), (255, 255, 255, 1.0));
+        // The same ring point is background in the opposite frame (180°).
+        let (r, g, b, a) = spinner_pixel(29.0, 18.0, SPINNER_FRAMES / 2);
+        assert_eq!((r, g, b), (150, 105, 78));
+        assert_eq!(a, 1.0);
+        // Far outside the squircle stays transparent in every frame.
+        for frame in 0..SPINNER_FRAMES {
+            assert_eq!(spinner_pixel(0.0, 0.0, frame), (0, 0, 0, 0.0));
+        }
+    }
+
+    #[test]
+    fn finished_banner_names_the_outcome() {
+        let (ok_title, ok_msg) = completion_notification_text(true);
+        let (bad_title, bad_msg) = completion_notification_text(false);
+        assert_eq!(ok_title, bad_title, "one product, one banner title");
+        assert!(!ok_title.is_empty() && !ok_msg.is_empty() && !bad_msg.is_empty());
+        assert_ne!(ok_msg, bad_msg, "success and failure must read differently");
+    }
+
+    #[test]
+    fn banner_text_is_quoted_as_one_applescript_literal() {
+        assert_eq!(apple_script_string("plain"), "\"plain\"");
+        assert_eq!(
+            apple_script_string("quote \" and backslash \\"),
+            "\"quote \\\" and backslash \\\\\""
+        );
     }
 
     // --- the panel's data path ------------------------------------------
