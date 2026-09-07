@@ -39,15 +39,32 @@ jobs:
         run: python scripts/apply_research_hardening.py
 
       - name: Verify targeted regressions
-        run: uv run pytest -q tests/smoke/test_research_evidence.py
+        id: targeted
+        continue-on-error: true
+        run: uv run pytest -vv tests/smoke/test_research_evidence.py > audit-targeted.log 2>&1
+
+      - name: Upload targeted diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-targeted-log
+          path: audit-targeted.log
+
+      - name: Stop on targeted regression failure
+        if: steps.targeted.outcome != 'success'
+        run: |
+          cat audit-targeted.log
+          exit 1
 
       - name: Verify Python gates
+        if: steps.targeted.outcome == 'success'
         run: |
           uv run ruff check .
           uv run pyright
           uv run pytest -q --tb=short
 
       - name: Commit only after verification
+        if: steps.targeted.outcome == 'success'
         run: |
           git config user.name 'computer-use audit bot'
           git config user.email 'actions@users.noreply.github.com'
