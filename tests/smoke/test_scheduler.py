@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from computeruse.scheduler import GoalProposal, make_proposal, rank_proposals
 
 
