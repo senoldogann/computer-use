@@ -122,7 +122,7 @@ def test_sovereign_rejects_yes(capsys: pytest.CaptureFixture[str]) -> None:
     )
 
     assert cli._reject_unusable_arguments(args) == 2
-    assert "--sovereign cannot be combined with --yes" in capsys.readouterr().err
+    assert "--sovereign is separate from --yes" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("level", [0, 1, 2])
