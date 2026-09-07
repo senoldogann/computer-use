@@ -13,7 +13,7 @@ import SwiftUI
 enum Theme {
     static let titleZoneHeight: CGFloat = 28
     static let trafficLightCenterY: CGFloat = 14.75
-    static let titleRowHeight: CGFloat = 22
+    static let titleRowHeight: CGFloat = 28
     static let trafficLightClearance: CGFloat = 76
     static let titleHeaderHeight: CGFloat = 28
     static let titleRowTopPadding: CGFloat = trafficLightCenterY - titleRowHeight / 2

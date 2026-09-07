@@ -101,7 +101,9 @@ struct CenterStageView: View {
         .padding(.horizontal, 12)
         .frame(height: Theme.titleRowHeight)
         .padding(.top, Theme.titleRowTopPadding)
-        .background(Color.clear)
+        // Drag surface behind the buttons: empty bar space moves the window,
+        // the toggle buttons themselves stay clickable.
+        .background(TitleBarDragSurface())
     }
 
     private var emptyState: some View {

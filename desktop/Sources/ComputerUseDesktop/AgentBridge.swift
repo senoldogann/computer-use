@@ -251,7 +251,7 @@ extension AgentBridge {
         }
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
             ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dst in
-                _ = pathBytes.withUnsafeBufferPointer { src in
+                pathBytes.withUnsafeBufferPointer { src in
                     dst.initialize(from: src.baseAddress!, count: pathBytes.count)
                 }
             }

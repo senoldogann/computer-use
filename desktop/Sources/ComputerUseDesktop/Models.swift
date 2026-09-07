@@ -258,5 +258,10 @@ final class WindowChromeView: NSView {
         }
         window.isOpaque = false
         window.backgroundColor = .clear
+        // SwiftUI's hiddenTitleBar style enables background dragging, which
+        // makes the whole window move on any mouse-down that isn't claimed by
+        // a control — that is what swallows the top-bar toggle clicks. Turn it
+        // off; dragging is handled explicitly by TitleBarDragSurface.
+        window.isMovableByWindowBackground = false
     }
 }

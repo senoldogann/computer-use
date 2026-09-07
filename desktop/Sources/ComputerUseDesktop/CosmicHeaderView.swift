@@ -131,6 +131,21 @@ final class TitleBarNSButton: NSButton {
     }
 }
 
+/// Full-bar drag surface: clicking the empty top-bar area drags the window;
+/// the toggle buttons sit on top of it and opt out via
+/// `mouseDownCanMoveWindow = false`, so they receive clicks normally.
+struct TitleBarDragSurface: NSViewRepresentable {
+    func makeNSView(context: Context) -> DragSurfaceView {
+        DragSurfaceView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: DragSurfaceView, context: Context) {}
+}
+
+final class DragSurfaceView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 /// Cosmic sidebar header: aligns with the window traffic-lights row.
 /// Contains the traffic light clearance on the left and the sidebar toggle button on the right.
 struct CosmicSidebarHeader: View {
@@ -157,5 +172,6 @@ struct CosmicSidebarHeader: View {
         }
         .frame(height: Theme.titleRowHeight)
         .padding(.top, Theme.titleRowTopPadding)
+        .background(TitleBarDragSurface())
     }
 }

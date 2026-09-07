@@ -15,27 +15,38 @@ struct ComposerView: View {
     }
 
     var body: some View {
-        if shouldBeExpanded {
-            FullComposer(
-                state: state,
-                canCollapse: compact,
-                onCollapse: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isManuallyExpanded = false
+        Group {
+            if shouldBeExpanded {
+                FullComposer(
+                    state: state,
+                    canCollapse: compact,
+                    onCollapse: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isManuallyExpanded = false
+                        }
                     }
-                }
-            )
-            .transition(.opacity.combined(with: .scale(scale: 0.99)))
-        } else {
-            CompactComposer(
-                state: state,
-                onActivate: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isManuallyExpanded = true
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.99)))
+            } else {
+                CompactComposer(
+                    state: state,
+                    onActivate: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isManuallyExpanded = true
+                        }
                     }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.99)))
+            }
+        }
+        // After a send the text clears but a manual expand survives it; snap
+        // back to the compact docked capsule so the input never stays tall.
+        .onChange(of: state.composerText) { _, newValue in
+            if newValue.isEmpty && compact {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isManuallyExpanded = false
                 }
-            )
-            .transition(.opacity.combined(with: .scale(scale: 0.99)))
+            }
         }
     }
 }

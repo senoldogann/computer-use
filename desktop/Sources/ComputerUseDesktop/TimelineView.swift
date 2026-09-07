@@ -49,10 +49,11 @@ struct TimelineView: View {
     }
 
     @State private var isOutputCopied: Bool = false
+    @State private var showConsoleFilter: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // The console toolbar only appears once there is console output to
+            // The console menu only appears once there is console output to
             // manage; an empty conversation starts with the first message at
             // the top instead of a row of buttons.
             if entries.contains(where: { $0.kind == .console }) {
@@ -71,41 +72,77 @@ struct TimelineView: View {
                 .id("entry-\(entry.id)")
             }
 
-            if let telemetry = threadsStore.activeThread?.telemetry {
-                Text(telemetry.label).font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.textSecondary)
-            }
             if isRunning {
                 progressLine
             } else if !entries.isEmpty && entries.contains(where: { $0.kind != .userMessage }) {
                 summaryLine
+                // Token usage & cost land in the footer once the run finishes,
+                // never as live noise (and never mid-run).
+                if let telemetry = threadsStore.activeThread?.telemetry {
+                    Text(telemetry.label)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.leading, 6)
+                }
                 finishedFooterLine
             }
         }
     }
 
+    /// Console controls tucked into a top-right "⋯" menu so the conversation
+    /// itself stays clean: Hide/Show console, filter field, copy log, first error.
     private var consoleToolbar: some View {
-        HStack(spacing: 10) {
-            Button(threadsStore.hideConsole ? "Show console" : "Hide console") {
-                threadsStore.hideConsole.toggle()
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+
+            if showConsoleFilter {
+                TextField("Filter console", text: $threadsStore.consoleFilter)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 130)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Theme.card)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(Theme.borderOverlay, lineWidth: 1)
+                    )
             }
-            TextField("Filter console", text: $threadsStore.consoleFilter)
-                .textFieldStyle(.plain)
-                .frame(maxWidth: 160)
-            Button("Copy log") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entries.filter { $0.kind == .console }.map(\.detail).joined(separator: "\n"), forType: .string)
+
+            Menu {
+                Button(threadsStore.hideConsole ? "Show Console" : "Hide Console") {
+                    threadsStore.hideConsole.toggle()
+                }
+                Button(showConsoleFilter ? "Hide Filter" : "Filter Console…") {
+                    showConsoleFilter.toggle()
+                }
+                Button("Copy Log") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        entries.filter { $0.kind == .console }.map(\.detail).joined(separator: "\n"),
+                        forType: .string
+                    )
+                }
+                Button("First Error") {
+                    threadsStore.hideConsole = false
+                    threadsStore.consoleFilter = ""
+                    threadsStore.scrollTargetID = entries.first(where: \.isFailure)?.id
+                }
+                .disabled(!entries.contains(where: \.isFailure))
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 26, height: 24)
+                    .contentShape(Rectangle())
             }
-            Button("First error") {
-                threadsStore.hideConsole = false
-                threadsStore.consoleFilter = ""
-                threadsStore.scrollTargetID = entries.first(where: \.isFailure)?.id
-            }
-            .disabled(!entries.contains(where: \.isFailure))
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Console options")
         }
-        .font(.system(size: 10))
-        .foregroundStyle(Theme.textSecondary)
-        .buttonStyle(.plain)
-        .hoverPointer(radius: 5)
     }
 
     // MARK: - Live Progress Line
@@ -272,17 +309,7 @@ private struct TimelineRow: View {
             case .plan:
                 PlanChecklistView(state: state, entry: entry)
             case .console:
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        Text(entry.createdAt, format: .dateTime.hour().minute().second())
-                        Spacer()
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(entry.detail, forType: .string)
-                        }.buttonStyle(.plain).hoverPointer(radius: 4)
-                    }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Theme.textMuted)
-                    StepLineView(threadsStore: threadsStore, entry: entry, isLiveLast: isLiveLast)
-                }
+                StepLineView(threadsStore: threadsStore, entry: entry, isLiveLast: isLiveLast)
             case .thinking, .action:
                 StepLineView(
                     threadsStore: threadsStore,
@@ -299,8 +326,6 @@ private struct TimelineRow: View {
 private struct UserMessageBubble: View {
     let text: String
     let createdAt: Date
-    @State private var isHovered = false
-    @State private var isCopied = false
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
@@ -320,35 +345,13 @@ private struct UserMessageBubble: View {
                     )
             }
 
-            HStack(spacing: 6) {
-                Text(formatTime(createdAt))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Theme.textMuted.opacity(0.55))
-
-                Group {
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                        isCopied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                            isCopied = false
-                        }
-                    } label: {
-                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11))
-                            .foregroundStyle(isCopied ? Theme.success : (isHovered ? Theme.textPrimary : Theme.textMuted.opacity(0.6)))
-                            .frame(width: 22, height: 22)
-                            .background(isHovered ? Theme.cardElevated : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .hoverPointer(radius: 4)
-                    .help("Copy message")
-                }
-            }
-            .padding(.trailing, 4)
+            // One copy action lives in the finished footer; per-message copy
+            // buttons only add noise.
+            Text(formatTime(createdAt))
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.textMuted.opacity(0.55))
+                .padding(.trailing, 4)
         }
-        .onHover { isHovered = $0 }
     }
 
     private func formatTime(_ date: Date) -> String {
