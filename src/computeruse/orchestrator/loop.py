@@ -1586,6 +1586,12 @@ class OodaRunner:
                 self.budget_guard()
 
             # OBSERVE: one snapshot feeds the decision, the gates, and VERIFY.
+            # Timed: the per-phase split (observe / decide / act) is what
+            # answers "model-bound or machine-bound" without guessing, and it
+            # rides the trace record so the panel and the file agree.
+            turn_observe_s = 0.0
+            turn_decide_s = 0.0
+            observe_started = time.monotonic()
             try:
                 state = self._observe(state)
             except AppFrozenError as exc:
@@ -1597,6 +1603,7 @@ class OodaRunner:
                 state = replace(state, last_error=hint)
                 LOGGER.warning("ooda observe failed: %s", hint)
                 continue
+            turn_observe_s += time.monotonic() - observe_started
             # The fresh observation is also the verdict on the previous
             # action: did anything actually move? (Stuck-loop guard.)
             state = self._settle_progress(state)
@@ -1615,6 +1622,7 @@ class OodaRunner:
             # The provider decides against exactly this snapshot; remember the
             # window it describes so ACT can detect the host moving underneath.
             self._decision_window = self._decision_window_of(self._observation)
+            decide_started = time.monotonic()
             try:
                 decision = self.provider(state)
             except KillSwitchTripped:
@@ -1631,6 +1639,7 @@ class OodaRunner:
                 state = replace(state, last_error=hint)
                 LOGGER.warning("ooda provider turn failed: %s", hint)
                 continue
+            turn_decide_s = time.monotonic() - decide_started
             if decision.thought:
                 LOGGER.info("ooda thought: %s", decision.thought)
             if decision.sub_goal:
@@ -1674,6 +1683,7 @@ class OodaRunner:
                         self._observation.signature,
                         f"{_win.app_name}|{_win.window_title}" if _win is not None else "",
                     )
+                    reobserve_started = time.monotonic()
                     try:
                         state = self._observe(state)
                     except AppFrozenError as exc:
@@ -1684,6 +1694,7 @@ class OodaRunner:
                         hint = self._register_failure(exc, None, goal)
                         state = replace(state, last_error=hint)
                         break
+                    turn_observe_s += time.monotonic() - reobserve_started
                     # The batch's later actions were chosen from the pre-batch
                     # frame; accept them against the refreshed one rather than
                     # tripping the staleness gate on our own re-observation.
@@ -1718,7 +1729,8 @@ class OodaRunner:
                     update={"action": batch_action, "actions": None}
                 )
                 state, finished, stop_batch = self._execute_one(
-                    state, single, goal, marks=decision_marks
+                    state, single, goal, marks=decision_marks,
+                    turn_observe_s=turn_observe_s, turn_decide_s=turn_decide_s,
                 )
                 self._last_state = state
                 if finished or stop_batch:
@@ -1767,6 +1779,8 @@ class OodaRunner:
         goal: str,
         *,
         marks: tuple[MarkElement, ...],
+        turn_observe_s: float = 0.0,
+        turn_decide_s: float = 0.0,
     ) -> tuple[WorkingState, bool, bool]:
         """Run one action through VALIDATE -> ACT -> VERIFY -> RECOVER (shell).
 
@@ -1784,6 +1798,9 @@ class OodaRunner:
           ``last_error`` for the next provider turn) or a ``finish`` advanced
           a hierarchical plan. Either way the outer cycle re-observes.
         """
+        # Act-phase clock for the trace record. Every exit below traces
+        # exactly once (or raises), so one start timestamp serves all paths.
+        act_started = time.monotonic()
         # Coordinate gate: the provider reports coordinates in the screenshot
         # map's image space; convert them to real screen points before
         # anything validates or actuates them. ``ScreenMap`` owns the
@@ -1822,7 +1839,8 @@ class OodaRunner:
             # and why that index no longer names anything.
             outcome = decide_step(state, decision)
             self._trace_step(
-                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}"
+                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}",
+                phase_s=self._phase_seconds(act_started, turn_observe_s, turn_decide_s),
             )
             hint = self._register_failure(exc, decision.action, goal)
             LOGGER.warning("ooda mark resolution failed: %s", hint)
@@ -1916,7 +1934,10 @@ class OodaRunner:
             # Physical drivers may also raise a trip (e.g. during a long
             # type/drag); propagate it out cleanly rather than folding it
             # into a generic failure.
-            self._trace_step(decision, outcome, verdict=None, error=str(exc))
+            self._trace_step(
+                decision, outcome, verdict=None, error=str(exc),
+                phase_s=self._phase_seconds(act_started, turn_observe_s, turn_decide_s),
+            )
             raise
         except Exception as exc:  # noqa: BLE001 - shell must survive provider/OS faults
             # RECOVER: classify, count, and hand the model an escalating hint.
@@ -1926,7 +1947,8 @@ class OodaRunner:
             # may abort the run outright, and the step that ended it is the
             # one a person will want to read.
             self._trace_step(
-                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}"
+                decision, outcome, verdict=None, error=f"{type(exc).__name__}: {exc}",
+                phase_s=self._phase_seconds(act_started, turn_observe_s, turn_decide_s),
             )
             hint = self._register_failure(exc, outcome.action, goal)
             state = replace(state, last_error=hint)
@@ -1947,6 +1969,7 @@ class OodaRunner:
                 outcome,
                 verdict=None,
                 error=state.last_error if (not finished or getattr(outcome.action, "status", None) != "success") else None,
+                phase_s=self._phase_seconds(act_started, turn_observe_s, turn_decide_s),
             )
             return state, finished, stop_batch
 
@@ -1974,7 +1997,10 @@ class OodaRunner:
             self._consecutive_search_misses = 0
             self._reset_tool_streak()
             self._record_for_progress(outcome.action)
-        self._trace_step(decision, outcome, verdict=verdict, error=None, tool_result=tool_preview)
+        self._trace_step(
+            decision, outcome, verdict=verdict, error=None, tool_result=tool_preview,
+            phase_s=self._phase_seconds(act_started, turn_observe_s, turn_decide_s),
+        )
         # A successful action clears obsolete recovery diagnostics: the
         # provider must not keep steering around a failure that already
         # recovered (M1). A stuck-loop hint is re-injected by the next
@@ -2020,6 +2046,21 @@ class OodaRunner:
             raise StaleMarkError(mark=action.mark, label=chosen.label)
         return resolved
 
+    def _phase_seconds(
+        self, act_started: float, turn_observe_s: float, turn_decide_s: float
+    ) -> dict[str, float]:
+        """Phase timings for the step being traced (shell helper, not pure).
+
+        Reads the clock, so it lives on the shell next to the other timing
+        calls rather than in the pure core. Rounded to milliseconds to keep
+        the trace line and the live stream tidy.
+        """
+        return {
+            "observe_s": round(turn_observe_s, 3),
+            "decide_s": round(turn_decide_s, 3),
+            "act_s": round(time.monotonic() - act_started, 3),
+        }
+
     def _trace_step(
         self,
         decision: AgentTurn,
@@ -2028,6 +2069,7 @@ class OodaRunner:
         verdict: Evidence | None,
         error: str | None,
         tool_result: str | None = None,
+        phase_s: dict[str, float] | None = None,
     ) -> None:
         """Hand one step to the observability sink (best effort, never fatal).
 
@@ -2057,6 +2099,7 @@ class OodaRunner:
                     error=error,
                     screenshot_b64=self._observation.screenshot_b64,
                     tool_result=tool_result,
+                    phase_s=phase_s,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - a trace sink must never kill a run

@@ -85,6 +85,12 @@ class StepTrace:
     #: the live stream stays small while the trace file keeps the preview the
     #: panel actually rendered.
     tool_result: str | None = None
+    #: Per-phase wall-clock seconds for this step: observe (sensing), decide
+    #: (the provider/LLM turn) and act (validate, actuate, verify, recover).
+    #: The three-way split is what answers "is the run model-bound or
+    #: machine-bound" without guessing. ``None`` when the runner did not
+    #: measure (older callers).
+    phase_s: dict[str, float] | None = None
 
 
 def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
@@ -111,6 +117,7 @@ def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
         "verdict": record.verdict,
         "error": record.error,
         "tool_result": record.tool_result,
+        "phase_s": record.phase_s,
         "screenshot": screenshot,
     }
     return json.dumps(payload, ensure_ascii=False, default=str)

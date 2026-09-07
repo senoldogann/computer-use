@@ -222,3 +222,49 @@ def test_the_event_prefix_cannot_be_confused_with_log_prose() -> None:
         "goal        : do a thing",
     ):
         assert not prose.startswith(EVENT_PREFIX)
+
+
+def test_phase_timings_serialize_when_measured() -> None:
+    """The observe/decide/act split must reach the trace file and the stream."""
+    phases = {"observe_s": 0.412, "decide_s": 12.05, "act_s": 1.003}
+    payload = json.loads(step_trace_json(_record(tool_result=None), screenshot=None))
+    assert payload["phase_s"] is None, "unmeasured steps stay null, not zero"
+    measured = json.loads(
+        step_trace_json(
+            _record(
+                action={"type": "mouse_click", "x": 1, "y": 2},
+                tool_result=None,
+                phase_s=dict(phases),
+            ),
+            screenshot=None,
+        )
+    )
+    assert measured["phase_s"] == phases
+    assert json.loads(event_line(_record(phase_s=dict(phases)))[len(EVENT_PREFIX):])[
+        "phase_s"
+    ] == phases
+
+
+def test_traced_steps_carry_phase_timings() -> None:
+    """Every traced step — success or failure — carries the three phases."""
+    records: list[StepTrace] = []
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(MouseClick(type="mouse_click", x=10, y=10))
+        return _turn(Finish(type="finish", status="success", summary="ok"))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda _a: None,
+        trace=records.append,
+        run_id="run-phases",
+        app="Safari",
+        max_steps=5,
+    )
+    runner.run(goal="x")
+    assert [r.step for r in records] == [0, 1]
+    for record in records:
+        assert record.phase_s is not None
+        assert set(record.phase_s) == {"observe_s", "decide_s", "act_s"}
+        assert all(value >= 0 for value in record.phase_s.values())
