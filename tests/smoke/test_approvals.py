@@ -22,6 +22,7 @@ from computeruse.security.approvals import (
     ApprovalRequiredError,
     approval_request_for,
     decided,
+    find_usable_approval,
     goals_awaiting_decision,
     pending_requests,
     requests_for_mission,
@@ -252,6 +253,91 @@ def test_the_runner_parks_instead_of_hanging_or_dying() -> None:
     assert retrospective is not None
     assert "paused for human approval" in retrospective
     assert queue_dir[0].request_id in retrospective
+
+
+def test_approved_request_matches_only_the_exact_decision() -> None:
+    """An approval must not silently apply to a different action."""
+    turn = _turn("delete the stale export")
+    base = _request(sub_goal="delete the stale export")
+    approved = decided(base, approved=True, now=NOW)
+    assert isinstance(approved, ApprovalRequest)
+    assert find_usable_approval((approved,), turn, "Delete Permanently") is approved
+    moved = AgentTurn(
+        thought="the flow needs this",
+        sub_goal="delete the stale export",
+        action=MouseClick(type="mouse_click", x=999, y=90),
+    )
+    assert find_usable_approval((approved,), moved, "Delete Permanently") is None
+    assert find_usable_approval((approved,), turn, "Other Button") is None
+    other_goal = AgentTurn(
+        thought="the flow needs this",
+        sub_goal="delete something else",
+        action=MouseClick(type="mouse_click", x=120, y=90),
+    )
+    assert find_usable_approval((approved,), other_goal, "Delete Permanently") is None
+
+
+def test_only_approved_requests_are_usable() -> None:
+    turn = _turn("delete the stale export")
+    pending = _request(sub_goal="delete the stale export")
+    assert isinstance(pending, ApprovalRequest)
+    assert find_usable_approval((pending,), turn, "Delete Permanently") is None
+    denied = decided(_request(sub_goal="delete the stale export"), approved=False, now=NOW)
+    assert find_usable_approval((denied,), turn, "Delete Permanently") is None
+
+
+def test_consumed_approval_cannot_be_reused(tmp_path: Path) -> None:
+    queue = ApprovalQueue(tmp_path)
+    request = _request(sub_goal="delete the stale export")
+    assert isinstance(request, ApprovalRequest)
+    queue.submit(request)
+    queue.resolve(request.request_id, approved=True, now=NOW)
+    turn = _turn("delete the stale export")
+    usable = find_usable_approval(queue.requests(), turn, "Delete Permanently")
+    assert usable is not None
+    queue.consume(usable.request_id, now=NOW)
+    assert find_usable_approval(queue.requests(), turn, "Delete Permanently") is None
+
+
+def test_guarded_uses_a_matching_approval_single_use(tmp_path: Path) -> None:
+    """The guard turns one CONFIRM into ALLOW and consumes the token."""
+    from computeruse.agent import guarded
+    from computeruse.orchestrator.loop import EMPTY_OBSERVATION
+    from computeruse.security.autonomy import AutonomyLevel
+
+    queue = ApprovalQueue(tmp_path)
+    request = _request(sub_goal="delete the stale export")
+    assert isinstance(request, ApprovalRequest)
+    queue.submit(request)
+    queue.resolve(request.request_id, approved=True, now=NOW)
+
+    def consume_approval(turn: AgentTurn, label: str | None) -> ApprovalRequest | None:
+        matched = find_usable_approval(queue.requests(), turn, label)
+        if matched is None:
+            return None
+        return queue.consume(matched.request_id, now=NOW)
+
+    guard = guarded(
+        AutonomyLevel.FULL,
+        authorize=None,
+        consume_approval=consume_approval,
+    )
+    turn = AgentTurn(
+        thought="t",
+        sub_goal="delete the stale export",
+        action=MouseClick(type="mouse_click", x=120, y=90),
+    )
+    # No AX element covers the point, so the label is None; the stored
+    # request used "Delete Permanently" and must NOT match here. Submit a
+    # matching None-label approval for the single-use check instead.
+    none_request = approval_request_for(
+        turn, goal="g", mission_id=None, target_label=None,
+        risk="destructive", now=NOW,
+    )
+    queue.submit(none_request)
+    queue.resolve(none_request.request_id, approved=True, now=NOW)
+    assert guard(turn, EMPTY_OBSERVATION) is PermissionDecision.ALLOW
+    assert guard(turn, EMPTY_OBSERVATION) is PermissionDecision.CONFIRM
 
 
 def test_a_parked_goal_is_not_proposed_again_while_it_waits() -> None:

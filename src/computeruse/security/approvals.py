@@ -30,6 +30,7 @@ is the connector that puts them on disk.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -197,6 +198,63 @@ def consumed(request: ApprovalRequest, *, now: datetime) -> ApprovalRequest:
             "decided_at": now,
         }
     )
+
+
+def approval_action_hash(
+    *, sub_goal: str, action: dict[str, object], target_label: str | None
+) -> str:
+    """Stable identity of one parked question (pure).
+
+    Binds the exact action payload with the stated sub-goal and the
+    accessibility title the guard classified, so an approval cannot
+    silently apply to a different action later.
+    """
+    canonical = json.dumps(
+        {"sub_goal": sub_goal, "action": action, "target_label": target_label},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def turn_action_hash(turn: AgentTurn, target_label: str | None) -> str:
+    """Hash the live decision the same way parked requests were hashed (pure)."""
+    return approval_action_hash(
+        sub_goal=turn.sub_goal,
+        action=turn.action.model_dump(exclude_none=True),
+        target_label=target_label,
+    )
+
+
+def request_action_hash(request: ApprovalRequest) -> str:
+    """Hash a stored request for comparison with a live decision (pure)."""
+    return approval_action_hash(
+        sub_goal=request.sub_goal,
+        action=request.action,
+        target_label=request.target_label,
+    )
+
+
+def find_usable_approval(
+    requests: tuple[ApprovalRequest, ...],
+    turn: AgentTurn,
+    target_label: str | None,
+) -> ApprovalRequest | None:
+    """Oldest approved request matching this exact decision, if any (pure).
+
+    Only ``approved`` requests qualify; ``pending`` is still a question,
+    ``denied`` stays denied, ``consumed`` is single-use and never reused.
+    """
+    wanted = turn_action_hash(turn, target_label)
+    candidates = [
+        request
+        for request in requests
+        if request.decision == "approved" and request_action_hash(request) == wanted
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda request: request.created_at)
 
 
 class ApprovalRequiredError(RuntimeError):

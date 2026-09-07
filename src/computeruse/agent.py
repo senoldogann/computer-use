@@ -61,7 +61,14 @@ from computeruse.orchestrator.loop import (
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
 from computeruse.orchestrator.trace import RunTracer, StepTrace, event_line, new_run_id
-from computeruse.security.approvals import now_utc as grant_now
+from computeruse.security.approvals import (
+    ApprovalQueue,
+    ApprovalRequest,
+    find_usable_approval,
+)
+from computeruse.security.approvals import (
+    now_utc as grant_now,
+)
 from computeruse.security.autonomy import (
     AutonomyLevel,
     PermissionDecision,
@@ -87,8 +94,11 @@ from computeruse.vision.ax import (
     dialogue_element_summaries,
     dialogue_notes,
     interactive_summaries,
+    ocr_dialog_notes,
+    ocr_dialog_summaries,
     open_tabs_from_tree,
     recognized_summaries,
+    web_content_clipped_below,
 )
 from computeruse.vision.ax import focused_text_value as _focused_text_value_from_tree
 from computeruse.vision.capture import ScreenCapture
@@ -254,6 +264,7 @@ def guarded(
     *,
     authorize: Callable[[AgentTurn, str | None], GrantVerdict] | None,
     auto_approve: bool = False,
+    consume_approval: Callable[[AgentTurn, str | None], ApprovalRequest | None] | None = None,
 ) -> Callable[[AgentTurn, Observation], PermissionDecision]:
     """Build the VALIDATE-step guard for an autonomy level (pure).
 
@@ -271,6 +282,11 @@ def guarded(
     the constitution's plain level/risk table, which is what a caller with no
     grant store should get: no grants means everything destructive asks.
 
+    ``consume_approval`` consults the human's recorded answers: a matching
+    ``approved`` request is consumed single-use and turns one CONFIRM into
+    ALLOW. BLOCK and ALLOW pass through untouched, so an approval can never
+    permit what the policy forbade.
+
     ``auto_approve`` is trust mode (--yes): CONFIRM becomes ALLOW, BLOCK still
     blocks. The safety floor (kill-switch, budget, verification, stuck-guard)
     keeps running; only the human prompt is skipped, and the caller logs it.
@@ -285,6 +301,14 @@ def guarded(
             else None
         )
         base = decide_with_grant(level, risk, verdict)
+        if base is PermissionDecision.CONFIRM and consume_approval is not None:
+            approved = consume_approval(turn, label)
+            if approved is not None:
+                LOGGER.info(
+                    "action authorised by approval %s",
+                    approved.request_id,
+                )
+                return PermissionDecision.ALLOW
         if auto_approve and base is PermissionDecision.CONFIRM:
             LOGGER.info(
                 "trust mode: auto-approved %s for %r (risk=%s)",
@@ -743,7 +767,9 @@ class Agent:
                     return False
                 return client.ax_press(current_pid, point.x, point.y)
 
-            def ocr_fallback(summaries: tuple[str, ...]) -> tuple[str, ...]:
+            def ocr_fallback(
+                summaries: tuple[str, ...],
+            ) -> tuple[tuple[str, ...], tuple[str, ...]]:
                 """Read the screen with OCR when the AX tree gave us nothing.
 
                 ADR-2's fallback, and it fires only where ADR-2 says it should:
@@ -756,11 +782,18 @@ class Agent:
                 refused Screen Recording consent raises, and either way the run
                 continues exactly as it did before — a fallback that could end
                 a run would be worse than the blindness it is treating.
+
+                Returns ``(summaries, dialog_notes)``: the readable lines, and
+                any consent/security-check overlays detected in them. When the
+                AX tree is blind, a cookie wall would otherwise be invisible to
+                the detector AND to the model — the OCR text is the only
+                witness that the wall exists, and its decision lines become the
+                first numbered marks so the model resolves it first.
                 """
                 if not ax_left_us_blind(
                     summaries, threshold=AX_BLINDNESS_THRESHOLD
                 ):
-                    return ()
+                    return (), ()
                 try:
                     lines = client.recognize_text(
                         display_id=self._config.display_id,
@@ -774,15 +807,22 @@ class Agent:
                     )
                 except Exception as exc:  # noqa: BLE001 - a fallback may not raise
                     LOGGER.debug("OCR fallback unavailable: %s", exc)
-                    return ()
+                    return (), ()
                 if not lines:
-                    return ()
+                    return (), ()
                 LOGGER.info(
                     "AX exposed %d element(s); grounding on %d OCR line(s) instead",
                     len(summaries),
                     len(lines),
                 )
-                return recognized_summaries(lines)
+                base = recognized_summaries(lines)
+                ocr_dialog_lines = ocr_dialog_summaries(lines)
+                if ocr_dialog_lines:
+                    seen: set[str] = set(ocr_dialog_lines)
+                    base = ocr_dialog_lines + tuple(
+                        line for line in base if line not in seen
+                    )
+                return base, ocr_dialog_notes(lines)
 
             def ax_probe() -> AxProbeResult:
                 current_pid = target_pid()
@@ -825,7 +865,17 @@ class Agent:
                         "be missing; rely on the screenshot map for coordinates)"
                     )
                     summaries = summaries + (truncation_note,)
-                summaries = summaries + ocr_fallback(summaries)
+                if web_content_clipped_below(tree, viewport):
+                    # The page's document extends below the visible area, and
+                    # the model cannot know that from the screenshot alone —
+                    # it sees the visible slice and concludes the target does
+                    # not exist. Name the condition so it scrolls instead of
+                    # finishing.
+                    summaries = summaries + (
+                        "(the page extends below the visible area — scroll down with mouse_scroll dy>0 after moving the cursor over the content)",
+                    )
+                ocr_summaries, ocr_notes = ocr_fallback(summaries)
+                summaries = summaries + ocr_summaries
                 return AxProbeResult(
                     summaries=summaries,
                     open_tabs=open_tabs_from_tree(tree),
@@ -835,7 +885,7 @@ class Agent:
                     # password box that fell off the end of it is still a
                     # password box on the screen.
                     asks_for_credential=asks_for_a_credential(tree),
-                    dialog_notes=dialogue_notes(dialogs),
+                    dialog_notes=dialogue_notes(dialogs) + ocr_notes,
                 )
 
             def focused_text_value_probe() -> str | None:
@@ -963,6 +1013,35 @@ class Agent:
                     LOGGER.info("action authorised by %s", verdict.reason)
                 return verdict
 
+            approval_queue = ApprovalQueue(self._config.store_dir / "approvals")
+
+            def approval_consumer(
+                turn: AgentTurn, target_label: str | None
+            ) -> ApprovalRequest | None:
+                """Consume a matching approved request single-use, if any.
+
+                Pre-consume is fail-closed like grants: a use we cannot
+                record as spent is a use we must not honour.
+                """
+                try:
+                    candidates = approval_queue.requests()
+                except OSError as exc:
+                    LOGGER.warning("approval queue unreadable: %s", exc)
+                    return None
+                matched = find_usable_approval(candidates, turn, target_label)
+                if matched is None:
+                    return None
+                try:
+                    return approval_queue.consume(matched.request_id, now=grant_now())
+                except (KeyError, ValueError, OSError) as exc:
+                    LOGGER.warning(
+                        "approval %s could not be consumed (%s); "
+                        "treating the action as unauthorised",
+                        matched.request_id,
+                        exc,
+                    )
+                    return None
+
             cua_repl_engine = None
             if self._config.enable_cua_repl:
                 from computeruse.repl.engine import CuaReplEngine
@@ -983,6 +1062,7 @@ class Agent:
                     self._config.autonomy_level,
                     authorize=grant_authorizer,
                     auto_approve=self._config.auto_approve,
+                    consume_approval=approval_consumer,
                 ),
                 confirm_handler=self._config.confirm_handler,
                 # One capture source, two consumers: ORIENT verification and
