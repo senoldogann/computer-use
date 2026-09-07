@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-import computeruse.cli as cli
+from computeruse import cli
 from computeruse.agent import guarded
 from computeruse.orchestrator.loop import EMPTY_OBSERVATION
 from computeruse.orchestrator.schemas import AgentTurn, ClipboardPaste
