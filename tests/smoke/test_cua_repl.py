@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-from smoke.cua_fakes import fake_capture
+from smoke.cua_fakes import MockDriverClient
 
 from computeruse.orchestrator.schemas import (
     Action,
@@ -22,38 +20,6 @@ from computeruse.repl.engine import (
     parse_hotkey_action,
 )
 from computeruse.vision.ax import AXElement
-from computeruse.vision.capture import ScreenCapture
-
-
-class MockDriverClient:
-    """Mock client capturing driver calls for verification."""
-
-    def __init__(self) -> None:
-        self.sent_actions: list[Action] = []
-        self.activated_apps: list[str] = []
-        # Which application owns the front window. Modelled rather than
-        # assumed: the engine confirms focus before it posts a keystroke, and
-        # a fake that ignores activation cannot express that contract.
-        self.frontmost: str = "TextEdit"
-
-    def send(self, action: Action) -> None:
-        self.sent_actions.append(action)
-
-    def release_inputs(self) -> None:
-        """No hardware is held by this recording driver."""
-
-    def activate_app(self, app_name: str) -> None:
-        self.activated_apps.append(app_name)
-        self.frontmost = app_name
-
-    def focused_window(self) -> dict[str, Any]:
-        return {"app_name": self.frontmost, "app": self.frontmost, "bundle_id": ""}
-
-    def list_apps(self) -> list[str]:
-        return ["TextEdit", "Safari", "Finder"]
-
-    def capture(self) -> ScreenCapture:
-        return fake_capture()
 
 
 def test_cua_repl_result_mcp_json_contract() -> None:

@@ -33,10 +33,11 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageRep, NSColor,
     NSImage, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSWindow, NSWindowButton,
     NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSVisualEffectView, NSVisualEffectMaterial, NSVisualEffectBlendingMode, NSVisualEffectState,
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
 use objc2_core_graphics::CGContext;
-use objc2_foundation::{NSString, NSInteger, NSTimer, NSURL};
+use objc2_foundation::{NSNumber, NSString, NSInteger, NSTimer, NSURL};
 use objc2_web_kit::{
     WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView,
     WKWebViewConfiguration,
@@ -355,8 +356,10 @@ pub fn run() -> ! {
     );
     let menu_icon = menu_icon(mtm);
     let panel = build_panel(mtm);
+    let effect = build_effect_view(mtm);
     let webview = build_webview(mtm);
-    panel.setContentView(Some(&webview));
+    effect.addSubview(&webview);
+    panel.setContentView(Some(&effect));
     PANEL_PTR.store(
         (&*panel as *const NSWindow).cast_mut().cast(),
         core::sync::atomic::Ordering::SeqCst,
@@ -390,6 +393,12 @@ pub fn run() -> ! {
     let _timer = unsafe {
         NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 30.0, true, &timer_block)
     };
+
+    if std::env::var("COMPUTERUSE_SHOW_PANEL").map(|v| v == "1").unwrap_or(false) {
+        toggle_panel_ui();
+    }
+
+    spawn_toggle_hotkey_listener();
 
     app.run();
     std::process::exit(0)
@@ -628,6 +637,25 @@ define_class!(
     }
 );
 
+
+fn set_panel_compact(compact: bool) {
+    let ptr = PANEL_PTR.load(core::sync::atomic::Ordering::SeqCst);
+    if ptr.is_null() {
+        return;
+    }
+    let panel = unsafe { &*(ptr as *const NSWindow) };
+    let current_frame = panel.frame();
+    let target_height: f64 = if compact { 72.0 } else { 640.0 };
+    if (current_frame.size.height - target_height).abs() < 2.0 {
+        return;
+    }
+    let new_frame = objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(current_frame.origin.x, current_frame.origin.y),
+        objc2_core_foundation::CGSize::new(480.0, target_height),
+    );
+    panel.setFrame_display_animate(new_frame, true, true);
+}
+
 fn toggle_panel_ui() {
     eprintln!("[menu] toggle fired");
     let ptr = PANEL_PTR.load(core::sync::atomic::Ordering::SeqCst);
@@ -668,6 +696,23 @@ fn activate_app() {
 // WKWebView construction + UI messaging
 // ---------------------------------------------------------------------------
 
+fn build_effect_view(mtm: MainThreadMarker) -> Retained<NSVisualEffectView> {
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 72.0));
+    let effect = NSVisualEffectView::initWithFrame(
+        NSVisualEffectView::alloc(mtm),
+        frame,
+    );
+    effect.setMaterial(NSVisualEffectMaterial::HUDWindow);
+    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    effect.setState(NSVisualEffectState::Active);
+    effect.setWantsLayer(true);
+    effect.setAutoresizingMask(
+        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
+    effect
+}
+
 fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
     // SAFETY: standard AppKit/WebKit object graph; the config and controller
     // are owned for the webview's lifetime here.
@@ -678,8 +723,18 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
         let bridge: Retained<ScriptBridge> = msg_send![bridge, init];
         let name = NSString::from_str("bridge");
         let _: () = controller.addScriptMessageHandler_name(ProtocolObject::from_ref(&*bridge), &name);
-        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
+        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 72.0));
         let webview = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
+
+        // KVC: disable opaque default background so native NSVisualEffectView vibrancy and CSS glass show through
+        let false_val = NSNumber::numberWithBool(false);
+        let key = NSString::from_str("drawsBackground");
+        let _: () = msg_send![&*webview, setValue: &*false_val, forKey: &*key];
+
+        webview.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
         let html = NSString::from_str(include_str!("../assets/menu.html"));
         let base = NSURL::fileURLWithPath(&NSString::from_str("/"));
         webview.loadHTMLString_baseURL(&html, Some(&base));
@@ -688,7 +743,7 @@ fn build_webview(mtm: MainThreadMarker) -> Retained<WKWebView> {
 }
 
 fn build_panel(mtm: MainThreadMarker) -> Retained<NSWindow> {
-    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 640.0));
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(480.0, 72.0));
     // Titled | FullSizeContentView: the title bar is hidden (transparent) so
     // the panel reads as floating glass, but the window stays *key* so the
     // user can actually type into the embedded web page.
@@ -856,7 +911,13 @@ fn handle_script_message(message: &WKScriptMessage) {
             if let Some(mcp) = value.get("mcp").and_then(serde_json::Value::as_bool) {
                 MCP_ENABLED.store(mcp, core::sync::atomic::Ordering::SeqCst);
             }
-            run_agent(&goal, app.as_deref(), level, trust);
+            let model = value
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            run_agent(&goal, app.as_deref(), level, trust, model.as_deref());
         }
         Some("set_level") => {
             if let Some(level) = value.get("level").and_then(serde_json::Value::as_u64) {
@@ -952,7 +1013,93 @@ fn handle_script_message(message: &WKScriptMessage) {
                 }
             }
         }
+                Some("get_models") => {
+            let key = openai_key();
+            let has_openai = key.is_some();
+            let mut models: Vec<serde_json::Value> = Vec::new();
+
+            if let Some(ref api_key) = key {
+                let cache_path = std::path::Path::new("/tmp/computeruse_openai_models.json");
+                let mut loaded_from_cache = false;
+                if let Ok(cache_text) = std::fs::read_to_string(cache_path) {
+                    if let Ok(cached_json) = serde_json::from_str::<serde_json::Value>(&cache_text) {
+                        if let Some(list) = cached_json.as_array() {
+                            models = list.clone();
+                            loaded_from_cache = true;
+                        }
+                    }
+                }
+
+                if !loaded_from_cache {
+                    if let Ok(output) = std::process::Command::new("curl")
+                        .args([
+                            "-s",
+                            "--max-time", "3",
+                            "-H", &format!("Authorization: Bearer {}", api_key),
+                            "https://api.openai.com/v1/models",
+                        ])
+                        .output()
+                    {
+                        if output.status.success() {
+                            if let Ok(json_resp) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                                if let Some(list) = json_resp.get("data").and_then(serde_json::Value::as_array) {
+                                    for item in list {
+                                        if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
+                                            if id.starts_with("gpt-") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("chat") {
+                                                models.push(serde_json::json!({
+                                                    "id": format!("openai:{}", id),
+                                                    "name": id,
+                                                    "provider": "openai",
+                                                    "available": true
+                                                }));
+                                            }
+                                        }
+                                    }
+                                    let _ = std::fs::write(cache_path, serde_json::to_string(&models).unwrap_or_default());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if models.is_empty() {
+                for id in ["gpt-4o", "gpt-4o-mini", "o3-mini", "o1", "gpt-4-turbo"] {
+                    models.push(serde_json::json!({
+                        "id": format!("openai:{}", id),
+                        "name": id,
+                        "provider": "openai",
+                        "available": has_openai
+                    }));
+                }
+            }
+
+            let response = serde_json::json!({
+                "providers": {
+                    "openai": { "configured": has_openai, "name": "OpenAI" },
+                    "anthropic": { "configured": false, "name": "Anthropic" },
+                    "google": { "configured": false, "name": "Google" },
+                    "local": { "configured": false, "name": "Ollama (Local)" }
+                },
+                "models": models
+            });
+
+            if let Ok(json_str) = serde_json::to_string(&response) {
+                let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
+                if !ptr.is_null() {
+                    let wv = unsafe { &*(ptr as *const WKWebView) };
+                    let js = format!("if(window.onModelsLoaded)window.onModelsLoaded({json_str});");
+                    call_js(wv, &js);
+                }
+            }
+        }
         Some("stop") => stop_agent(),
+        Some("toggle_panel") => toggle_panel_ui(),
+        Some("set_compact") => {
+            if let Some(compact) = value.get("compact").and_then(serde_json::Value::as_bool) {
+                set_panel_compact(compact);
+            }
+        }
         Some("confirm") => {
             // Law 5.1: the panel's Approve/Deny answer for an action the agent
             // paused on. Written to the child's piped stdin; the CLI's confirm
@@ -1119,6 +1266,7 @@ fn agent_args(
     level: u8,
     mcp: bool,
     trust: bool,
+    model: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -1130,7 +1278,7 @@ fn agent_args(
         "--real".to_string(),
         // Never let a real host silently fall into the demo provider.
         "--model".to_string(),
-        "openai".to_string(),
+        model.filter(|m| !m.is_empty()).unwrap_or("openai").to_string(),
         "--driver".to_string(),
         driver_bin.to_string(),
         "--socket".to_string(),
@@ -1154,7 +1302,7 @@ fn agent_args(
     args
 }
 
-fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool) {
+fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool, model: Option<&str>) {
     TRUST_MODE.store(trust, core::sync::atomic::Ordering::SeqCst);
     // Guard: never double-run while one is in flight.
     let already = SHARED.lock().unwrap().child_pid.is_some();
@@ -1211,7 +1359,7 @@ fn run_agent(goal: &str, app: Option<&str>, level: u8, trust: bool) {
     let mcp = MCP_ENABLED.load(core::sync::atomic::Ordering::SeqCst);
     // `trust` arrives as a run_agent parameter; see signature.
     let trust = TRUST_MODE.load(core::sync::atomic::Ordering::SeqCst);
-    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp, trust));
+    cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp, trust, model));
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
     cmd.env("OPENAI_API_KEY", key.expect("checked above"));
@@ -1590,15 +1738,22 @@ fn pixel_icon(_mtm: MainThreadMarker) -> Option<Retained<NSImage>> {
 /// (Law 6). The plane polygon is the exact shape of the SVG in menu.html
 /// (``M5 4.5 20 12 5 19.5 8.6 12z`` in 24-space) scaled ×1.5 into 36-space.
 fn icon_pixel(x: f64, y: f64) -> (u8, u8, u8, f64) {
-    const EMERALD: (u8, u8, u8) = (80, 165, 116);
-    // Paper-airplane outline (even-odd filled) in 36-space: nose at the
-    // right, wing tips top-left / bottom-left, fold at left-centre. Y grows
-    // *down* in bitmap pixels, matching the SVG's y-down viewBox.
-    const PLANE: [(f64, f64); 4] = [(7.5, 6.75), (30.0, 18.0), (7.5, 29.25), (12.9, 18.0)];
-    if in_polygon(x, y, &PLANE) {
-        (255, 255, 255, 1.0)
+    // Synara warm apricot squircle with obsidian dark cursor pointer
+    const APRICOT: (u8, u8, u8) = (255, 177, 127);
+    const OBSIDIAN: (u8, u8, u8) = (18, 17, 16);
+    const CURSOR: [(f64, f64); 7] = [
+        (10.0, 8.0),
+        (10.0, 26.0),
+        (15.0, 21.0),
+        (20.0, 27.0),
+        (23.0, 25.0),
+        (18.0, 19.0),
+        (25.0, 19.0),
+    ];
+    if in_polygon(x, y, &CURSOR) {
+        (OBSIDIAN.0, OBSIDIAN.1, OBSIDIAN.2, 1.0)
     } else if in_rrect(x, y, 2.0, 2.0, 33.0, 33.0, 8.0) {
-        (EMERALD.0, EMERALD.1, EMERALD.2, 1.0)
+        (APRICOT.0, APRICOT.1, APRICOT.2, 1.0)
     } else {
         (0, 0, 0, 0.0)
     }
@@ -1633,6 +1788,85 @@ fn in_polygon(x: f64, y: f64, p: &[(f64, f64)]) -> bool {
     inside
 }
 
+
+
+extern "C" {
+    static _dispatch_main_q: [u8; 0];
+    fn dispatch_async_f(
+        queue: *const u8,
+        context: *mut std::ffi::c_void,
+        work: extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+extern "C" fn toggle_panel_on_main(_: *mut std::ffi::c_void) {
+    toggle_panel_ui();
+}
+
+fn spawn_toggle_hotkey_listener() {
+    std::thread::Builder::new()
+        .name("menu-toggle-hotkey".to_string())
+        .spawn(move || {
+            use core_graphics::event::{
+                CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+                CGEventType, EventField, CGEventFlags, CallbackResult,
+            };
+            use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+
+            let tap = match CGEventTap::new(
+                CGEventTapLocation::Session,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                vec![CGEventType::KeyDown],
+                |_proxy, etype, event| {
+                    if matches!(etype, CGEventType::KeyDown) {
+                        let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                        let flags = event.get_flags();
+                        let has_cmd = flags.contains(CGEventFlags::CGEventFlagCommand);
+                        let has_ctrl = flags.contains(CGEventFlags::CGEventFlagControl);
+                        let has_alt = flags.contains(CGEventFlags::CGEventFlagAlternate);
+
+                        // Keycode 11 is 'b' / 'B' on macOS US keyboard layout
+                        if has_cmd && !has_ctrl && !has_alt && keycode == 11 {
+                            eprintln!("[menu] Cmd+B hotkey detected -> toggling panel");
+                            unsafe {
+                                dispatch_async_f(
+                                    _dispatch_main_q.as_ptr(),
+                                    std::ptr::null_mut(),
+                                    toggle_panel_on_main,
+                                );
+                            }
+                            return CallbackResult::Drop; // Consume the event so it doesn't trigger bold in underlying apps
+                        }
+                    }
+                    CallbackResult::Keep
+                },
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[menu] warning: global hotkey CGEventTap failed: {:?}", e);
+                    return;
+                }
+            };
+
+            let source = match tap.mach_port().create_runloop_source(0) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[menu] warning: failed to create runloop source for hotkey tap: {:?}", e);
+                    return;
+                }
+            };
+
+            let run_loop = CFRunLoop::get_current();
+            run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
+            tap.enable();
+            eprintln!("[menu] Cmd+B global toggle hotkey tap armed");
+            CFRunLoop::run_current();
+        })
+        .expect("spawn hotkey listener thread");
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1643,7 +1877,7 @@ mod tests {
 
     #[test]
     fn agent_always_uses_the_real_model() {
-        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true, false);
+        let argv = args("open chrome", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, true, false, None);
         assert!(
             argv.windows(2).any(|w| w == ["--model", "openai"]),
             "launcher must pass --model openai, never the demo provider"
@@ -1654,7 +1888,7 @@ mod tests {
     #[test]
     fn agent_passes_required_flags_and_target_app() {
         let argv =
-            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false, false);
+            args("open chrome", Some("Google Chrome"), "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false, false, None);
         for required in ["--goal", "--real", "--model", "--driver", "--socket", "--store"] {
             assert!(
                 argv.iter().any(|a| a == required),
@@ -1666,14 +1900,28 @@ mod tests {
     }
 
     #[test]
+    fn agent_respects_custom_model_selection() {
+        let argv = args(
+            "open notes",
+            None,
+            "/bin/driver",
+            "/tmp/x.sock",
+            "/tmp/store",
+            3,
+            false,
+            false,
+            Some("openai:gpt-5.6-luna"),
+        );
+        assert!(argv.windows(2).any(|w| w == ["--model", "openai:gpt-5.6-luna"]));
+    }
+
+    #[test]
     fn menu_icon_is_sea_blue_squircle_with_white_paper_airplane() {
-        // Nose of the plane (right-centre): white glyph on the squircle.
-        assert_eq!(icon_pixel(29.0, 18.0), (255, 255, 255, 1.0));
-        // Top wing tip: still inside the plane's outline.
-        assert_eq!(icon_pixel(9.0, 8.0), (255, 255, 255, 1.0));
-        // A squircle corner away from the glyph: emerald green #50A574 (80, 165, 116), opaque.
+        // Center of the cursor pointer: obsidian glyph on the squircle.
+        assert_eq!(icon_pixel(12.0, 14.0), (18, 17, 16, 1.0));
+        // A squircle corner away from the glyph: warm apricot #FFB17F (255, 177, 127), opaque.
         let (r, g, b, a) = icon_pixel(6.0, 30.0);
-        assert_eq!((r, g, b), (80, 165, 116));
+        assert_eq!((r, g, b), (255, 177, 127));
         assert_eq!(a, 1.0);
         // Outside the squircle (top-left corner): fully transparent.
         assert_eq!(icon_pixel(1.0, 1.0), (0, 0, 0, 0.0));

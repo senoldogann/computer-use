@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
 
+from computeruse.mcp.catalog import DEFAULT_CONFIG_PATH
 from computeruse.mcp.protocol import (
     DEFAULT_TIMEOUT_SECONDS,
     McpClient,
@@ -39,10 +40,6 @@ from computeruse.mcp.protocol import (
 )
 
 LOGGER: Final = logging.getLogger(__name__)
-
-#: Where server definitions live. The filename and shape match what other MCP
-#: hosts use, so an existing config can be copied across unchanged.
-DEFAULT_CONFIG_PATH: Final[Path] = Path.home() / ".computeruse" / "mcp.json"
 
 #: Variables a server subprocess inherits. Everything else is withheld: PATH is
 #: needed to find the executable, HOME for a server's own config, and the rest

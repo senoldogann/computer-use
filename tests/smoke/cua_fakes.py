@@ -1,4 +1,4 @@
-"""Shared focus modelling for the CUA REPL fakes.
+"""Shared fakes for the CUA REPL tests.
 
 The engine's actuating calls insist on *confirmed* frontmost focus before a
 keystroke is posted, because a keystroke goes to whichever application holds
@@ -8,7 +8,10 @@ express that contract — which is exactly why the defect it guards against was
 invisible to this suite and only showed up against the live backend.
 
 :func:`model_focus` gives a mock the one behaviour that matters here:
-activating an application actually moves the front window to it.
+activating an application actually moves the front window to it. Where the
+engine needs a real driver-shaped object (``send``, ``activate_app``,
+``focused_window``, …) the tests share :class:`MockDriverClient` instead of
+copying the same recording fake into every file that exercises the engine.
 """
 
 from __future__ import annotations
@@ -16,7 +19,43 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+from computeruse.orchestrator.schemas import Action
 from computeruse.vision.capture import ScreenCapture
+
+
+class MockDriverClient:
+    """Mock client capturing driver calls for verification.
+
+    ``list_apps`` answers the full fixture set (``test_cua_repl`` asserts on
+    the count); tests that do not care read whatever they need.
+    """
+
+    def __init__(self) -> None:
+        self.sent_actions: list[Action] = []
+        self.activated_apps: list[str] = []
+        # Which application owns the front window. Modelled rather than
+        # assumed: the engine confirms focus before it posts a keystroke, and
+        # a fake that ignores activation cannot express that contract.
+        self.frontmost: str = "TextEdit"
+
+    def send(self, action: Action) -> None:
+        self.sent_actions.append(action)
+
+    def release_inputs(self) -> None:
+        """No hardware is held by this recording driver."""
+
+    def activate_app(self, app_name: str) -> None:
+        self.activated_apps.append(app_name)
+        self.frontmost = app_name
+
+    def focused_window(self) -> dict[str, Any]:
+        return {"app_name": self.frontmost, "app": self.frontmost, "bundle_id": ""}
+
+    def list_apps(self) -> list[str]:
+        return ["TextEdit", "Safari", "Finder"]
+
+    def capture(self) -> ScreenCapture:
+        return fake_capture()
 
 
 def model_focus(mock_client: MagicMock) -> None:

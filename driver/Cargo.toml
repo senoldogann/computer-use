@@ -32,6 +32,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSWindow",
     "NSPanel",
     "NSView",
+    "NSResponder",
     "NSColor",
     "NSGraphicsContext",
     "NSImage",
@@ -43,9 +44,10 @@ objc2-app-kit = { version = "0.3", features = [
     "NSMenuItem",
     "NSRunningApplication",
     "NSWorkspace",
+    "NSVisualEffectView",
     "block2",
 ] }
-objc2-foundation = { version = "0.3", features = ["NSTimer", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3", features = ["NSTimer", "NSString", "NSURL", "NSValue"] }
 objc2-web-kit = { version = "0.3", features = [
     "WKWebView",
     "WKWebViewConfiguration",

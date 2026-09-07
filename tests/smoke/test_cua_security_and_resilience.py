@@ -4,46 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-from smoke.cua_fakes import fake_capture
+from smoke.cua_fakes import MockDriverClient
 
-from computeruse.orchestrator.schemas import Action, MouseClick
+from computeruse.orchestrator.schemas import MouseClick
 from computeruse.repl.engine import CuaReplEngine
 from computeruse.security.autonomy import AutonomyLevel
 from computeruse.security.grants import CapabilityGrant, GrantStore
 from computeruse.vision.ax import AXElement
-from computeruse.vision.capture import ScreenCapture
-
-
-class MockDriverClient:
-    """Mock client capturing driver calls and app activations."""
-
-    def __init__(self) -> None:
-        self.sent_actions: list[Action] = []
-        self.activated_apps: list[str] = []
-        # See the note in test_cua_repl's fake: focus is modelled because the
-        # engine refuses to actuate into an application it cannot confirm.
-        self.frontmost: str = "TextEdit"
-
-    def send(self, action: Action) -> None:
-        self.sent_actions.append(action)
-
-    def release_inputs(self) -> None:
-        """No hardware is held by this recording driver."""
-
-    def activate_app(self, app_name: str) -> None:
-        self.activated_apps.append(app_name)
-        self.frontmost = app_name
-
-    def focused_window(self) -> dict[str, Any]:
-        return {"app_name": self.frontmost, "app": self.frontmost, "bundle_id": ""}
-
-    def list_apps(self) -> list[str]:
-        return ["TextEdit", "Finder"]
-
-    def capture(self) -> ScreenCapture:
-        return fake_capture()
 
 
 def test_cua_repl_security_blocks_destructive_click_without_grant() -> None:

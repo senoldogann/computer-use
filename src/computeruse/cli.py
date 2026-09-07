@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import inspect
+import json
 import logging
 import os
 import random
@@ -99,6 +100,7 @@ from computeruse.orchestrator.mission import (
 from computeruse.orchestrator.planner import (
     GoalPlan,
     SessionCheckpoint,
+    decompose_goal,
     goal_from_sub_goals,
     outstanding_sub_goals,
 )
@@ -427,6 +429,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--store", default=str(DEFAULT_STORE), help="Episodes + skills directory."
     )
     parser.add_argument("--max-steps", type=int, default=100)
+    parser.add_argument("--plan-only", action="store_true", help="Print a deterministic plan without starting a driver or executing actions.")
     parser.add_argument(
         "--plan",
         action="store_true",
@@ -1808,15 +1811,153 @@ def _resolve_target_app(args: argparse.Namespace) -> tuple[bool, bool]:
     return named_app, explicit_app is not None
 
 
+def _emit_plan(plan: GoalPlan) -> None:
+    """Publish additive plan events without changing existing step records."""
+    print("@@CU " + json.dumps({"type": "plan", "plan": plan.model_dump(mode="json")}, ensure_ascii=False), flush=True)
+
+
+def _run_goal(
+    args: argparse.Namespace, driver_recover: Callable[[], None] | None
+) -> int:
+    """Resolve the target app, wire telemetry and budget, then run one goal.
+
+    The run's live counters live here so every ending — success, failure and
+    kill-switch takeover — records what the run actually spent (Law 4.1: the
+    failed run's spend is the number someone asks for). Split out of ``main``
+    to keep the entry point under the type checker's complexity limit: a
+    ``main`` pyright cannot analyse is a ``main`` whose every name looks
+    unreachable, and the unused-import noise hides real regressions.
+    """
+    named_app, app_inferred_from_goal = _resolve_target_app(args)
+    # Live usage telemetry: every successful model call reports its token
+    # usage and per-call latency; each report is streamed to stderr as a
+    # compact "st :" line the menu panel parses into its header counters
+    # (token + elapsed), keeping the transport decoupled from the UI.
+    run_started_at = time.monotonic()
+    run_tokens: dict[str, int] = {"total": 0}
+    run_calls = 0
+
+    run_cost: dict[str, float] = {"usd": 0.0}
+    # Resolved once, before the run: a cost ceiling against a model whose
+    # price is unknown must fail at startup with an actionable message, not
+    # twenty steps in when the guard first tries to evaluate it.
+    price = resolve_cost_price(args)
+
+    def stats_sink(call: object) -> None:
+        nonlocal run_calls
+        run_calls += 1
+        if isinstance(call, ModelCallStats):
+            run_tokens["total"] += call.total_tokens
+            if price is not None:
+                run_cost["usd"] += call_cost_usd(price, call)
+        elapsed = time.monotonic() - run_started_at
+        print("@@CU " + json.dumps({
+            "type": "stats", "total_tokens": run_tokens["total"],
+            "cost_usd": run_cost["usd"] if price is not None else None,
+            "elapsed_seconds": elapsed, "calls": run_calls,
+        }), flush=True)
+        print(
+            f"st : tok_total={run_tokens['total']} elapsed={elapsed:.1f}s calls={run_calls}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    budget = RunBudget(
+        deadline_seconds=args.deadline_seconds,
+        max_tokens=args.max_tokens,
+        max_cost_usd=args.max_cost,
+    )
+
+    def budget_guard() -> None:
+        reason = budget_verdict(
+            budget,
+            RunUsage(
+                elapsed_seconds=time.monotonic() - run_started_at,
+                total_tokens=run_tokens["total"],
+                cost_usd=run_cost["usd"],
+            ),
+        )
+        if reason is not None:
+            raise BudgetExceededError(reason)
+
+    config = build_config(
+        args,
+        goal=args.goal,
+        activate_named_app=args.real and (named_app or app_inferred_from_goal),
+        app_inferred=app_inferred_from_goal and not named_app,
+        stats_sink=stats_sink,
+        budget_guard=None if budget.is_unset else budget_guard,
+        driver_recover=driver_recover,
+        on_plan_progress=_emit_plan,
+    )
+    if args.plan:
+        _emit_plan(decompose_goal(args.goal, app=config.app, knowledge=()))
+    # Spend is recorded on *both* endings. A run that failed still cost
+    # what it cost, and that is exactly the run someone wants the number
+    # for; recording only successes would make the report's total a
+    # comfortable fiction.
+    try:
+        # Same display guarantee as the night shift, scoped to this run:
+        # SIGINT, kill-switch takeover and budget stops all unwind
+        # through __exit__, so the assertion never outlives its run.
+        with wake_lock():
+            result = Agent(config).run()
+    except BaseException:
+        _record_usage(
+            Path(args.store),
+            run_id=f"unfinished-{int(time.time())}",
+            goal=config.goal,
+            app=config.app or "unknown",
+            outcome="failure",
+            steps=0,
+            tokens=run_tokens["total"],
+            cost_usd=run_cost["usd"],
+            elapsed_seconds=time.monotonic() - run_started_at,
+        )
+        raise
+    _record_usage(
+        Path(args.store),
+        run_id=result.run_id,
+        goal=config.goal,
+        app=result.app,
+        outcome=result.outcome,
+        steps=len(result.state.completed_steps),
+        tokens=run_tokens["total"],
+        cost_usd=run_cost["usd"],
+        elapsed_seconds=time.monotonic() - run_started_at,
+    )
+
+    print(f"goal        : {config.goal}")
+    print(f"run_id      : {result.run_id}")
+    print(f"outcome     : {result.outcome}")
+    print(f"app         : {result.app}")
+    if config.trace_dir is not None:
+        print(f"trace       : {config.trace_dir / result.run_id}")
+    if config.activate_app_on_start:
+        print(f"activated   : {config.app}")
+    print(f"steps       : {len(result.state.completed_steps)}")
+    if result.state.last_error:
+        print(f"last_error  : {result.state.last_error}")
+    if result.distilled is not None:
+        label = f"distill     : {result.distilled.kind}"
+        if result.distilled.definition is not None:
+            label += f" ({result.distilled.definition.skill_id})"
+        print(label)
+    print(f"episodes    : {len(result.episodes)}")
+    print(f"skills      : {len(result.skills)}")
+    print(f"knowledge   : {len(result.knowledge)} entries for {config.app}")
+    if result.skill is not None:
+        print(f"skill       : {result.skill.skill_id} (mounted)")
+    return int(not result.succeeded)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse, dispatch, and run one goal.
 
-    Kept short on purpose. It grew to three hundred lines of interleaved
-    dispatch, validation and warnings, and crossed the type checker's
-    complexity limit — at which point pyright stopped analysing the function
-    at all and reported every name it used as unreachable. Type checking was
-    silently off for the whole entry point; splitting the preamble out is what
-    turns it back on.
+    The run itself lives in ``_run_goal``; this function owns the preamble
+    (store commands, argument rejection, driver supervision, autonomous
+    sessions) and the user-facing error clauses. Keeping it under the type
+    checker's complexity limit is what keeps its except clauses honest.
     """
     args = parse_args(argv)
     # Live step visibility: the runner logs every executed physical action at
@@ -1825,6 +1966,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # happens". Stream the runner's lines to stderr so the run is observable
     # while the final summary block still lands on stdout at the end.
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+    if args.plan_only:
+        if not args.goal or not args.goal.strip():
+            print("error: --plan-only requires a non-empty --goal", file=sys.stderr)
+            return 2
+        _emit_plan(decompose_goal(args.goal, app=args.app, knowledge=()))
+        return 0
     dispatched = _dispatch_store_command(args)
     if dispatched is not None:
         return dispatched
@@ -1879,119 +2026,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if resume_exit is not None:
             return resume_exit
 
-        named_app, app_inferred_from_goal = _resolve_target_app(args)
-        # Live usage telemetry: every successful model call reports its token
-        # usage and per-call latency; each report is streamed to stderr as a
-        # compact "st :" line the menu panel parses into its header counters
-        # (token + elapsed), keeping the transport decoupled from the UI.
-        run_started_at = time.monotonic()
-        run_tokens: dict[str, int] = {"total": 0}
-        run_calls = 0
-
-        run_cost: dict[str, float] = {"usd": 0.0}
-        # Resolved once, before the run: a cost ceiling against a model whose
-        # price is unknown must fail at startup with an actionable message, not
-        # twenty steps in when the guard first tries to evaluate it.
-        price = resolve_cost_price(args)
-
-        def stats_sink(call: object) -> None:
-            nonlocal run_calls
-            run_calls += 1
-            if isinstance(call, ModelCallStats):
-                run_tokens["total"] += call.total_tokens
-                if price is not None:
-                    run_cost["usd"] += call_cost_usd(price, call)
-            elapsed = time.monotonic() - run_started_at
-            print(
-                f"st : tok_total={run_tokens['total']} elapsed={elapsed:.1f}s calls={run_calls}",
-                file=sys.stderr,
-                flush=True,
-            )
-
-        budget = RunBudget(
-            deadline_seconds=args.deadline_seconds,
-            max_tokens=args.max_tokens,
-            max_cost_usd=args.max_cost,
-        )
-
-        def budget_guard() -> None:
-            reason = budget_verdict(
-                budget,
-                RunUsage(
-                    elapsed_seconds=time.monotonic() - run_started_at,
-                    total_tokens=run_tokens["total"],
-                    cost_usd=run_cost["usd"],
-                ),
-            )
-            if reason is not None:
-                raise BudgetExceededError(reason)
-
-        config = build_config(
-            args,
-            goal=args.goal,
-            activate_named_app=args.real and (named_app or app_inferred_from_goal),
-            app_inferred=app_inferred_from_goal and not named_app,
-            stats_sink=stats_sink,
-            budget_guard=None if budget.is_unset else budget_guard,
-            driver_recover=driver_recover,
-        )
-        # Spend is recorded on *both* endings. A run that failed still cost
-        # what it cost, and that is exactly the run someone wants the number
-        # for; recording only successes would make the report's total a
-        # comfortable fiction.
-        try:
-            # Same display guarantee as the night shift, scoped to this run:
-            # SIGINT, kill-switch takeover and budget stops all unwind
-            # through __exit__, so the assertion never outlives its run.
-            with wake_lock():
-                result = Agent(config).run()
-        except BaseException:
-            _record_usage(
-                Path(args.store),
-                run_id=f"unfinished-{int(time.time())}",
-                goal=config.goal,
-                app=config.app or "unknown",
-                outcome="failure",
-                steps=0,
-                tokens=run_tokens["total"],
-                cost_usd=run_cost["usd"],
-                elapsed_seconds=time.monotonic() - run_started_at,
-            )
-            raise
-        _record_usage(
-            Path(args.store),
-            run_id=result.run_id,
-            goal=config.goal,
-            app=result.app,
-            outcome=result.outcome,
-            steps=len(result.state.completed_steps),
-            tokens=run_tokens["total"],
-            cost_usd=run_cost["usd"],
-            elapsed_seconds=time.monotonic() - run_started_at,
-        )
-
-        print(f"goal        : {config.goal}")
-        print(f"run_id      : {result.run_id}")
-        print(f"outcome     : {result.outcome}")
-        print(f"app         : {result.app}")
-        if config.trace_dir is not None:
-            print(f"trace       : {config.trace_dir / result.run_id}")
-        if config.activate_app_on_start:
-            print(f"activated   : {config.app}")
-        print(f"steps       : {len(result.state.completed_steps)}")
-        if result.state.last_error:
-            print(f"last_error  : {result.state.last_error}")
-        if result.distilled is not None:
-            label = f"distill     : {result.distilled.kind}"
-            if result.distilled.definition is not None:
-                label += f" ({result.distilled.definition.skill_id})"
-            print(label)
-        print(f"episodes    : {len(result.episodes)}")
-        print(f"skills      : {len(result.skills)}")
-        print(f"knowledge   : {len(result.knowledge)} entries for {config.app}")
-        if result.skill is not None:
-            print(f"skill       : {result.skill.skill_id} (mounted)")
-        return int(not result.succeeded)
+        return _run_goal(args, driver_recover)
     except KillSwitchTripped:
         print(
             "interrupted: human reclaimed control (kill-switch tripped)",
