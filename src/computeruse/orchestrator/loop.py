@@ -1915,7 +1915,13 @@ class OodaRunner:
                     # the run has found already lives.
                     observed_trail=_extend_trail_entry(
                         state.observed_trail,
-                        title=_tool_trail_title(outcome.action),
+                        # A tool name is not an evidence identity. Research commonly
+                        # calls the same search tool with several different queries;
+                        # keying by tool name made each answer overwrite the previous
+                        # one in the actor's working trail. The step makes each
+                        # machine-observed answer independently addressable while the
+                        # bounded trail still caps context growth.
+                        title=f"{_tool_trail_title(outcome.action)} @ step {outcome.step_index}",
                         text=answer,
                         max_entries=TRAIL_MAX_ENTRIES,
                     ),
@@ -1923,7 +1929,13 @@ class OodaRunner:
                     # goal built on tool output cannot be verified from the
                     # screen alone, and the one-turn ``tool_result`` is long
                     # gone by the time the finish is claimed.
-                    tool_history=_extend_tool_history(state.tool_history, answer),
+                    tool_history=_extend_tool_history(
+                        state.tool_history,
+                        # Preserve provenance for the completion auditor. A raw
+                        # answer cannot tell it whether evidence came from a search,
+                        # a fetched page, or another MCP tool.
+                        f"{_tool_trail_title(outcome.action)}: {answer}",
+                    ),
                 )
             elif outcome.route == "internal_skill":
                 # Explicit Stage 2: the provider asked for this skill by id;
