@@ -388,23 +388,22 @@ def test_completion_prompt_isolates_the_auditor_from_the_actor() -> None:
 
 
 def test_completion_parser_rejects_a_missing_verdict() -> None:
-    """An auditor reply without a real boolean is a parse failure, not a guess.
-
-    Defaulting here would quietly decide policy: the caller treats a broken
-    auditor as "cannot judge" and accepts the finish, and that decision belongs
-    in one place, not in a parser fallback.
-    """
+    """A completion reply needs both a boolean verdict and real evidence."""
     from computeruse.orchestrator.prompts import parse_completion
 
-    verdict = parse_completion('{"satisfied": true, "evidence": "the page shows Signed out"}')
+    verdict = parse_completion(
+        '{"satisfied": true, "evidence": "the page shows Signed out"}'
+    )
     assert verdict.satisfied is True
     assert "Signed out" in verdict.evidence
-    # Missing evidence still parses — the verdict is the load-bearing field.
-    assert parse_completion('{"satisfied": false}').evidence
-    for bad in ('{"satisfied": "yes"}', "{}", "not json at all"):
+    for bad in (
+        '{"satisfied": false}',
+        '{"satisfied": "yes"}',
+        "{}",
+        "not json at all",
+    ):
         with pytest.raises(InvalidDecisionError):
             parse_completion(bad)
-
 
 def test_completion_auditor_reads_the_attached_screenshot() -> None:
     """The auditor is multimodal: it judges the screen, not the claim's prose."""
