@@ -1,0 +1,55 @@
+name: Apply audited research fix
+
+on:
+  push:
+    branches:
+      - audit/research-evidence-hardening-2026-09-07
+    paths:
+      - scripts/apply_research_hardening.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/research-evidence-hardening-2026-09-07
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Install isolated JavaScript runtime
+        run: npm ci --prefix src/computeruse/repl --ignore-scripts
+
+      - name: Build test driver
+        run: cargo build --manifest-path driver/Cargo.toml
+
+      - name: Apply audited patch
+        run: python scripts/apply_research_hardening.py
+
+      - name: Verify targeted regressions
+        run: uv run pytest -q tests/smoke/test_research_evidence.py
+
+      - name: Verify Python gates
+        run: |
+          uv run ruff check .
+          uv run pyright
+          uv run pytest -q --tb=short
+
+      - name: Commit only after verification
+        run: |
+          git config user.name 'computer-use audit bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/computeruse/orchestrator/loop.py src/computeruse/orchestrator/prompts.py
+          git commit -m 'fix(orchestrator): preserve research evidence provenance'
+          git push origin HEAD:audit/research-evidence-hardening-2026-09-07
