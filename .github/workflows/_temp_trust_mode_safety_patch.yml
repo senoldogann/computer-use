@@ -97,15 +97,6 @@ jobs:
           )
 
           replace_once(
-              "driver/src/menu.rs",
-              """    // Trust mode (--yes): operator asked for uninterrupted autonomy.
-                  // BLOCK still blocks; kill-switch, budgets and verification keep running.""",
-              """    // Trust mode (--yes): skip non-destructive confirmation prompts.
-                  // Destructive actions still require a scoped grant/approval; BLOCK and the
-                  // kill-switch/budgets/verification safety floor remain active.""",
-          )
-
-          replace_once(
               "driver/assets/menu.html",
               "// Trust mode (--yes): auto-approve CONFIRM, keep BLOCK + kill-switch.",
               "// Trust mode (--yes): auto-approve non-destructive CONFIRM only; keep destructive confirmation + BLOCK + kill-switch.",
