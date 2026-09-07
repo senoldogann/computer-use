@@ -2,9 +2,31 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
-from computeruse.scheduler import GoalProposal, make_proposal, rank_proposals
+from computeruse.orchestrator.report import UsageRecord
+from computeruse.scheduler import (
+    GoalProposal,
+    estimate_expected_cost,
+    make_proposal,
+    rank_proposals,
+)
+
+
+def _usage(run_id: str, goal: str, cost: float) -> UsageRecord:
+    return UsageRecord(
+        run_id=run_id,
+        goal=goal,
+        app="Finder",
+        outcome="success",
+        steps=1,
+        total_tokens=100,
+        cost_usd=cost,
+        elapsed_seconds=1.0,
+        recorded_at=datetime(2026, 9, 7, tzinfo=UTC),
+    )
 
 
 def test_goal_proposal_carries_auditable_provenance() -> None:
@@ -117,3 +139,25 @@ def test_equal_scores_have_a_stable_provenance_tie_break() -> None:
 
     assert [proposal.source_id for proposal in first] == ["episode-a", "episode-b"]
     assert second == first
+
+
+def test_expected_cost_averages_exact_normalized_goal_history() -> None:
+    records = (
+        _usage("run-a", "export report", 0.20),
+        _usage("run-b", " export   report ", 0.40),
+        _usage("run-c", "different goal", 9.0),
+    )
+
+    assert estimate_expected_cost("export report", records) == pytest.approx(0.30)
+
+
+def test_expected_cost_is_unknown_without_matching_history() -> None:
+    records = (_usage("run-a", "different goal", 0.25),)
+
+    assert estimate_expected_cost("never seen", records) is None
+
+
+def test_zero_dollar_history_is_valid_cost_data() -> None:
+    records = (_usage("run-a", "local task", 0.0),)
+
+    assert estimate_expected_cost("local task", records) == 0.0
