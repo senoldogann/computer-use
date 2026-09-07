@@ -1,0 +1,84 @@
+name: Align zero-action terminal regression
+
+on:
+  push:
+    branches:
+      - fix/zero-action-terminal-outcome
+    paths:
+      - .github/workflows/patch-zero-action-test.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/zero-action-terminal-outcome
+      - name: Replace obsolete test contract
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/smoke/test_distill_loop.py")
+          text = path.read_text()
+
+          def lines(*items: str) -> str:
+              return "\n".join(items) + "\n"
+
+          old = lines(
+              "def test_a_run_with_no_skill_and_no_actions_still_leaves_no_trace() -> None:",
+              "    \"\"\"The original contract is unchanged: nothing ran, nothing to remember.\"\"\"",
+              "    received: list[object] = []",
+              "    OodaRunner(",
+              "        provider=lambda _s: AgentTurn(",
+              "            thought=\"\",",
+              "            sub_goal=\"\",",
+              "            action=Finish(type=\"finish\", status=\"success\", summary=\"nothing\"),",
+              "        ),",
+              "        execute_physical=lambda _a: None,",
+              "        on_complete=lambda *args: received.append(args) or None,",
+              "        max_steps=3,",
+              "    ).run(goal=\"nothing to do\")",
+              "    assert received == []",
+          )
+          new = lines(
+              "def test_a_terminal_run_with_no_skill_and_no_actions_publishes_outcome() -> None:",
+              "    \"\"\"A terminal finish is an outcome even when the requested state already exists.\"\"\"",
+              "    received: list[tuple[Trajectory, EpisodeOutcome, str | None, str | None, bool]] = []",
+              "    OodaRunner(",
+              "        provider=lambda _s: AgentTurn(",
+              "            thought=\"\",",
+              "            sub_goal=\"\",",
+              "            action=Finish(type=\"finish\", status=\"success\", summary=\"nothing\"),",
+              "        ),",
+              "        execute_physical=lambda _a: None,",
+              "        on_complete=lambda t, o, r, sid, forced: received.append(",
+              "            (t, o, r, sid, forced)",
+              "        ),",
+              "        max_steps=3,",
+              "    ).run(goal=\"nothing to do\")",
+              "",
+              "    assert len(received) == 1",
+              "    trajectory, outcome, retrospective, skill_id, forced = received[0]",
+              "    assert trajectory.steps == ()",
+              "    assert outcome == \"success\"",
+              "    assert retrospective == \"nothing\"",
+              "    assert skill_id is None",
+              "    assert forced is False",
+          )
+
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"expected one obsolete regression, found {count}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/smoke/test_distill_loop.py
+          git commit -m "test(orchestrator): align terminal outcome contract"
+          git push origin HEAD:fix/zero-action-terminal-outcome
