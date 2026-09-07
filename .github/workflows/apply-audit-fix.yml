@@ -6,6 +6,7 @@ on:
       - audit/research-evidence-hardening-2026-09-07
     paths:
       - scripts/apply_research_hardening.py
+      - tests/smoke/test_research_evidence.py
       - .github/workflows/apply-audit-fix.yml
 
 permissions:
