@@ -8,8 +8,8 @@ permissions:
   contents: write
 
 jobs:
-  task1:
-    if: contains(github.event.head_commit.message, 'apply sovereign task1')
+  task2:
+    if: contains(github.event.head_commit.message, 'apply sovereign task2')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,69 +21,74 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Patch autonomy policy exactly
+      - name: Patch sovereign guard composition exactly
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path('src/computeruse/security/autonomy.py')
+          path = Path('src/computeruse/agent.py')
           text = path.read_text(encoding='utf-8')
 
-          replacements = [
-              (
-                  'The constitution defines four autonomy levels (0 Observer / 1 Supervised /\n'
-                  '2 Guarded / 3 Full). This module turns that policy into a *pure* decision:',
-                  'The constitution defines five autonomy levels (0 Observer / 1 Supervised /\n'
-                  '2 Guarded / 3 Full / 4 Sovereign). This module turns that policy into a *pure* decision:',
-              ),
-              (
-                  'class AutonomyLevel(Enum):\n'
-                  '    """The four configurable autonomy levels from the constitution."""\n\n'
-                  '    OBSERVER = 0   # Recommends actions and highlights regions, never touches.\n'
-                  '    SUPERVISED = 1  # Proposes each action and waits for confirmation.\n'
-                  '    GUARDED = 2    # Routine actions run; destructive ones ask first.\n'
-                  '    FULL = 3       # Unattended, with safety boundaries + auto-fallback.\n',
-                  'class AutonomyLevel(Enum):\n'
-                  '    """The five configurable autonomy levels from the constitution."""\n\n'
-                  '    OBSERVER = 0   # Recommends actions and highlights regions, never touches.\n'
-                  '    SUPERVISED = 1  # Proposes each action and waits for confirmation.\n'
-                  '    GUARDED = 2    # Routine actions run; destructive ones ask first.\n'
-                  '    FULL = 3       # Unattended, destructive actions still ask.\n'
-                  '    SOVEREIGN = 4  # Operator-delegated: destructive actions may run unattended.\n',
-              ),
-              (
-                  '    * Level 3 -- full: everything non-destructive runs autonomously;\n'
-                  '      destructive actions still require confirmation.\n'
-                  '    """\n'
-                  '    # Full autonomy still requires confirmation for destructive operations.\n',
-                  '    * Level 3 -- full: everything non-destructive runs autonomously;\n'
-                  '      destructive actions still require confirmation.\n'
-                  '    * Level 4 -- sovereign: the operator delegated destructive permission for\n'
-                  '      this session, so every classified risk is allowed at the permission layer.\n'
-                  '      Risk classification and runtime safety invariants remain active.\n'
-                  '    """\n'
-                  '    if level is AutonomyLevel.SOVEREIGN:\n'
-                  '        return PermissionDecision.ALLOW\n\n'
-                  '    # Full autonomy still requires confirmation for destructive operations.\n',
-              ),
-          ]
+          old_import = '''from computeruse.security.autonomy import (
+    AutonomyLevel,
+    PermissionDecision,
+    Risk,
+    classify_risk,
+)
+'''
+          new_import = '''from computeruse.security.autonomy import (
+    AutonomyLevel,
+    PermissionDecision,
+    Risk,
+    classify_risk,
+    decide_permission,
+)
+'''
+          if text.count(old_import) != 1:
+              raise SystemExit('autonomy import marker not unique')
+          text = text.replace(old_import, new_import, 1)
 
-          for old, new in replacements:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected exactly one patch marker, found {count}: {old[:80]!r}')
-              text = text.replace(old, new, 1)
+          old_guard = '''        risk = classify_risk(turn, target_label=label)
+        verdict = (
+            authorize(turn, label)
+            if authorize is not None and risk is Risk.DESTRUCTIVE
+            else None
+        )
+        base = decide_with_grant(level, risk, verdict)
+'''
+          new_guard = '''        risk = classify_risk(turn, target_label=label)
+        # Resolve the selected autonomy policy before consulting delegated
+        # authority. Sovereign already ALLOWs destructive work by explicit
+        # session policy, so spending/reading grants there would be both
+        # unnecessary and misleading. FULL/GUARDED still consult grants only
+        # when their base policy actually requires confirmation.
+        base = decide_permission(level, risk)
+        if (
+            base is PermissionDecision.CONFIRM
+            and risk is Risk.DESTRUCTIVE
+            and authorize is not None
+        ):
+            base = decide_with_grant(level, risk, authorize(turn, label))
+'''
+          if text.count(old_guard) != 1:
+              raise SystemExit('guard marker not unique')
+          text = text.replace(old_guard, new_guard, 1)
 
           path.write_text(text, encoding='utf-8')
           PY
 
-      - name: Verify Task 1 GREEN
-        run: uv run pytest -q tests/smoke/test_sovereign_mode.py
+      - name: Verify Task 2 GREEN and legacy permission paths
+        run: |
+          uv run pytest -q \
+            tests/smoke/test_sovereign_mode.py \
+            tests/smoke/test_trust_mode_safety.py \
+            tests/smoke/test_grants.py \
+            tests/smoke/test_autonomy.py
 
-      - name: Commit verified Task 1
+      - name: Commit verified Task 2
         run: |
           git config user.name 'computer-use audit bot'
           git config user.email 'actions@users.noreply.github.com'
-          git add src/computeruse/security/autonomy.py
-          git commit -m 'feat(security): add sovereign autonomy policy'
+          git add src/computeruse/agent.py
+          git commit -m 'refactor(security): isolate sovereign permission path'
           git push origin HEAD:feat/sovereign-mode-core
