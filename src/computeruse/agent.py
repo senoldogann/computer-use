@@ -85,6 +85,7 @@ from computeruse.security.autonomy import (
     PermissionDecision,
     Risk,
     classify_risk,
+    decide_permission,
 )
 from computeruse.security.grants import (
     GrantStore,
@@ -307,12 +308,16 @@ def guarded(
     def guard(turn: AgentTurn, observation: Observation) -> PermissionDecision:
         label = target_element_label(turn.action, observation)
         risk = classify_risk(turn, target_label=label)
-        verdict = (
-            authorize(turn, label)
-            if authorize is not None and risk is Risk.DESTRUCTIVE
-            else None
-        )
-        base = decide_with_grant(level, risk, verdict)
+        # Resolve base policy before consulting delegated authority.
+        # Sovereign already permits destructive work by explicit session policy;
+        # FULL/GUARDED consult grants only when confirmation is still required.
+        base = decide_permission(level, risk)
+        if (
+            base is PermissionDecision.CONFIRM
+            and risk is Risk.DESTRUCTIVE
+            and authorize is not None
+        ):
+            base = decide_with_grant(level, risk, authorize(turn, label))
         if base is PermissionDecision.CONFIRM and consume_approval is not None:
             approved = consume_approval(turn, label)
             if approved is not None:

@@ -372,6 +372,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "require explicit approval or a scoped grant, including with --yes.",
     )
     parser.add_argument(
+        "--sovereign",
+        action="store_true",
+        help="Explicitly delegate destructive permission for this session. "
+        "This selects Sovereign autonomy without exposing it through --level; "
+        "kill-switch, budgets, verification, completion audit, trace and driver "
+        "safety gates remain active.",
+    )
+    parser.add_argument(
         "--yes",
         action="store_true",
         help="Trust mode: auto-approve non-destructive confirmations so routine "
@@ -496,6 +504,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "from for each step, as <trace-dir>/<run_id>/step-NNN.png.",
     )
     return parser.parse_args(argv)
+
+
+def resolve_autonomy_level(args: argparse.Namespace) -> AutonomyLevel:
+    """Resolve the operator-selected autonomy mode.
+
+    Sovereign is intentionally not part of the numeric --level surface: it
+    requires the dedicated explicit switch so ordinary level selection cannot
+    accidentally delegate destructive permission.
+    """
+    if bool(getattr(args, "sovereign", False)):
+        return AutonomyLevel.SOVEREIGN
+    return AutonomyLevel(args.level)
 
 
 def scripted_provider(goal: str) -> Callable[[WorkingState], AgentTurn]:
@@ -864,7 +884,7 @@ def build_config(
         provider=provider,
         socket_path=args.socket,
         store_dir=Path(args.store),
-        autonomy_level=AutonomyLevel(args.level),
+        autonomy_level=resolve_autonomy_level(args),
         confirm_handler=confirm_handler,
         auto_approve=trust_mode,
         enable_visual_verification=resolve_verify(args),
@@ -1710,8 +1730,36 @@ def _dispatch_store_command(args: argparse.Namespace) -> int | None:
     return None
 
 
+def _has_hard_budget(args: argparse.Namespace) -> bool:
+    """Whether this invocation has an explicit finite runtime/spend ceiling."""
+    return any(
+        value is not None
+        for value in (args.deadline_seconds, args.max_tokens, args.max_cost)
+    )
+
+
 def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
     """Exit code for a combination that cannot start, else ``None``."""
+    if getattr(args, "sovereign", False):
+        if getattr(args, "yes", False):
+            print(
+                "error: --sovereign is separate from --yes; choose one mode",
+                file=sys.stderr,
+            )
+            return 2
+        if getattr(args, "level", AutonomyLevel.FULL.value) in (0, 1, 2):
+            print(
+                "error: --sovereign cannot be combined with --level 0/1/2",
+                file=sys.stderr,
+            )
+            return 2
+        if not _has_hard_budget(args):
+            print(
+                "error: --sovereign requires at least one of --deadline-seconds, "
+                "--max-tokens or --max-cost",
+                file=sys.stderr,
+            )
+            return 2
     if getattr(args, "yes", False) and getattr(args, "level", 3) in (0, 1):
         print(
             "error: --yes cannot be combined with --level 0/1: those levels "
@@ -1743,11 +1791,7 @@ def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
     # An unattended process without a bound is not autonomy, it is a leak, and
     # a bound reached by forgetting a flag is not a bound. The run count alone
     # is not enough: one run can spend indefinitely.
-    if (
-        args.deadline_seconds is None
-        and args.max_tokens is None
-        and args.max_cost is None
-    ):
+    if not _has_hard_budget(args):
         print(
             "error: --autonomous requires at least one of --deadline-seconds, "
             "--max-tokens or --max-cost. Nobody is watching an unattended run, "
