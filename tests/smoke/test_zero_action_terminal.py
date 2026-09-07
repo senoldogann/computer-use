@@ -14,7 +14,7 @@ from pathlib import Path
 from computeruse.agent import Agent, AgentConfig
 from computeruse.memory.preferences import PreferenceStore, PreferenceWrite
 from computeruse.memory.schemas import EpisodeOutcome
-from computeruse.orchestrator.loop import OodaRunner, WorkingState
+from computeruse.orchestrator.loop import OodaRunner
 from computeruse.orchestrator.schemas import AgentTurn, Finish
 from computeruse.skills.distiller import Trajectory
 from tests.smoke.conftest import SIMULATED_SETTLE, SOCKET_PATH
