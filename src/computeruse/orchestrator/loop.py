@@ -2555,6 +2555,8 @@ class OodaRunner:
         elif isinstance(action, MouseDrag):
             targets.append(("drag start", action.start_x, action.start_y))
             targets.append(("drag end", action.end_x, action.end_y))
+        elif isinstance(action, MouseMove):
+            targets.append(("move", action.x, action.y))
         for label, x, y in targets:
             if not point_in_frame(Point(float(x), float(y)), frame):
                 raise CoordinateOutOfBoundsError(

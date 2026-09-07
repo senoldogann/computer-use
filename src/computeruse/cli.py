@@ -1714,6 +1714,14 @@ def _dispatch_store_command(args: argparse.Namespace) -> int | None:
 
 def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
     """Exit code for a combination that cannot start, else ``None``."""
+    if getattr(args, "yes", False) and getattr(args, "level", 3) in (0, 1):
+        print(
+            "error: --yes cannot be combined with --level 0/1: those levels "
+            "exist in order to ask, so auto-approving would be a bypass "
+            "rather than a delegation",
+            file=sys.stderr,
+        )
+        return 2
     if args.autonomous is None and not args.goal:
         print("error: --goal is required unless --autonomous is given", file=sys.stderr)
         return 2

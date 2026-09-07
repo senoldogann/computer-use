@@ -158,6 +158,12 @@ def extract_facts_from_run(
     semantic memory across runs (Law 4.2). Typed on :class:`Action` (the
     discriminated union), never ``object``: the union's fields are read through
     ``model_dump`` so every attribute access is type-safe (Law 6.2).
+
+    Coordinates are deliberately excluded: a point that was correct on this
+    display is stale on the next, and replaying it replays yesterday's
+    layout. Typed/pasted text is stored as a length, never verbatim, so a
+    password or personal note the agent typed cannot be read back out of
+    the store later.
     """
     facts: list[SemanticEntry] = []
     # ascii_slug, not isalnum: isalnum keeps non-ASCII letters the entry_id
@@ -173,14 +179,14 @@ def extract_facts_from_run(
         entry_id = f"{app_slug}.{slug_desc}"
 
         payload = action.model_dump(exclude_none=True)
-        action_type = payload.get("type", "action")
+        action_type = str(payload.get("type", "action"))
         val = f"{action_type}"
-        if "x" in payload and "y" in payload:
-            val += f" at ({payload['x']}, {payload['y']})"
-        if "text" in payload:
-            val += f" text={payload['text']!r}"
-        if "key" in payload:
-            val += f" key={payload['key']!r}"
+        text_value = payload.get("text")
+        if isinstance(text_value, str):
+            val += f" text=<{len(text_value)} chars>"
+        key_value = payload.get("key")
+        if isinstance(key_value, str):
+            val += f" key={key_value!r}"
 
         facts.append(
             SemanticEntry(

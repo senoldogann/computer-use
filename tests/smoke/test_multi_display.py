@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Self
 
+import pytest
+
 from computeruse.agent import Agent, AgentConfig
 from computeruse.cli import parse_args
 from computeruse.orchestrator.loop import (
@@ -330,6 +332,21 @@ def test_a_window_frame_carries_its_own_origin() -> None:
     assert 311.0 < centre.x < 311.0 + 230.0
     assert 453.0 < centre.y < 453.0 + 408.0
 
+
+
+def test_validate_bounds_rejects_an_off_screen_move() -> None:
+    """The bounds gate covers cursor moves too, not just clicks and drags."""
+    from computeruse.orchestrator.loop import CoordinateOutOfBoundsError
+    from computeruse.orchestrator.schemas import MouseMove
+
+    frame = _frame(width=100, height=100, origin=Point(0, 0))
+    runner = OodaRunner(
+        provider=lambda state: _turn(Finish(type="finish", status="failed", summary="stop")),
+        execute_physical=lambda action: None,
+    )
+    runner._validate_bounds(MouseMove(type="mouse_move", x=50, y=50), frame)
+    with pytest.raises(CoordinateOutOfBoundsError):
+        runner._validate_bounds(MouseMove(type="mouse_move", x=5000, y=50), frame)
 
 
 def test_left_display_ax_mark_reaches_its_global_coordinate() -> None:

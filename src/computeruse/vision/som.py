@@ -178,5 +178,7 @@ def annotate_set_of_marks(
         height=capture.height,
         scale=capture.scale,
         pixel_format=capture.pixel_format,
+        origin_x=capture.origin_x,
+        origin_y=capture.origin_y,
         data=bytes(buf),
     )

@@ -70,6 +70,17 @@ def test_benign_click_is_none() -> None:
     assert classify_risk(_turn(sub="open editor")) is Risk.NONE
 
 
+def test_unlabeled_click_stays_none_with_benign_prose() -> None:
+    """No information means the verdict falls back to the narration.
+
+    Flooring an unlabeled click at ROUTINE was tried and reverted: it did
+    not close the L3 hole (ROUTINE still runs at FULL) and it broke every
+    GUARDED flow without AX coverage. The truncation warning in OBSERVE
+    plus the approval/grant workflow remain the answer for blind clicks.
+    """
+    assert classify_risk(_turn(sub="open editor")) is Risk.NONE
+
+
 def test_routine_marker_is_routine() -> None:
     assert classify_risk(_turn(sub="confirm dialog", type="press_hotkey", key="enter")) is Risk.ROUTINE
 
