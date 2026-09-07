@@ -12,6 +12,7 @@ from computeruse.agent import guarded
 from computeruse.orchestrator.loop import EMPTY_OBSERVATION
 from computeruse.orchestrator.schemas import AgentTurn, ClipboardPaste, PressHotkey
 from computeruse.security.autonomy import AutonomyLevel
+from computeruse.security.grants import GrantVerdict
 from computeruse.security.permissions import PermissionDecision
 
 
@@ -40,6 +41,22 @@ def test_trust_mode_still_auto_approves_routine_confirmation() -> None:
     )
 
     assert guard(turn, EMPTY_OBSERVATION) is PermissionDecision.ALLOW
+
+
+def test_scoped_grant_still_authorizes_destructive_action() -> None:
+    """The boundary does not invalidate authority the user delegated explicitly."""
+    verdict = GrantVerdict(
+        outcome="granted",
+        grant_id="delete-temp-once",
+        reason="explicit scoped capability grant",
+    )
+    guard = guarded(
+        AutonomyLevel.FULL,
+        authorize=lambda _turn, _label: verdict,
+        auto_approve=True,
+    )
+
+    assert guard(_destructive_paste(), EMPTY_OBSERVATION) is PermissionDecision.ALLOW
 
 
 def test_observer_remains_blocked_even_in_trust_mode() -> None:
