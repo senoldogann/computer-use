@@ -6,6 +6,9 @@ without weakening the existing FULL safety boundary.
 
 from __future__ import annotations
 
+import pytest
+
+import computeruse.cli as cli
 from computeruse.agent import guarded
 from computeruse.orchestrator.loop import EMPTY_OBSERVATION
 from computeruse.orchestrator.schemas import AgentTurn, ClipboardPaste
@@ -66,3 +69,18 @@ def test_sovereign_does_not_consume_single_use_approval() -> None:
     )
 
     assert guard(_destructive_turn(), EMPTY_OBSERVATION) is PermissionDecision.ALLOW
+
+
+def test_cli_requires_explicit_sovereign_switch() -> None:
+    ordinary = cli.parse_args(["--goal", "x"])
+    sovereign = cli.parse_args(
+        ["--goal", "x", "--sovereign", "--deadline-seconds", "60"]
+    )
+
+    assert cli.resolve_autonomy_level(ordinary) is AutonomyLevel.FULL
+    assert cli.resolve_autonomy_level(sovereign) is AutonomyLevel.SOVEREIGN
+
+
+def test_numeric_level_does_not_expose_sovereign() -> None:
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--goal", "x", "--level", "4"])
