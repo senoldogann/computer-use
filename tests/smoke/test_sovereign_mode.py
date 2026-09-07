@@ -6,13 +6,20 @@ without weakening the existing FULL safety boundary.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from computeruse import cli
 from computeruse.agent import guarded
 from computeruse.orchestrator.loop import EMPTY_OBSERVATION
 from computeruse.orchestrator.schemas import AgentTurn, ClipboardPaste
-from computeruse.security.autonomy import AutonomyLevel, Risk, decide_permission
+from computeruse.security.autonomy import (
+    AutonomyLevel,
+    Risk,
+    classify_risk,
+    decide_permission,
+)
 from computeruse.security.permissions import PermissionDecision
 
 
@@ -42,6 +49,10 @@ def test_full_still_confirms_destructive_actions() -> None:
         decide_permission(AutonomyLevel.FULL, Risk.DESTRUCTIVE)
         is PermissionDecision.CONFIRM
     )
+
+
+def test_sovereign_still_classifies_destructive_risk() -> None:
+    assert classify_risk(_destructive_turn()) is Risk.DESTRUCTIVE
 
 
 def test_sovereign_does_not_require_grant_lookup() -> None:
@@ -88,6 +99,42 @@ def test_build_config_propagates_sovereign_level() -> None:
     config = cli.build_config(args, goal="x", activate_named_app=False)
 
     assert config.autonomy_level is AutonomyLevel.SOVEREIGN
+
+
+def test_sovereign_preserves_runtime_safety_config(tmp_path: Path) -> None:
+    args = cli.parse_args(
+        [
+            "--goal",
+            "x",
+            "--sovereign",
+            "--deadline-seconds",
+            "60",
+            "--verify",
+            "--trace-dir",
+            str(tmp_path),
+            "--trace-screenshots",
+            "--max-steps",
+            "17",
+        ]
+    )
+
+    def budget_guard() -> None:
+        return None
+
+    config = cli.build_config(
+        args,
+        goal="x",
+        activate_named_app=False,
+        budget_guard=budget_guard,
+    )
+
+    assert config.autonomy_level is AutonomyLevel.SOVEREIGN
+    assert config.kill_switch is not None
+    assert config.budget_guard is budget_guard
+    assert config.max_steps == 17
+    assert config.enable_visual_verification is True
+    assert config.trace_dir == tmp_path
+    assert config.trace_screenshots is True
 
 
 def test_numeric_level_does_not_expose_sovereign() -> None:
