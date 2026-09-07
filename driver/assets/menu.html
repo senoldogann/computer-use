@@ -614,6 +614,276 @@
       padding-left: 18px;
     }
 
+    /* ----- Transparent streaming feed (plan / prose / command groups) ------ */
+    /* No boxes, no rails: every row is transparent text like the reference.
+       Opacity carries hierarchy — prose brightest, command rows dimmest —
+       so a long run still reads at a glance without any chrome. */
+    .stream-prose {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      font-size: 12px;
+      line-height: 1.55;
+      color: #D6D3CE;
+      opacity: 0.95;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      padding: 3px 6px;
+      white-space: pre-wrap;
+    }
+
+    .stream-prose .expand-btn {
+      margin-left: 6px;
+    }
+
+    .stream-plan {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 4px 6px;
+    }
+
+    .stream-plan-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      color: #EDEDED;
+    }
+
+    .stream-plan-head .feed-icon {
+      display: inline-flex;
+      flex-shrink: 0;
+      color: #EDEDED;
+    }
+
+    .stream-plan-head .feed-icon svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .stream-plan-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      padding-left: 19px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #A8A5A0;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .stream-plan-item.done {
+      color: #6E6E6E;
+      text-decoration: line-through;
+      text-decoration-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .stream-plan-item.active {
+      color: #D6D3CE;
+    }
+
+    .stream-plan-check {
+      flex-shrink: 0;
+      width: 12px;
+      text-align: center;
+      margin-top: 1px;
+    }
+
+    /* Collapsible command group: "Ran N commands" header + dimmed rows. */
+    .run-group {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      margin: 3px 0;
+    }
+
+    .run-group-header {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      width: 100%;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      padding: 2.5px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #8A8A8A;
+      text-align: left;
+      transition: background 0.15s ease, color 0.15s ease;
+    }
+
+    .run-group-header:hover {
+      background: rgba(255, 255, 255, 0.06);
+      color: #C9C9C9;
+    }
+
+    .run-group-header .feed-icon {
+      display: inline-flex;
+      flex-shrink: 0;
+      color: #6E6E6E;
+    }
+
+    .run-group-header .feed-icon svg {
+      width: 12px;
+      height: 12px;
+    }
+
+    .run-group-header .run-group-text {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .run-group-header .run-group-chev {
+      flex-shrink: 0;
+      font-size: 10px;
+      color: #5F5F5F;
+      transition: transform 0.15s ease;
+    }
+
+    .run-group.collapsed .run-group-header .run-group-chev {
+      transform: rotate(-90deg);
+    }
+
+    .run-group-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .run-group.collapsed .run-group-list {
+      display: none;
+    }
+
+    /* One command row: dimmed mono preview + right chevron to expand. */
+    .cmd-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      width: 100%;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      padding: 2px 6px 2px 24px;
+      border-radius: 4px;
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 10.5px;
+      line-height: 1.45;
+      color: #858585;
+      opacity: 0.85;
+      text-align: left;
+      transition: background 0.15s ease, opacity 0.15s ease;
+    }
+
+    .cmd-row:hover {
+      background: rgba(255, 255, 255, 0.06);
+      opacity: 1;
+    }
+
+    .cmd-row .feed-icon {
+      display: inline-flex;
+      flex-shrink: 0;
+      margin-top: 2px;
+      color: #6E6E6E;
+    }
+
+    .cmd-row .feed-icon svg {
+      width: 11px;
+      height: 11px;
+    }
+
+    .cmd-row .cmd-preview {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cmd-row .cmd-chev {
+      flex-shrink: 0;
+      font-size: 10px;
+      color: #5F5F5F;
+      align-self: center;
+    }
+
+    .cmd-row.open .cmd-preview {
+      white-space: normal;
+      overflow: visible;
+    }
+
+    .cmd-full {
+      display: none;
+      width: 100%;
+      margin: 2px 6px 4px 24px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.35);
+      border: 0.5px solid rgba(255, 255, 255, 0.08);
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 10px;
+      line-height: 1.5;
+      color: #C9C9C9;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
+    .cmd-full.show {
+      display: block;
+    }
+
+    .cmd-result {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+      color: #8A8A8A;
+    }
+
+    /* Live thinking footer: pinned at the feed end while the run lives. */
+    .thinking-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      font-size: 12px;
+      color: #8A8A8A;
+    }
+
+    .thinking-row .feed-icon {
+      display: inline-flex;
+      color: #8A8A8A;
+      animation: statusPulse 1.4s infinite ease-in-out;
+    }
+
+    .thinking-row .feed-icon svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .thinking-row .thinking-dots::after {
+      content: "";
+      animation: thinkingDots 1.2s infinite steps(4);
+    }
+
+    @keyframes thinkingDots {
+      0% { content: ""; }
+      25% { content: "."; }
+      50% { content: ".."; }
+      75% { content: "..."; }
+    }
+
     .card-row {
       display: flex;
       align-items: flex-start;
@@ -4788,6 +5058,8 @@
         summary: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>',
         search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
         bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+        terminal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+        code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
         err: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
         rerun: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
         check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
@@ -5229,6 +5501,11 @@
 
         if (emptyHero) emptyHero.style.display = "none";
         currentTree = null;
+        // Fresh run, fresh stream state: the previous run's collapsed groups
+        // and seen-window memory must not leak into the new feed.
+        closeActionGroup();
+        closeGroup();
+        lastWindowSeen = null;
         window._lastTokens = 0;
         window._lastElapsedS = 0;
         window._lastCalls = 0;
@@ -5437,7 +5714,7 @@
         node.className = "branch-node node-" + (nodeType || "action");
         node.innerHTML = '<div class="step-card">' + contentHtml + '</div>';
         tree.appendChild(node);
-        log.scrollTop = log.scrollHeight;
+        requestScroll();
       }
 
       /* ----- Reference-feed group pattern ------------------------------------ */
@@ -5447,6 +5724,9 @@
       var currentGroup = null;
 
       function closeGroup() {
+        // An action run never survives its sub-goal: consecutive-action
+        // grouping is scoped to one idea, so closing the idea closes the run.
+        closeActionGroup();
         currentGroup = null;
       }
 
@@ -5456,7 +5736,7 @@
         currentGroup.className = "group-block";
         currentGroup.innerHTML = headerHtml;
         log.appendChild(currentGroup);
-        log.scrollTop = log.scrollHeight;
+        requestScroll();
       }
 
       function appendNested(html) {
@@ -5464,7 +5744,8 @@
         wrap.className = "feed-nested";
         wrap.innerHTML = html;
         (currentGroup || log).appendChild(wrap);
-        log.scrollTop = log.scrollHeight;
+        ensureThinkingRow();
+        requestScroll();
       }
 
       function renderConnectCard() {
@@ -5475,20 +5756,52 @@
           '<div class="feed-line"><span class="feed-icon">' + ICONS.laptop + '</span>' +
           '<span class="feed-text">Bilgisayara bağlandı</span></div>';
         log.appendChild(card);
-        log.scrollTop = log.scrollHeight;
+        requestScroll();
       }
 
       function renderThoughtCard(thoughtText) {
+        closeActionGroup();
         closeGroup();
         recordSessionEvent("Reasoning", thoughtText);
-        // Reference feed pattern: a reasoning/analysis line with a light-bulb icon.
-        appendBranch("thought",
-          '<div class="feed-line"><span class="feed-icon">' + ICONS.bulb + '</span>' +
-          '<span class="feed-text">' + escapeHtml(thoughtText) + '</span></div>'
-        );
+        // Reference feed: plain prose paragraph, no icon, no box — the
+        // model's own words read as text while everything it *does* is mono.
+        var text = String(thoughtText || "");
+        var card = document.createElement("div");
+        card.className = "stream-prose";
+        if (text.length > 420) {
+          obsCounter++;
+          var thoughtId = "thought_" + obsCounter;
+          var shortEl = document.createElement("span");
+          shortEl.id = thoughtId + "_short";
+          shortEl.textContent = text.substring(0, 400).trim() + "…";
+          var fullEl = document.createElement("span");
+          fullEl.id = thoughtId + "_full";
+          fullEl.style.display = "none";
+          fullEl.textContent = text;
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "expand-btn";
+          btn.id = thoughtId + "_btn";
+          btn.textContent = "+ Devamını göster";
+          btn.addEventListener("click", function () {
+            var isFull = fullEl.style.display !== "none";
+            fullEl.style.display = isFull ? "none" : "inline";
+            shortEl.style.display = isFull ? "inline" : "none";
+            btn.textContent = isFull ? "+ Devamını göster" : "− Daralt";
+          });
+          card.appendChild(shortEl);
+          card.appendChild(fullEl);
+          card.appendChild(btn);
+        } else {
+          card.textContent = text;
+        }
+        log.appendChild(card);
+        ensureThinkingRow();
+        requestScroll();
       }
 
       function renderSubgoalCard(subgoalText) {
+        closeActionGroup();
         recordSessionEvent("Sub-goal", subgoalText);
         // Reference feed: a group header row whose steps follow as indented
         // children — like the "N arama çalıştırıldı" header with its searches.
@@ -5546,15 +5859,27 @@
             totals.clicks++;
           } else if (actType === "mouse_move") {
             iconSvg = ICONS.move;
-            detail = "Move cursor to <code>(" + parsed.x + ", " + parsed.y + ")</code>";
+            preview = "Move cursor to (" + parsed.x + ", " + parsed.y + ")";
+          } else if (actType === "mouse_drag") {
+            iconSvg = ICONS.move;
+            preview = "Drag (" + parsed.start_x + ", " + parsed.start_y + ") → (" + parsed.end_x + ", " + parsed.end_y + ")";
+            if (currentRunRecord) currentRunRecord.actions.clicks++;
+            totals.clicks++;
+          } else if (actType === "mouse_scroll") {
+            iconSvg = ICONS.move;
+            preview = "Scroll dx=" + parsed.dx + " dy=" + parsed.dy;
           } else if (actType === "type_text") {
             iconSvg = ICONS.type;
-            detail = 'Type <code>"' + escapeHtml(parsed.text) + '"</code> (' + (parsed.wpm || 40) + ' WPM)';
+            var typeText = String(parsed.text || "");
+            preview = 'Type "' + singleLinePreview(typeText, 80) + '"';
+            if (typeText.length > 90) fullHtml = escapeHtml(typeText).replace(/\n/g, "<br>");
             if (currentRunRecord) currentRunRecord.actions.types++;
             totals.types++;
           } else if (actType === "clipboard_paste") {
             iconSvg = ICONS.paste;
-            detail = 'Paste text <code>"' + escapeHtml(parsed.text) + '"</code>';
+            var pasteText = String(parsed.text || "");
+            preview = 'Paste "' + singleLinePreview(pasteText, 80) + '"';
+            if (pasteText.length > 90) fullHtml = escapeHtml(pasteText).replace(/\n/g, "<br>");
             if (currentRunRecord) currentRunRecord.actions.pastes++;
             totals.pastes++;
           } else if (actType === "press_hotkey") {
@@ -5570,23 +5895,50 @@
             totals.apps++;
           } else if (actType === "web_search") {
             iconSvg = ICONS.globe;
-            detail = 'Web Search: <b>"' + escapeHtml(parsed.query || "") + '"</b> <span style="font-size:9px;color:var(--cyan);background:rgba(90,200,250,0.12);padding:1.5px 5px;border-radius:4px;margin-left:6px;">MCP Search</span>';
+            preview = 'Searched "' + singleLinePreview(String(parsed.query || ""), 80) + '"';
+          } else if (actType === "web_fetch") {
+            iconSvg = ICONS.globe;
+            preview = "Fetched " + singleLinePreview(String(parsed.url || ""), 80);
+            fullHtml = escapeHtml(String(parsed.url || ""));
           } else if (actType === "call_tool") {
-            iconSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>';
-            detail = 'MCP Tool: <code>' + escapeHtml(parsed.tool || "") + '</code> <span style="font-size:9px;color:var(--purple);background:rgba(191,90,242,0.12);padding:1.5px 5px;border-radius:4px;margin-left:6px;">MCP</span>';
+            var toolName = String(parsed.tool || "tool");
+            var args = parsed.arguments || {};
+            var code = args && typeof args.code === "string" ? args.code : "";
+            if (code) {
+              // The agent's written + executed code: first line as the dimmed
+              // preview (screenshot's `python3 - <<'PY' …` pattern), the full
+              // block expandable inline.
+              iconSvg = ICONS.code;
+              var firstLine = code.split("\n")[0] || "";
+              preview = singleLinePreview(firstLine, 88) || "Run code";
+              fullHtml = escapeHtml(code.length > 3000 ? code.substring(0, 3000) + "\n… (truncated)" : code).replace(/\n/g, "<br>");
+            } else {
+              iconSvg = ICONS.terminal;
+              var argKeys = Object.keys(args).join(", ");
+              preview = toolName + (argKeys ? " · " + singleLinePreview(argKeys, 60) : "");
+              var argJson = JSON.stringify(args);
+              if (argJson && argJson !== "{}" && argJson.length > 100) {
+                fullHtml = escapeHtml(argJson.length > 2000 ? argJson.substring(0, 2000) + "…" : argJson);
+              }
+            }
           } else if (actType === "click_mark") {
             iconSvg = ICONS.click;
-            detail = 'Click AX Mark <code>[' + parsed.mark + ']</code> · ' + (parsed.button || "left");
+            preview = "Click [" + parsed.mark + "] · " + (parsed.button || "left");
             if (currentRunRecord) currentRunRecord.actions.clicks++;
             totals.clicks++;
           } else if (actType === "wait") {
             iconSvg = ICONS.wait;
-            detail = "Wait " + parsed.duration_ms + "ms (" + escapeHtml(parsed.reason || "") + ")";
+            preview = "Wait " + parsed.duration_ms + "ms";
+          } else if (actType === "load_skill") {
+            iconSvg = ICONS.skill;
+            preview = "Load skill " + String(parsed.skill_id || "");
           } else {
-            detail = JSON.stringify(parsed);
+            iconSvg = ICONS.terminal;
+            preview = singleLinePreview(JSON.stringify(parsed), 88);
           }
         } catch (e) {
-          detail = escapeHtml(String(actionPayload));
+          iconSvg = ICONS.terminal;
+          preview = singleLinePreview(String(actionPayload), 88);
           // Fallback regex detection for action counts
           var rawStr = String(actionPayload);
           if (/mouse_click|click/i.test(rawStr)) { totals.clicks++; if (currentRunRecord) currentRunRecord.actions.clicks++; }
@@ -5597,20 +5949,37 @@
         }
 
         saveStoredTotals(totals);
-        if (typeof parsed === "object" && parsed !== null) {
+        if (parsed !== null && typeof parsed === "object") {
           updateWitnessLensUI(actType, parsed.x, parsed.y);
         }
-        recordSessionEvent("Action", stepLabel + ": " + actType + " " + detail.replace(/<[^>]+>/g, ""), String(actionPayload));
+        recordSessionEvent("Action", stepLabel + ": " + actType + " " + preview, String(actionPayload));
 
-        // Reference pattern: an executed step line with its tool icon, the
-        // rendered payload as the indented child row, and the step id on the right.
-        appendNested(
-          '<div class="feed-line">' +
-          '<span class="feed-icon">' + iconSvg + '</span>' +
-          '<span class="feed-text">' + detail + '</span>' +
-          '<span class="feed-meta">' + escapeHtml(stepLabel) + '</span>' +
-          '</div>'
-        );
+        // Transparent streaming row: dimmed mono preview in a collapsible
+        // "Ran N commands" group; the full text expands inline per row.
+        var built = makeCommandRow(iconSvg, preview, fullHtml);
+        appendActionToGroup(built.row, isToolAction(actType));
+        if (built.full) {
+          var host = (actionGroup && actionGroup.listEl) || currentGroup || log;
+          host.appendChild(built.full);
+          // Keep the expandable block visually attached to its row: it lives
+          // in the same list, right after the row that toggles it.
+          requestScroll();
+        }
+      }
+
+      function renderToolResultPreview(resultText) {
+        var text = String(resultText || "").trim();
+        if (!text) return;
+        recordSessionEvent("ToolResult", singleLinePreview(text, 140));
+        var host = (actionGroup && actionGroup.listEl) || currentGroup || log;
+        var row = document.createElement("div");
+        row.className = "feed-sub";
+        row.innerHTML = '<span class="feed-icon">↳</span>';
+        var span = document.createElement("span");
+        span.textContent = singleLinePreview(text, 140);
+        row.appendChild(span);
+        host.appendChild(row);
+        requestScroll();
       }
 
       function renderVerificationCard(verifText) {
@@ -5622,6 +5991,7 @@
       }
 
       function renderSkillCard(skillText) {
+        closeActionGroup();
         closeGroup();
         recordSessionEvent("Skill", skillText);
         appendBranch("skill",
@@ -5638,6 +6008,8 @@
 
       function renderSummaryCard(sumText) {
         recordSessionEvent("Completed", sumText);
+        closeActionGroup();
+        clearThinkingRow();
         currentTree = null; // Close active tree group
         // Strip the runner's "finished goal=... at step N" scaffolding so the
         // feed reads as plain text: "⚑ Tamamlandı · <goal>" instead of
@@ -5724,7 +6096,7 @@
         actions.appendChild(deny);
         card.appendChild(actions);
         log.appendChild(card);
-        log.scrollTop = log.scrollHeight;
+        requestScroll();
       }
 
       /* Once the agent sends structured step records, they are the source of
@@ -5733,18 +6105,38 @@
          flag simply never flips. */
       var eventsSeen = false;
 
-      /* Render one structured step record. The prose renderers below parse log
+      /* Render one structured record. The prose renderers below parse log
          wording with string offsets, which breaks silently the moment a message is
-         reworded; the same facts arrive here already typed. */
+         reworded; the same facts arrive here already typed. Sibling @@CU
+         records share the stream: {"type":"plan"} and {"type":"stats"} are
+         routed to their own renderers and never flip the prose-dedup flag. */
       function renderStepEvent(ev) {
+        if (!ev || typeof ev !== "object") return;
+        if (ev.type === "plan" && ev.plan) {
+          if (emptyHero) emptyHero.style.display = "none";
+          renderPlanCard(ev.plan);
+          return;
+        }
+        if (ev.type === "stats") {
+          updateRunStatsStructured(ev);
+          return;
+        }
+        // Unknown typed records are ignored without flipping eventsSeen, so
+        // a future record type cannot silently suppress the prose path.
+        if (ev.type && ev.type !== "step") return;
         if (emptyHero) emptyHero.style.display = "none";
         eventsSeen = true;
-
         if (ev.thought) renderThoughtCard(ev.thought);
         if (ev.sub_goal) renderSubgoalCard(ev.sub_goal);
 
+        // What the agent saw: one dimmed line per window, deduped — the same
+        // frame re-observed across batch steps does not repeat itself.
+        if (ev.window) renderWindowLine(ev.window);
+
         if (ev.error) {
+          closeActionGroup();
           closeGroup();
+          clearThinkingRow();
           recordSessionEvent("Error", ev.error);
           appendBranch("err",
             '<div class="feed-line"><span class="feed-icon" style="color:#FF5A4E;">' + ICONS.err + '</span>' +
@@ -5757,6 +6149,8 @@
         if (ev.action && ev.action.type) {
           var label = "step_" + ev.step + ":" + ev.action.type;
           renderActionCard(label, JSON.stringify(ev.action));
+          // What a tool answered: the dimmed ↳ line under its command row.
+          if (ev.tool_result) renderToolResultPreview(ev.tool_result);
         }
         /* A verdict of "inconclusive" is not a result worth a card: it means the
            witnesses had nothing to say, which is the common case for actions that
@@ -5831,13 +6225,18 @@
           }
         } else if (kind === "err" || trimmed.includes("error:") || trimmed.includes("fatal:")) {
           closeGroup();
+          clearThinkingRow();
           recordSessionEvent("Error", trimmed);
           appendBranch("err",
             '<div class="feed-line"><span class="feed-icon" style="color:#FF5A4E;">' + ICONS.err + '</span>' +
             '<span class="feed-text" style="color:#FF9D97;white-space:pre-wrap;">' + escapeHtml(trimmed) + '</span></div>'
           );
           if (currentRunRecord) finishCurrentRun("failed");
+          return;
         }
+        // Legacy prose path stays live while the run does: keep the thinking
+        // footer pinned without touching any of the branches above.
+        ensureThinkingRow();
       }
 
       /* ----- History Renderer ------------------------------------------------ */
@@ -5990,8 +6389,11 @@
         window.isAgentRunning = !!r;
         if (r) {
           document.body.classList.add("running-glow");
+          ensureThinkingRow();
         } else {
           document.body.classList.remove("running-glow");
+          closeActionGroup();
+          clearThinkingRow();
           if (!goal.value || !goal.value.trim()) {
             window.collapseWindow();
           }
@@ -6019,6 +6421,230 @@
           updateTrustUI();
           showToast(trustMode ? "Trust Açık: kesintisiz otonomi (--yes)" : "Trust Kapalı: onay istenecek");
         });
+        if (sessionEvents.length > 300) sessionEvents.splice(0, sessionEvents.length - 300);
+      }
+
+      /* ----- Transparent streaming feed: scroll / prune / thinking --------- */
+      // One rAF-batched scroll keeps a 30-step run from forcing a layout per
+      // row, and never yanks the user away from a row they scrolled up to
+      // read — the feed follows only when it was already at the bottom.
+      var MAX_LOG_NODES = 800;
+      var scrollQueued = false;
+      function requestScroll() {
+        if (scrollQueued) return;
+        scrollQueued = true;
+        var raf = window.requestAnimationFrame || function (cb) { setTimeout(cb, 16); };
+        raf(function () {
+          scrollQueued = false;
+          try {
+            var nearBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 90;
+            if (nearBottom) log.scrollTop = log.scrollHeight;
+          } catch (e) { }
+          pruneLog();
+        });
+      }
+
+      function pruneLog() {
+        try {
+          while (log.children.length > MAX_LOG_NODES) {
+            var first = log.firstChild;
+            if (!first) break;
+            // The thinking row always stays last; stop rather than orphan it.
+            if (first.id === "thinkingRow") break;
+            log.removeChild(first);
+          }
+        } catch (e) { }
+      }
+
+      function ensureThinkingRow() {
+        if (!window.isAgentRunning) return;
+        var row = document.getElementById("thinkingRow");
+        if (!row) {
+          row = document.createElement("div");
+          row.id = "thinkingRow";
+          row.className = "thinking-row";
+          row.innerHTML =
+            '<span class="feed-icon">' + ICONS.brain + '</span>' +
+            '<span>Thinking<span class="thinking-dots"></span></span>';
+        }
+        // appendChild moves the existing node, so the row re-pins to the end
+        // after every streamed row without a second query.
+        log.appendChild(row);
+        requestScroll();
+      }
+
+      function clearThinkingRow() {
+        var row = document.getElementById("thinkingRow");
+        if (row && row.parentNode) row.parentNode.removeChild(row);
+      }
+
+      /* ----- Collapsible command groups ("Ran N commands") ------------------ */
+      // Consecutive actions without an intervening thought share one group:
+      // the header names the count like the reference feed, the rows stay
+      // dimmed single lines, and each row expands inline to its full text.
+      var actionGroup = null; // {el, listEl, countEl, count, hasTool}
+      var lastWindowSeen = null;
+
+      function isToolAction(actType) {
+        return actType === "call_tool" || actType === "web_search" || actType === "web_fetch";
+      }
+
+      function closeActionGroup() {
+        if (actionGroup && actionGroup.count > 3) {
+          actionGroup.el.classList.add("collapsed");
+        }
+        actionGroup = null;
+      }
+
+      function singleLinePreview(text, maxLen) {
+        var oneLine = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+        if (oneLine.length <= maxLen) return oneLine;
+        return oneLine.substring(0, maxLen).trim() + "…";
+      }
+
+      function appendActionToGroup(rowBtn, isTool) {
+        var host = currentGroup || log;
+        if (!actionGroup || actionGroup.host !== host) {
+          closeActionGroup();
+          var group = document.createElement("div");
+          group.className = "run-group";
+          group.innerHTML =
+            '<button type="button" class="run-group-header">' +
+            '<span class="feed-icon">' + ICONS.terminal + '</span>' +
+            '<span class="run-group-text"></span>' +
+            '<span class="run-group-chev">›</span>' +
+            '</button>' +
+            '<div class="run-group-list"></div>';
+          host.appendChild(group);
+          var headerBtn = group.querySelector(".run-group-header");
+          headerBtn.addEventListener("click", function () {
+            group.classList.toggle("collapsed");
+          });
+          actionGroup = {
+            el: group,
+            host: host,
+            listEl: group.querySelector(".run-group-list"),
+            countEl: group.querySelector(".run-group-text"),
+            count: 0,
+            hasTool: false
+          };
+        }
+        actionGroup.count += 1;
+        if (isTool) actionGroup.hasTool = true;
+        actionGroup.listEl.appendChild(rowBtn);
+        var n = actionGroup.count;
+        actionGroup.countEl.textContent = actionGroup.hasTool
+          ? ("Ran " + n + " command" + (n === 1 ? "" : "s"))
+          : ("Ran " + n + " step" + (n === 1 ? "" : "s"));
+        // A lone row reads better without a header echoing it: hide the
+        // header until the group actually groups something.
+        var header = actionGroup.el.querySelector(".run-group-header");
+        if (header) header.style.display = n > 1 ? "flex" : "none";
+        ensureThinkingRow();
+        requestScroll();
+      }
+
+      function makeCommandRow(iconSvg, previewText, fullHtml) {
+        var row = document.createElement("button");
+        row.type = "button";
+        row.className = "cmd-row";
+        row.innerHTML =
+          '<span class="feed-icon">' + iconSvg + '</span>' +
+          '<span class="cmd-preview"></span>' +
+          '<span class="cmd-chev">›</span>';
+        row.querySelector(".cmd-preview").textContent = previewText;
+        if (!fullHtml) {
+          row.querySelector(".cmd-chev").style.visibility = "hidden";
+          row.style.cursor = "default";
+          return { row: row, full: null };
+        }
+        var full = document.createElement("div");
+        full.className = "cmd-full";
+        full.innerHTML = fullHtml;
+        row.addEventListener("click", function () {
+          var show = !full.classList.contains("show");
+          full.classList.toggle("show", show);
+          row.classList.toggle("open", show);
+          row.querySelector(".cmd-chev").textContent = show ? "‹" : "›";
+          if (show) requestScroll();
+        });
+        return { row: row, full: full };
+      }
+
+      function renderPlanCard(plan) {
+        closeActionGroup();
+        closeGroup();
+        var subs = (plan && plan.sub_goals) || [];
+        recordSessionEvent("Plan", (plan && plan.goal) || "");
+        var card = document.createElement("div");
+        card.className = "stream-plan";
+        var head = document.createElement("div");
+        head.className = "stream-plan-head";
+        head.innerHTML = '<span class="feed-icon">' + ICONS.target + '</span>';
+        var headText = document.createElement("span");
+        headText.textContent = "Plan · " + subs.length + " adım";
+        head.appendChild(headText);
+        card.appendChild(head);
+        subs.slice(0, 8).forEach(function (sg) {
+          var item = document.createElement("div");
+          var st = sg.status || "pending";
+          item.className = "stream-plan-item" + (st === "completed" ? " done" : (st === "in_progress" ? " active" : ""));
+          var check = document.createElement("span");
+          check.className = "stream-plan-check";
+          check.textContent = st === "completed" ? "✓" : (st === "in_progress" ? "➤" : "○");
+          item.appendChild(check);
+          var label = document.createElement("span");
+          label.textContent = sg.description || "";
+          item.appendChild(label);
+          card.appendChild(item);
+        });
+        log.appendChild(card);
+        ensureThinkingRow();
+        requestScroll();
+      }
+
+      function updateRunStatsStructured(ev) {
+        var touched = false;
+        if (ev.total_tokens != null && isFinite(ev.total_tokens)) {
+          window._lastTokens = ev.total_tokens;
+          touched = true;
+        }
+        if (ev.elapsed_seconds != null && isFinite(ev.elapsed_seconds)) {
+          window._lastElapsedS = ev.elapsed_seconds;
+          touched = true;
+        }
+        if (ev.calls != null && isFinite(ev.calls)) {
+          window._lastCalls = ev.calls;
+          touched = true;
+        }
+        if (!touched) return;
+        try {
+          statsTokens.innerHTML = BOLT_ICON + ' <span>' + Number(window._lastTokens || 0).toLocaleString("tr-TR") + ' tok</span>';
+          statsElapsed.innerHTML = CLOCK_ICON + ' <span>' + Math.round(window._lastElapsedS || 0) + 's</span>';
+          var budgetMaxTokens = 25000;
+          var pct = Math.min(100, Math.round(((window._lastTokens || 0) / budgetMaxTokens) * 100));
+          var fillEl = document.getElementById("budgetFill");
+          if (fillEl) {
+            fillEl.style.width = pct + "%";
+            if (pct > 80) fillEl.className = "budget-fill danger";
+            else if (pct > 50) fillEl.className = "budget-fill warn";
+            else fillEl.className = "budget-fill";
+          }
+          var bMeta = document.getElementById("budgetMetaVal");
+          if (bMeta) {
+            bMeta.textContent = Number(window._lastTokens || 0).toLocaleString("tr-TR") + " / 25,000 tok · " + Math.round(window._lastElapsedS || 0) + "s";
+          }
+        } catch (e) { }
+      }
+
+      function renderWindowLine(windowText) {
+        if (!windowText || windowText === lastWindowSeen) return;
+        lastWindowSeen = windowText;
+        recordSessionEvent("Observe", windowText);
+        appendNested(
+          '<div class="feed-line"><span class="feed-icon">' + ICONS.globe + '</span>' +
+          '<span class="feed-text">' + escapeHtml(singleLinePreview("Görüldü: " + windowText, 110)) + '</span></div>'
+        );
       }
 
       /* ----- MCP Store Logic & State ---------------------------------------- */
@@ -6529,11 +7155,13 @@
         err: function (t) { processIncomingLine(t, "err"); window._lastErr = true; },
         okk: function (t) { renderSummaryCard(t); },
         summary: function (s) { renderSummaryCard(s); },
-        done: function (ok) { window._lastErr = !ok; setRunning(false); },
+        done: function (ok) { window._lastErr = !ok; closeActionGroup(); setRunning(false); },
         clear: function () {
           goal.value = "";
           log.innerHTML = "";
           currentTree = null;
+          closeActionGroup();
+          lastWindowSeen = null;
           sessionEvents = [];
           if (emptyHero) {
             log.appendChild(emptyHero);
@@ -6760,6 +7388,7 @@
         } else {
           window.collapseWindow();
         }
+        ensureThinkingRow();
       }
 
       if (goalInputEl) {
