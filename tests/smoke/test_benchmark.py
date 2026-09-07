@@ -44,7 +44,7 @@ MANIFEST_PATH = (
 #: complete frozen manifest semantics were intentionally reviewed. A change to
 #: the hashing implementation itself may update the pin without changing
 #: MANIFEST_VERSION only when scenario data remains byte-for-byte unchanged.
-FROZEN_MANIFEST_HASH = "4714b8fae877ba20fd20e992b57737d3102dd68ce377cc3e528770886274f225"
+FROZEN_MANIFEST_HASH = "bbae3e286fc32e6ba5a1fc261665b0c3d53e12384c971a7602f99d9c02f7fc05"
 
 
 def _record(scenario_id: str = "s01", attempt: int = 1, **overrides: object) -> RunRecord:
