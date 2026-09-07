@@ -62,6 +62,52 @@ _STRUCTURED_PREFERENCE_RE: Final[re.Pattern[str]] = re.compile(
 )
 _CLAUSE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"[.!?;\n]+")
 
+_VERIFICATION_MARKERS: Final[tuple[str, ...]] = (
+    "verify",
+    "verification",
+    "doğrula",
+    "doğrulama",
+    "dogrula",
+    "dogrulama",
+)
+_SUMMARY_MARKERS: Final[tuple[str, ...]] = (
+    "summary",
+    "summaries",
+    "özet",
+    "özetler",
+    "ozet",
+    "ozetler",
+)
+_RESPONSE_FORMAT_MARKERS: Final[tuple[str, ...]] = (
+    "bullet",
+    "bullets",
+    "bullet point",
+    "bullet points",
+    "markdown",
+    "json",
+    "table",
+    "tablo",
+    "madde",
+    "maddeler",
+    "liste",
+)
+_RESPONSE_STYLE_MARKERS: Final[tuple[str, ...]] = (
+    "answer",
+    "answers",
+    "response",
+    "responses",
+    "reply",
+    "replies",
+    "cevap",
+    "cevaplar",
+    "cevapları",
+    "cevaplari",
+    "yanıt",
+    "yanıtlar",
+    "yanit",
+    "yanitlar",
+)
+
 
 def _normalize_identity_text(value: str) -> str:
     """Collapse surrounding/repeated whitespace without changing content case."""
@@ -137,8 +183,14 @@ def _is_active(record: PreferenceRecord) -> bool:
     return record.evidence_count >= 2 and record.confidence >= 0.60
 
 
-def _superseded_ids(records: tuple[PreferenceRecord, ...]) -> set[str]:
-    return {record.supersedes for record in records if record.supersedes is not None}
+def _preference_rank(record: PreferenceRecord) -> tuple[int, float, float, str]:
+    """Authority order for one active value, strongest and freshest first."""
+    return (
+        -_SOURCE_STRENGTH[record.source],
+        -record.confidence,
+        -record.last_seen.timestamp(),
+        record.preference_id,
+    )
 
 
 def _active_incumbent(
@@ -148,28 +200,25 @@ def _active_incumbent(
     key: str,
     excluding_id: str,
 ) -> PreferenceRecord | None:
-    """Strongest unsuperseded active value for one domain/key pair."""
-    superseded = _superseded_ids(records)
+    """Strongest other active value for one domain/key pair.
+
+    ``supersedes`` is provenance, not an active-state graph. A user can choose
+    A, then B, then A again; treating those history edges as tombstones creates
+    an A <-> B cycle and hides both values. Authority is instead resolved from
+    typed evidence strength, confidence, and freshness every time.
+    """
     normalized_key = _normalize_identity_text(key)
     candidates = [
         record
         for record in records
         if record.preference_id != excluding_id
-        and record.preference_id not in superseded
         and record.domain == domain
         and _normalize_identity_text(record.key) == normalized_key
         and _is_active(record)
     ]
     if not candidates:
         return None
-    candidates.sort(
-        key=lambda record: (
-            -record.confidence,
-            -_SOURCE_STRENGTH[record.source],
-            -record.last_seen.timestamp(),
-            record.preference_id,
-        )
-    )
+    candidates.sort(key=_preference_rank)
     return candidates[0]
 
 
@@ -291,36 +340,29 @@ def active_preferences(
     domain: PreferenceDomain | None = None,
     limit: int = ACTIVE_PREFERENCE_LIMIT,
 ) -> tuple[PreferenceRecord, ...]:
-    """Return the deterministic, contradiction-free preferences safe to stage.
+    """Return deterministic, contradiction-free preferences safe to stage.
 
-    History is append-preserving, but prompt context is not a history dump. For
-    each ``(domain, key)`` this function chooses exactly one unsuperseded active
-    value. Explicit evidence wins over corrections, which win over inferred
-    behavior; confidence and freshness break ties inside one source class.
+    History is append-preserving, but prompt context is not a history dump.
+    Every active record participates in its ``(domain, key)`` election and one
+    winner is chosen by evidence authority, confidence, then freshness.
+    ``supersedes`` remains explanatory provenance only, which is what lets a
+    user safely return to a value they preferred before.
     """
     if limit < 0:
         raise ValueError("preference limit must be non-negative")
 
-    superseded = _superseded_ids(records)
     grouped: dict[tuple[PreferenceDomain, str], list[PreferenceRecord]] = {}
     for record in records:
         if domain is not None and record.domain != domain:
             continue
-        if record.preference_id in superseded or not _is_active(record):
+        if not _is_active(record):
             continue
         group_key = (record.domain, _normalize_identity_text(record.key))
         grouped.setdefault(group_key, []).append(record)
 
     winners: list[PreferenceRecord] = []
     for candidates in grouped.values():
-        candidates.sort(
-            key=lambda record: (
-                -_SOURCE_STRENGTH[record.source],
-                -record.confidence,
-                -record.last_seen.timestamp(),
-                record.preference_id,
-            )
-        )
+        candidates.sort(key=_preference_rank)
         winners.append(candidates[0])
 
     winners.sort(
@@ -356,6 +398,31 @@ def _instruction_key(value: str) -> str:
     return f"instruction.{digest}"
 
 
+def _contains_marker(value: str, markers: tuple[str, ...]) -> bool:
+    lowered = value.casefold()
+    return any(marker in lowered for marker in markers)
+
+
+def _natural_preference_key(value: str) -> str:
+    """Map common durable EN/TR statements onto stable contradiction keys.
+
+    This is intentionally a tiny taxonomy rather than open-ended NLP. It runs
+    only after the durable-intent gate has accepted the clause, and canonicalizes
+    the few families where contradictory wording must meet the same stored key.
+    Unknown standing instructions keep a content-specific fallback key instead
+    of being guessed into a broad category.
+    """
+    if _contains_marker(value, _VERIFICATION_MARKERS):
+        return "verification-policy"
+    if _contains_marker(value, _SUMMARY_MARKERS):
+        return "summary-style"
+    if _contains_marker(value, _RESPONSE_FORMAT_MARKERS):
+        return "response-format"
+    if _contains_marker(value, _RESPONSE_STYLE_MARKERS):
+        return "response-style"
+    return _instruction_key(value)
+
+
 def extract_explicit_preference_evidence(
     goal: str,
     *,
@@ -366,9 +433,11 @@ def extract_explicit_preference_evidence(
 
     Structured ``preference: key=value`` / ``tercih: key=value`` lines map the
     key directly. Natural language is accepted only when one of the approved
-    English/Turkish durable cues is present. The original clause is screened
-    for secrets before the bounded value is built, so truncation can never hide
-    a credential that appeared later in the user's text.
+    English/Turkish durable cues is present. Common response/summary/format/
+    verification statements are canonicalized so contradictions reconcile
+    under one key. The original clause is screened for secrets before the
+    bounded value is built, so truncation can never hide a credential that
+    appeared later in the user's text.
     """
     if not source_id.strip():
         raise ValueError("preference source_id must be non-empty")
@@ -414,7 +483,7 @@ def extract_explicit_preference_evidence(
         if contains_sensitive_preference_material(clause):
             continue
         bounded = clause[:MAX_EXPLICIT_PREFERENCE_CHARS].rstrip()
-        key = _instruction_key(bounded)
+        key = _natural_preference_key(bounded)
         identity = (key, bounded)
         if identity in seen:
             continue
