@@ -105,11 +105,19 @@ def test_driver_rejects_wrong_peer_pid(tmp_path) -> None:
         conn.settimeout(5.0)
         try:
             conn.connect(str(sock))
-            conn.sendall(b'{"method":"ping"}\n')
             try:
-                data = conn.recv(4096)
-            except (TimeoutError, OSError):
+                conn.sendall(b'{"method":"ping"}\n')
+            except BrokenPipeError:
+                # The driver hung up before reading: also a rejection, just
+                # the racy shape of one. Close-first wins over an in-flight
+                # send under load, so only the quiet EOF below is not a
+                # contract the test can demand.
                 data = b""
+            else:
+                try:
+                    data = conn.recv(4096)
+                except (TimeoutError, OSError):
+                    data = b""
             assert data == b"", "wrong-PID connection was not rejected"
         finally:
             conn.close()
