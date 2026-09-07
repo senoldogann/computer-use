@@ -242,13 +242,12 @@ def apply_preference_evidence(
     )
     replaces: PreferenceRecord | None = None
     if incumbent is not None and candidate.preference_id != incumbent.preference_id:
-        if evidence.source in {"explicit", "successful_correction"}:
-            replaces = incumbent
-        elif (
+        may_replace = evidence.source in {"explicit", "successful_correction"} or (
             _is_active(candidate)
             and incumbent.source != "explicit"
             and candidate.confidence > incumbent.confidence
-        ):
+        )
+        if may_replace:
             replaces = incumbent
 
     if replaces is not None and candidate.supersedes != replaces.preference_id:
