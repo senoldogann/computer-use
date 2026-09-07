@@ -5766,7 +5766,7 @@
         var savedLvl = parseInt(localStorage.getItem("cu_autonomy_level"), 10);
         if (savedLvl === 2 || savedLvl === 3) currentAutonomyLevel = savedLvl;
       } catch (e) { }
-      // Trust mode (--yes): auto-approve CONFIRM, keep BLOCK + kill-switch.
+      // Trust mode (--yes): auto-approve non-destructive CONFIRM only; keep destructive confirmation + BLOCK + kill-switch.
       // OFF by default, matching the CLI. On, the Approve/Deny card below can
       // never appear and the standing capability grants are never consulted,
       // because nothing ever reaches a confirmation — a panel that started this

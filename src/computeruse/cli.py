@@ -374,7 +374,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="Trust mode: auto-approve every CONFIRM without prompting, so "
+        help="Trust mode: auto-approve non-destructive CONFIRM decisions without prompting, so "
         "the agent runs uninterrupted like a human operator. BLOCK still "
         "blocks, and the kill-switch (Cmd+Shift+Escape, shaking the mouse, "
         "or Ctrl-C), "
@@ -845,8 +845,8 @@ def build_config(
     # is a session frozen mid-task, holding the machine, until someone returns.
     # ``parking_confirm_handler`` writes the question down and ends the run
     # instead, so the work is paused rather than hung or silently lost.
-    # Trust mode (--yes) overrides both: the operator explicitly asked for
-    # uninterrupted autonomy, so CONFIRM is auto-approved with a log line.
+    # Trust mode (--yes) skips non-destructive confirmation prompts. Destructive
+    # actions keep the explicit approval/grant boundary even in unattended mode.
     trust_mode = bool(getattr(args, "yes", False))
     if trust_mode:
         confirm_handler = auto_confirm_handler

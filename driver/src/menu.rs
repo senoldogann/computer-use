@@ -111,7 +111,7 @@ static WEBVIEW_PTR: core::sync::atomic::AtomicPtr<core::ffi::c_void> =
 
 /// Active autonomy level (3 = Full Autonomy, 2 = Guarded Mode).
 static AUTONOMY_LEVEL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(3);
-/// Trust mode (--yes): auto-approve CONFIRM without prompting.
+/// Trust mode (--yes): auto-approve non-destructive CONFIRM without prompting.
 ///
 /// Off by default, matching the CLI. On, the panel's own Approve/Deny card can
 /// never appear and the capability grants the store holds are never consulted,
