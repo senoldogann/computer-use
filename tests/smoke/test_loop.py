@@ -10,11 +10,13 @@ make the loop run forever, and a truncated run must never be silent.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import pytest
 
 from computeruse.orchestrator.failures import FailureKind, UnrecoverableFailureError
 from computeruse.orchestrator.loop import (
+    EMPTY_OBSERVATION,
     TOOL_REPEAT_ABORT_AFTER,
     TOOL_REPEAT_WARN_AFTER,
     AxProbeResult,
@@ -23,6 +25,7 @@ from computeruse.orchestrator.loop import (
     StuckLoopError,
     WorkingState,
     _extend_trail,
+    cycle_signature,
     decide_step,
     equivalent_action,
     map_action_to_screen,
@@ -989,3 +992,63 @@ def test_identical_capture_reuses_encoding_but_geometry_invalidates_it(
     moved = runner._capture_frame(())
     assert moved is not None
     assert moved[2].origin.x == -100.0
+
+
+def test_cycle_identity_ignores_pixel_noise_when_ax_is_available() -> None:
+    first = replace(EMPTY_OBSERVATION, raw_ui_elements=('Button "Accept"',), signature="frame-a")
+    noisy = replace(first, signature="frame-b")
+    assert cycle_signature(first) == cycle_signature(noisy)
+    changed = replace(noisy, content=("Article opened",))
+    assert cycle_signature(first) != cycle_signature(changed)
+    blind = replace(EMPTY_OBSERVATION, signature="frame-a")
+    assert cycle_signature(blind) != cycle_signature(replace(blind, signature="frame-b"))
+
+
+def test_decide_step_preserves_all_rolling_context() -> None:
+    """DECIDE must never drop rolling context fields.
+
+    Regression for the state-loss bug where decide_step rebuilt
+    WorkingState field-by-field and dropped dialog_notes, playbook,
+    mcp_tools and tool_result each turn.
+    """
+    from pathlib import Path
+
+    from computeruse.skills.playbook import PlaybookSummary
+
+    state = WorkingState(
+        goal="g",
+        completed_steps=("step_0:mouse_move",),
+        last_error="e",
+        knowledge=("k",),
+        active_window="w",
+        ui_elements=("u",),
+        open_tabs=("t",),
+        dialog_notes=("d",),
+        playbook=PlaybookSummary(
+            name="p",
+            description="d",
+            tags=("t",),
+            source_path=Path("p.md"),
+        ),
+        screenshot_b64="b64",
+        observed_trail=("trail",),
+        mcp_tools=("tool",),
+        tool_result="result",
+        tool_history=("h",),
+    )
+    turn = AgentTurn(
+        thought="t",
+        sub_goal="s",
+        action=MouseClick(type="mouse_click", x=10, y=10, button="left", click_count=1),
+    )
+    nxt = decide_step(state, turn).state
+    assert nxt.step_index == state.step_index + 1
+    assert nxt.dialog_notes == state.dialog_notes
+    assert nxt.playbook == state.playbook
+    assert nxt.mcp_tools == state.mcp_tools
+    assert nxt.tool_result == state.tool_result
+    assert nxt.observed_trail == state.observed_trail
+    assert nxt.tool_history == state.tool_history
+    assert nxt.plan == state.plan
+    assert nxt.knowledge == state.knowledge
+    assert nxt.skill == state.skill

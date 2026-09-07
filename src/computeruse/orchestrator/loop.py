@@ -1029,32 +1029,13 @@ def decide_step(state: WorkingState, decision: AgentTurn) -> StepOutcome:
         # times. Its own stated intent is the cheapest true record of that,
         # and it costs one line per step.
         step_label = f"{step_label} — {decision.sub_goal[:SUB_GOAL_LABEL_MAX_CHARS]}"
-    next_state = WorkingState(
-        goal=state.goal,
-        completed_steps=state.completed_steps,
-        last_error=state.last_error,
-        step_index=state.step_index + 1,
-        knowledge=state.knowledge,
-        active_window=state.active_window,
-        ui_elements=state.ui_elements,
-        open_tabs=state.open_tabs,
-        skill=state.skill,
-        screenshot_b64=state.screenshot_b64,
-        # The navigation trail accumulates across the whole run: OBSERVE reads
-        # it back in and extends it, so dropping it here means every cycle
-        # starts from empty and the trail never grows past one entry. That is
-        # the exact blindness PR #17 fixed — the auditor asking to see a search
-        # result and the page it opened at the same time, on a screen that can
-        # only show one.
-        observed_trail=state.observed_trail,
-        # The tool transcript is run-accumulated evidence, not per-observation
-        # perception: dropping it here would blind the completion auditor to
-        # every tool answer older than one turn.
-        tool_history=state.tool_history,
-        # The strategic plan is part of the rolling context: a decision must
-        # never drop the roadmap the provider is executing against (Law 4.3).
-        plan=state.plan,
-    )
+    # All rolling context survives DECIDE via replace: OBSERVE refreshes
+    # perception fields each cycle, but DECIDE must never drop them.
+    # Dropping observed_trail resets it every cycle (PR #17 blindness);
+    # dropping tool_history blinds the completion auditor; dropping plan
+    # loses the roadmap (Law 4.3); dropping dialog_notes/playbook/mcp_tools
+    # /tool_result resets dialog, skill, tool context each turn.
+    next_state = replace(state, step_index=state.step_index + 1)
     return StepOutcome(state=next_state, action=action, route=route, step_label=step_label)
 
 
@@ -1163,8 +1144,10 @@ def cycle_signature(observation: Observation) -> str:
     """
     window = observation.window
     title = f"{window.app_name}|{window.window_title}" if window is not None else ""
+    # Live overlays and animation must not disguise a repeated AX state.
+    frame = "" if observation.raw_ui_elements or observation.content else observation.signature
     return (
-        f"{observation.signature}|{title}|{hash(observation.raw_ui_elements)}"
+        f"{frame}|{title}|{hash(observation.raw_ui_elements)}"
         f"|{hash(observation.content)}"
     )
 
