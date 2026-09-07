@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Literal
 
+from computeruse.orchestrator.report import UsageRecord
+
 ProposalSource = Literal[
     "operator_inbox",
     "mission_resume",
@@ -96,3 +98,23 @@ def rank_proposals(
             ),
         )
     )
+
+
+def _normalized_goal(goal: str) -> str:
+    """Collapse insignificant whitespace for exact historical goal matching."""
+    return " ".join(goal.split())
+
+
+def estimate_expected_cost(
+    goal: str, usage: tuple[UsageRecord, ...]
+) -> float | None:
+    """Mean recorded dollar cost for the same normalized goal, when known."""
+    target = _normalized_goal(goal)
+    matches = [
+        record.cost_usd
+        for record in usage
+        if _normalized_goal(record.goal) == target
+    ]
+    if not matches:
+        return None
+    return sum(matches) / len(matches)
