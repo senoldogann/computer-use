@@ -25,7 +25,6 @@ import inspect
 import json
 import logging
 import os
-import random
 import subprocess
 import sys
 import threading
@@ -130,6 +129,7 @@ from computeruse.providers.openai import (
     openai_model,
     price_for,
 )
+from computeruse.scheduler import estimate_expected_cost, make_proposal
 from computeruse.security.approvals import (
     ApprovalQueue,
     ApprovalRequest,
@@ -894,15 +894,8 @@ def build_config(
         background_actuation=getattr(args, "background", False),
         enable_mcp=getattr(args, "mcp", False),
         enable_cua_repl=not getattr(args, "no_cua_repl", False),
-        # OBSERVE precondition: a *resolved* app (user-named or goal-inferred)
-        # on a *real* backend is activated (the simulated backend never touches
-        # the host — Law 1). An auto-discovered app is never activated:
-        # discovery already names the frontmost app, and activating it again
-        # would be a no-op at best.
         activate_app_on_start=activate_named_app and args.app is not None,
         tolerate_activation_failure=app_inferred,
-        # Ctrl-C at any moment reclaims control (Law 5 fail-safe); polled live
-        # between steps via the signal predicate.
         kill_switch=KillSwitch(monitor=None, signal_predicate=install_sigint_catcher()),
         completion_check=completion_check,
         max_steps=args.max_steps,
@@ -916,18 +909,6 @@ def build_config(
 
 
 def ensure_secure_socket_dir(socket_path: str) -> None:
-    """Create the socket's parent directory, hardening it when it is ours.
-
-    The default path lives under ``~/.computeruse/run`` (0700, user-owned)
-    so no other user can pre-bind or symlink-swap the path. An explicit
-    ``--socket`` elsewhere (e.g. tests under /tmp) keeps working: a shared
-    sticky directory such as /tmp (1777) is left untouched — deleting or
-    replacing another user's file there fails closed at bind time, and the
-    socket file's own uid/mode plus the driver's peer check still
-    authenticate the connection (see ActuationClient). Only a non-sticky
-    group/other-writable directory owned by someone else is refused, and we
-    never chmod a directory we do not own.
-    """
     import stat as stat_mod
 
     parent = Path(socket_path).expanduser().parent
@@ -957,18 +938,6 @@ def ensure_secure_socket_dir(socket_path: str) -> None:
 def spawn_driver(
     binary: str, socket_path: str, *, real: bool
 ) -> subprocess.Popen[bytes]:
-    """Start the driver if the socket is not already served; return the process.
-
-    The driver logs its startup diagnosis on stderr — most importantly *why*
-    it refuses to run (e.g. missing Accessibility consent), so a bare "code 1"
-    is useless to the user. stderr is piped to a daemon drain thread (never
-    DEVNULL: a full pipe would block the driver mid-run) and the last lines
-    are attached to any startup error, so the reason always reaches the panel
-    (Law 6.3 explicit error propagation).
-    """
-    # Bind inside a user-owned 0700 directory; remove a stale socket file
-    # before spawning — otherwise a crashed run's leftover file would make
-    # the wait loop (and the client) race a dead socket.
     ensure_secure_socket_dir(socket_path)
     Path(socket_path).unlink(missing_ok=True)
     command = [binary, socket_path, "--allow-pid", str(os.getpid())]
@@ -980,7 +949,6 @@ def spawn_driver(
     stderr_tail: list[str] = []
 
     def _drain_stderr() -> None:
-        """Keep the pipe drained and remember the tail for diagnostics."""
         assert process.stderr is not None
         for raw in process.stderr:
             line = raw.decode("utf-8", "replace").rstrip()
@@ -997,8 +965,6 @@ def spawn_driver(
         if Path(socket_path).exists():
             return process
         if process.poll() is not None:
-            # The driver has exited; let the drain thread see EOF so the
-            # failure message carries the driver's own diagnosis.
             drain_thread.join(timeout=0.5)
             detail = "\n".join(stderr_tail) or "the driver produced no output"
             raise RuntimeError(
@@ -1014,42 +980,19 @@ def spawn_driver(
 def _run_autonomous_session(
     args: argparse.Namespace, *, driver_recover: Callable[[], None] | None
 ) -> int:
-    """Work unattended until the session's bounds are reached.
-
-    The agent's own memory is what it works from, so the stores are opened once
-    here and consulted before each run rather than snapshotted at the start:
-    a run that distils a skill or records a failure should change what the next
-    goal is, which is the entire point of doing this repeatedly.
-    """
+    """Work unattended until the session's bounds are reached."""
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
     skills = SkillRegistry(store / "skills")
     episodes = EpisodicStore(store / "episodes")
     missions = MissionStore(store / "missions")
     approvals = ApprovalQueue(store / "approvals")
-    rng = random.Random()
-    # A watched folder, when the operator passed --watch. Off (None) unless
-    # given: watching is an explicit opt-in to world-born work.
+    usage_store = UsageStore(store / "usage")
     watch_dir = Path(args.watch).expanduser() if getattr(args, "watch", None) else None
-    # The inbox claim being worked on. Set by propose(), consumed by the
-    # execute() of the same run — run_autonomously strictly pairs one propose
-    # with its execute, so a plain holder is enough: no queue, no lookup.
     pending_claim: dict[str, ClaimedTask | None] = {"claim": None}
-    # The mission this run resumes, when propose() picked unfinished work.
-    # Same holder pattern and the same guarantee: one propose, one execute.
-    # Carrying the record itself (not its id) is what stops the resumed run
-    # from opening a *second* mission for work that already has one.
     pending_mission: dict[str, Mission | None] = {"mission": None}
-    # Operator orders handled this session. A freshly distilled skill carries
-    # the goal's exact text as its description, so without this the next
-    # propose() would re-run the order through the "unproven" step — and on a
-    # physical host that repeats the action, not just the thought.
     operator_goals: set[str] = set()
     if watch_dir is not None:
-        # Fail fast on an unsafe or missing folder, before any run starts.
         check_inbox_writable(watch_dir)
-        # A claim left in .processing/ belongs to a session that will never
-        # settle it. Quarantine it now, with the reason written down, so no
-        # work is silently lost and none runs twice.
         for orphan in sweep_processing(
             watch_dir, reason="a previous session ended while the task was claimed"
         ):
@@ -1071,11 +1014,6 @@ def _run_autonomous_session(
             idle_seconds=idle,
         )
 
-    # Usage accumulates across the whole session, not per run. The flags read
-    # as the session's ceiling — main() refuses to start an unattended session
-    # without one, on the grounds that a process nobody is watching needs a
-    # bound — so charging each run the full amount would let `--autonomous 10
-    # --max-cost 5` spend fifty dollars against a limit the user wrote as five.
     session_started_at = time.monotonic()
     tokens = {"total": 0}
     cost = {"usd": 0.0}
@@ -1085,13 +1023,6 @@ def _run_autonomous_session(
         cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
 
     def usage_since(mark: tuple[int, float, float]) -> tuple[int, float, float]:
-        """What has been spent since ``mark`` (tokens, dollars, seconds).
-
-        The session's counters are cumulative because the *budget* is the
-        session's, so a per-run record has to be a delta — charging each run
-        the session total would make a ten-run night look like ten expensive
-        runs instead of ten cheap ones.
-        """
         return (
             tokens["total"] - mark[0],
             cost["usd"] - mark[1],
@@ -1111,28 +1042,12 @@ def _run_autonomous_session(
             raise BudgetExceededError(reason)
 
     def execute(proposal: GoalProposal) -> None:
-        # The inbox claim for this run, if propose() claimed one. Popped now
-        # so a later run can never settle (or inherit) another run's file.
         claim = pending_claim["claim"]
         pending_claim["claim"] = None
         if claim is not None:
-            # Recorded before the run starts, not after it ends: a crashed
-            # run must not be re-proposed either. All three endings (success,
-            # parked, failure) count the same — the file is consumed.
             operator_goals.add(proposal.goal)
         attempted_goals.append(proposal.goal)
         mark = (tokens["total"], cost["usd"], time.monotonic())
-        # The mission is opened *before* the run, so a session killed
-        # mid-action still leaves a record that this work was started and how
-        # far it got. Its attempt is spent here for the same reason.
-        # Resuming means spending that attempt on the mission that already
-        # exists. Opening a new one for work propose() found in the store made
-        # the record unbounded: the original stayed at one attempt forever, so
-        # ``resumable`` re-proposed it every session while each session filed
-        # another timestamped copy. Measured on one goal: three missions
-        # (132119, 142119, 142120), an attempt ceiling of three that nothing
-        # ever reached, and the sub-goal progress each run recorded written to
-        # a record the next run did not read.
         resumed = pending_mission["mission"]
         pending_mission["mission"] = None
         mission = mission_started(
@@ -1144,10 +1059,6 @@ def _run_autonomous_session(
             now_utc(),
         )
         missions.save(mission)
-
-        # The plan as of the last sub-goal transition. Held here because the
-        # blocked path needs it *after* an exception, when the result object
-        # that would otherwise carry it does not exist.
         progress: dict[str, GoalPlan | None] = {"plan": None}
 
         def record_progress(plan: GoalPlan) -> None:
@@ -1155,7 +1066,6 @@ def _run_autonomous_session(
             missions.save(mission.model_copy(update={"plan": plan}))
 
         def park(turn: AgentTurn, target_label: str | None) -> bool:
-            """Write the question down and stop, instead of asking nobody."""
             request = approval_request_for(
                 turn,
                 goal=proposal.goal,
@@ -1198,8 +1108,6 @@ def _run_autonomous_session(
         try:
             result = Agent(config).run()
         except ApprovalRequiredError as exc:
-            # Parked, not failed: the attempt is refunded and the mission waits
-            # for a person rather than being retried into the same question.
             missions.save(
                 mission_blocked(
                     mission,
@@ -1214,8 +1122,6 @@ def _run_autonomous_session(
                 f"autonomous  : {proposal.goal!r} -> parked for approval "
                 f"({exc.request.request_id})"
             )
-            # Parked is processed, not failed: the mission waits as blocked,
-            # and re-reading the file would ask the same question twice.
             if claim is not None and watch_dir is not None:
                 settle_processed(
                     claim.processing_path, processed_dir=watch_dir / PROCESSED_DIRNAME
@@ -1236,9 +1142,6 @@ def _run_autonomous_session(
                         reason=f"{type(exc).__name__}: {exc}",
                     )
                 except OSError as settle_exc:
-                    # The original failure is the finding; a stuck archive
-                    # must not replace it (the orphan sweep quarantines the
-                    # claim at the next session start instead).
                     print(
                         f"warning: could not archive failed inbox task ({settle_exc})",
                         file=sys.stderr,
@@ -1265,21 +1168,8 @@ def _run_autonomous_session(
                 )
 
     def propose() -> GoalProposal | None:
-        """Inbox first, then unfinished work, then something new.
-
-        A claimed inbox file is consumed by the claim itself — it leaves the
-        folder the moment it is picked up, so it can never produce forever
-        and starve the mission queue. Missions come second for the usual
-        reason: a half-done task is the most concrete thing memory holds, and
-        ``remaining_goal`` hands over what is left, never the original goal
-        (re-running a completed sub-goal on a physical host repeats whatever
-        that step did).
-        """
-        # A parked run is still recorded as a failed episode (its work is worth
-        # keeping), and that record is what ``propose_goal`` reads — so without
-        # this the next run re-proposes the goal it just parked and asks the
-        # same question again. Its mission is already held back; this closes
-        # the same hole in the episode channel.
+        """Inbox first, then unfinished work, then ranked memory work."""
+        current_usage = usage_store.records()
         waiting = goals_awaiting_decision(approvals.requests())
         if watch_dir is not None:
             while True:
@@ -1287,17 +1177,21 @@ def _run_autonomous_session(
                 if claimed is None:
                     break
                 if claimed.task.goal in waiting:
-                    # Its question is already parked: archiving (not failing)
-                    # consumes the file without asking twice.
                     settle_processed(
                         claimed.processing_path,
                         processed_dir=watch_dir / PROCESSED_DIRNAME,
                     )
                     continue
                 pending_claim["claim"] = claimed
-                return GoalProposal(
+                return make_proposal(
                     goal=claimed.task.goal,
                     app=claimed.task.app,
+                    source_type="operator_inbox",
+                    source_id=claimed.task.source_name,
+                    confidence=1.0,
+                    expected_cost=estimate_expected_cost(
+                        claimed.task.goal, current_usage
+                    ),
                     reason=(
                         f"task file {claimed.task.source_name!r} claimed "
                         f"from watched folder {watch_dir}"
@@ -1305,7 +1199,8 @@ def _run_autonomous_session(
                 )
         known_missions = missions.missions()
         exhausted_goals = {
-            goal for mission in known_missions
+            goal
+            for mission in known_missions
             if mission.attempts >= DEFAULT_MAX_ATTEMPTS and mission.status == "failed"
             for goal in (mission.goal, remaining_goal(mission))
         }
@@ -1314,19 +1209,25 @@ def _run_autonomous_session(
             if mission.goal in waiting:
                 continue
             pending_mission["mission"] = mission
-            return GoalProposal(
-                goal=remaining_goal(mission),
+            resume_goal = remaining_goal(mission)
+            return make_proposal(
+                goal=resume_goal,
                 app=mission.app,
+                source_type="mission_resume",
+                source_id=mission.mission_id,
+                confidence=max(0.5, 1.0 - 0.2 * mission.attempts),
+                expected_cost=estimate_expected_cost(resume_goal, current_usage),
                 reason=(
                     f"mission {mission.mission_id} was started and never "
                     f"finished ({mission.attempts} attempt(s) so far)"
                 ),
             )
-        # Exclusion filters the pools before the die is cast: rejecting after
-        # rng.choice would discard the legitimate candidates left in the pool
-        # along with the excluded one and end the session early. A None here
-        # therefore means the pools are genuinely empty — not an unlucky roll.
-        return propose_goal(skills, episodes, rng=rng, exclude=waiting | operator_goals | exhausted_goals)
+        return propose_goal(
+            skills,
+            episodes,
+            usage=current_usage,
+            exclude=waiting | operator_goals | exhausted_goals,
+        )
 
     done = run_autonomously(
         SessionLimits(
@@ -1357,14 +1258,6 @@ def _run_autonomous_session(
 def _grant_from_request(
     args: argparse.Namespace, request: ApprovalRequest, store: Path
 ) -> CapabilityGrant | None:
-    """Mint a grant covering the action a human just approved.
-
-    Returns ``None`` when the parked action carries no destructive verb to
-    delegate, which can happen: an action reaches the queue because the *guard*
-    said CONFIRM, and a routine-marker confirmation ("Save", "Close") is not a
-    family anyone can be granted. Saying so beats writing a grant that matches
-    nothing.
-    """
     action = action_from_payload(request.action)
     if action is None:
         return None
@@ -1375,8 +1268,6 @@ def _grant_from_request(
         return None
     now = now_utc()
     grant = new_grant(
-        # The narrowest family the action fell into, so "delete and send"
-        # delegates one of them rather than silently both.
         verb=min(verbs),
         app=args.grant_app or args.app or GRANT_ANY,
         target_pattern=args.grant_target
@@ -1403,13 +1294,6 @@ def _record_usage(
     cost_usd: float,
     elapsed_seconds: float,
 ) -> None:
-    """Write what a run consumed, whatever ending it had.
-
-    Best effort by contract: a run that did its work and then failed to write
-    its own receipt should not report failure for that reason, so a store that
-    cannot be written is logged and skipped. The counters are otherwise lost
-    with the terminal — they only ever existed in this process.
-    """
     try:
         UsageStore(store / "usage").record(
             UsageRecord(
@@ -1429,13 +1313,6 @@ def _record_usage(
 
 
 def _parse_eval_filter(raw: str | None) -> tuple[str, ...]:
-    """Named eval categories from --eval-only, or the whole battery (pure).
-
-    Empty entries are ignored so "--eval-only grounding," still means
-    grounding; a wholly empty value means the caller named nothing, which
-    is the whole battery. Unknown names are rejected downstream by
-    ``tasks_in``, which owns the vocabulary.
-    """
     if raw is None:
         return ALL_EVAL_CATEGORIES
     named = tuple(part.strip() for part in raw.split(","))
@@ -1446,12 +1323,6 @@ def _parse_eval_filter(raw: str | None) -> tuple[str, ...]:
 
 
 def _run_eval(args: argparse.Namespace) -> int:
-    """Run the battery, snapshot the score, print it (I/O around pure parts).
-
-    Returns 0 only when every selected task passed: a red battery is a
-    finding, and CI must see it as one rather than as a green run with
-    red text in it.
-    """
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
     try:
         selected = tasks_in(TASK_BATTERY, _parse_eval_filter(args.eval_only))
@@ -1472,9 +1343,6 @@ def _run_eval(args: argparse.Namespace) -> int:
     try:
         BenchmarkStore(store / "benchmarks").save(record)
     except OSError as exc:
-        # The score on stdout is the instrument reading; a store that
-        # cannot be written degrades to a warning rather than failing a
-        # battery that may itself be red (Law 6.3: carry the reason).
         print(
             f"warning: could not save benchmark {record.benchmark_id}: {exc}",
             file=sys.stderr,
@@ -1492,7 +1360,6 @@ def _run_eval(args: argparse.Namespace) -> int:
 
 
 def _print_report(args: argparse.Namespace) -> int:
-    """Read the five stores (plus the watched folder) together and print what happened (I/O + pure render)."""
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
     watch = Path(args.watch).expanduser() if getattr(args, "watch", None) else None
     report = summarize(
@@ -1509,14 +1376,6 @@ def _print_report(args: argparse.Namespace) -> int:
 
 
 def _review_grants(args: argparse.Namespace) -> int:
-    """List, mint, or revoke standing capability grants (reads/writes the store).
-
-    Minting is deliberately verbose. Every bound — the app, the controls, the
-    count, the expiry — has to be typed or defaulted on purpose, because the
-    whole safety argument for delegating authority in advance is that the
-    delegation is *narrow*. A grant nobody had to think about is one nobody
-    remembers giving.
-    """
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
     grants = GrantStore(store / "grants")
     now = now_utc()
@@ -1587,13 +1446,6 @@ def _review_grants(args: argparse.Namespace) -> int:
 
 
 def _review_approvals(args: argparse.Namespace) -> int:
-    """List parked actions, or record a decision on one (reads/writes the store).
-
-    Deliberately does not perform the approved action. An approval is a
-    recorded answer, not a remote control: the next run reaches that step
-    itself, with the guard consulting what the human said. Performing it here
-    would act on a screen nobody has looked at since the question was asked.
-    """
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
     approvals = ApprovalQueue(store / "approvals")
     missions = MissionStore(store / "missions")
@@ -1609,11 +1461,6 @@ def _review_approvals(args: argparse.Namespace) -> int:
             return 2
         print(f"{answered.request_id}: {answered.decision}")
         if args.always and args.approve is not None:
-            # "Yes, and stop asking" — the natural moment to delegate, because
-            # the person is looking at exactly what they are delegating. The
-            # grant is scoped to the action they just read: its verb family,
-            # its app, and the control it names. Widening that is possible but
-            # has to be typed.
             grant = _grant_from_request(args, answered, store)
             if grant is None:
                 print(
@@ -1630,8 +1477,6 @@ def _review_approvals(args: argparse.Namespace) -> int:
             try:
                 mission = missions.load(answered.mission_id)
             except KeyError:
-                # The queue outlives the mission store's contents; a decision
-                # is still worth recording even when its mission is gone.
                 print(f"  (mission {answered.mission_id} no longer in the store)")
                 return 0
             missions.save(mission_unblocked(mission, now_utc()))
@@ -1658,18 +1503,6 @@ def _review_approvals(args: argparse.Namespace) -> int:
 
 
 def _apply_resume(args: argparse.Namespace) -> int | None:
-    """Rewrite the goal to whatever a checkpointed plan has left (AUT-01).
-
-    Returns an exit code when the run should not start — the checkpoint could
-    not be read, or its plan is already finished — and ``None`` to carry on
-    with ``args.goal`` replaced by the outstanding sub-goals.
-
-    ``--resume`` names a plan id in the store. A path to a checkpoint file is
-    also accepted, deliberately and only here: this value comes from the person
-    at the keyboard, never from the model, and pointing at a file someone moved
-    is a reasonable thing for them to want. Nothing else in the system resolves
-    a caller-supplied string to an arbitrary path.
-    """
     if args.resume is None:
         return None
     store = Path(args.store).expanduser() if args.store else DEFAULT_STORE
@@ -1683,9 +1516,6 @@ def _apply_resume(args: argparse.Namespace) -> int | None:
     except (OSError, ValueError) as exc:
         print(f"error: cannot load checkpoint {args.resume!r}: {exc}", file=sys.stderr)
         return 2
-    # One definition of "what is left", shared with the mission store: two
-    # would eventually disagree about whether a half-done plan resumes at step
-    # two or step one.
     outstanding = outstanding_sub_goals(checkpoint.plan)
     if not outstanding:
         print(
@@ -1703,13 +1533,6 @@ def _apply_resume(args: argparse.Namespace) -> int | None:
 
 
 def _dispatch_store_command(args: argparse.Namespace) -> int | None:
-    """Run the offline store commands, or ``None`` to continue to a run.
-
-    Report/grant/approval reads need no driver, model or goal; eval neither
-    actuates nor calls a model, it only executes pure checks and snapshots
-    the score — so all of them dispatch before every check that assumes a
-    run is about to start.
-    """
     if getattr(args, "cua_repl", False):
         from computeruse.mcp.cua_repl import CuaReplServer
 
@@ -1731,7 +1554,6 @@ def _dispatch_store_command(args: argparse.Namespace) -> int | None:
 
 
 def _has_hard_budget(args: argparse.Namespace) -> bool:
-    """Whether this invocation has an explicit finite runtime/spend ceiling."""
     return any(
         value is not None
         for value in (args.deadline_seconds, args.max_tokens, args.max_cost)
@@ -1739,7 +1561,6 @@ def _has_hard_budget(args: argparse.Namespace) -> bool:
 
 
 def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
-    """Exit code for a combination that cannot start, else ``None``."""
     if getattr(args, "sovereign", False):
         if getattr(args, "yes", False):
             print(
@@ -1776,11 +1597,6 @@ def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
         and args.autonomous is None
         and not args.report
     ):
-        # Watching proposes work; without a session nothing polls the folder,
-        # so the flag would silently do nothing — refuse it loudly instead.
-        # --report is the one other reader: it counts the folder's archives
-        # without running anything. Which folder is read stays on the command
-        # line — no "last watched folder" is remembered anywhere (YAGNI).
         print("error: --watch needs --autonomous or --report", file=sys.stderr)
         return 2
     if args.autonomous is None:
@@ -1788,9 +1604,6 @@ def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
     if args.autonomous < 1:
         print("error: --autonomous needs a positive run count", file=sys.stderr)
         return 2
-    # An unattended process without a bound is not autonomy, it is a leak, and
-    # a bound reached by forgetting a flag is not a bound. The run count alone
-    # is not enough: one run can spend indefinitely.
     if not _has_hard_budget(args):
         print(
             "error: --autonomous requires at least one of --deadline-seconds, "
@@ -1803,12 +1616,7 @@ def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:
 
 
 def _warn_about_degraded_modes(args: argparse.Namespace) -> None:
-    """Say plainly when a run will be less than it looks (Law 6.3)."""
     if getattr(args, "yes", False) and args.autonomous is not None:
-        # The one combination the rest of the safety floor does not cover.
-        # Budgets bound what a run spends and the kill switch ends one you are
-        # watching; neither helps against a deletion nobody saw at 3am. Said,
-        # not refused: it is the operator's machine and an explicit opt-in.
         print(
             "WARNING: --yes with --autonomous means every destructive action — "
             "deletions, sends, purchases — is auto-approved while nobody is "
@@ -1819,9 +1627,6 @@ def _warn_about_degraded_modes(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
     if args.model is None and args.provider == DEMO_PROVIDER:
-        # The demo provider does two fixed clicks then finishes — deliberately
-        # so the stack runs end-to-end without an LLM. On a *real* host that
-        # reads as a broken agent, so never run it silently.
         print(
             "WARNING: no --model set, so the scripted DEMO provider (two fixed "
             "clicks, then finish) will run, not an LLM. Pass --model openai to "
@@ -1829,9 +1634,6 @@ def _warn_about_degraded_modes(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
     if args.verify is None and resolve_verify(args):
-        # Verification defaults ON for real LLM runs: a miss must be caught and
-        # folded into the model's next decision, or the agent keeps clicking
-        # the same wrong spot (the observed failure mode).
         print(
             "note: --verify auto-enabled for this real run (a click that "
             "misses is caught and reported to the agent); pass --no-verify "
@@ -1844,11 +1646,6 @@ def _warn_about_degraded_modes(args: argparse.Namespace) -> None:
         and getattr(args, "vision", True)
         and not resolve_verify(args)
     ):
-        # Vision (screenshot to the VLM) is on but the pixel witness is off.
-        # Verification still runs against the accessibility surface, but a
-        # purely visual change has no second witness — and an action is only
-        # declared failed when two independent witnesses agree, so misses in
-        # visual-only UI go unreported. These are independent switches; say so.
         print(
             "warning: --vision is on but --verify is off: the agent sees the "
             "screen, but actions are verified only against the accessibility "
@@ -1860,32 +1657,16 @@ def _warn_about_degraded_modes(args: argparse.Namespace) -> None:
 
 
 def _resolve_target_app(args: argparse.Namespace) -> tuple[bool, bool]:
-    """Settle which application the run targets, rewriting ``args`` in place.
-
-    The goal may carry an explicit ``[App Name]`` prefix or name the target
-    implicitly ("Excel'de aç", "YouTube'da arat"). Resolving it here means the
-    provider sees the cleaned goal and the run can bring the right app forward
-    without the user passing ``--app`` — autonomy by design, not by
-    configuration.
-
-    Returns ``(named_by_user, inferred_from_goal)``, which the caller needs
-    apart: an inferred app that turns out not to be installed must degrade to
-    the frontmost window, while one the user named is a setup error.
-    """
     explicit_app, cleaned_goal = extract_goal_app(args.goal)
     args.goal = cleaned_goal
     named_app = args.app is not None
     if args.app is not None:
         return named_app, explicit_app is not None
-    # The running-app list disambiguates service goals ("YouTube'da" -> the
-    # running browser) but never restricts the result: `open -a` can launch a
-    # not-running app. Best-effort by contract — a probe failure degrades to
-    # inference without the list.
     running_apps: tuple[str, ...] = ()
     try:
         with ActuationClient(args.socket, connect_retries=1) as client:
             running_apps = client.list_apps()
-    except Exception as exc:  # noqa: BLE001 - inference is best-effort
+    except Exception as exc:
         print(
             f"warning: could not list running apps ({exc}); inferring without them",
             file=sys.stderr,
@@ -1894,43 +1675,23 @@ def _resolve_target_app(args: argparse.Namespace) -> tuple[bool, bool]:
     if inferred_app is not None:
         args.app = inferred_app
         return named_app, True
-    # OBSERVE before DECIDE: no explicit or inferable app — discover the
-    # frontmost one so the provider (and its scaffold prompt) names the real
-    # app from the first turn.
     args.app = discover_app(args.socket)
     return named_app, explicit_app is not None
 
 
 def _emit_plan(plan: GoalPlan) -> None:
-    """Publish additive plan events without changing existing step records."""
     print("@@CU " + json.dumps({"type": "plan", "plan": plan.model_dump(mode="json")}, ensure_ascii=False), flush=True)
 
 
 def _run_goal(
     args: argparse.Namespace, driver_recover: Callable[[], None] | None
 ) -> int:
-    """Resolve the target app, wire telemetry and budget, then run one goal.
-
-    The run's live counters live here so every ending — success, failure and
-    kill-switch takeover — records what the run actually spent (Law 4.1: the
-    failed run's spend is the number someone asks for). Split out of ``main``
-    to keep the entry point under the type checker's complexity limit: a
-    ``main`` pyright cannot analyse is a ``main`` whose every name looks
-    unreachable, and the unused-import noise hides real regressions.
-    """
     named_app, app_inferred_from_goal = _resolve_target_app(args)
-    # Live usage telemetry: every successful model call reports its token
-    # usage and per-call latency; each report is streamed to stderr as a
-    # compact "st :" line the menu panel parses into its header counters
-    # (token + elapsed), keeping the transport decoupled from the UI.
     run_started_at = time.monotonic()
     run_tokens: dict[str, int] = {"total": 0}
     run_calls = 0
 
     run_cost: dict[str, float] = {"usd": 0.0}
-    # Resolved once, before the run: a cost ceiling against a model whose
-    # price is unknown must fail at startup with an actionable message, not
-    # twenty steps in when the guard first tries to evaluate it.
     price = resolve_cost_price(args)
 
     def stats_sink(call: object) -> None:
@@ -1982,14 +1743,7 @@ def _run_goal(
     )
     if args.plan:
         _emit_plan(decompose_goal(args.goal, app=config.app, knowledge=()))
-    # Spend is recorded on *both* endings. A run that failed still cost
-    # what it cost, and that is exactly the run someone wants the number
-    # for; recording only successes would make the report's total a
-    # comfortable fiction.
     try:
-        # Same display guarantee as the night shift, scoped to this run:
-        # SIGINT, kill-switch takeover and budget stops all unwind
-        # through __exit__, so the assertion never outlives its run.
         with wake_lock():
             result = Agent(config).run()
     except BaseException:
@@ -2042,19 +1796,7 @@ def _run_goal(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse, dispatch, and run one goal.
-
-    The run itself lives in ``_run_goal``; this function owns the preamble
-    (store commands, argument rejection, driver supervision, autonomous
-    sessions) and the user-facing error clauses. Keeping it under the type
-    checker's complexity limit is what keeps its except clauses honest.
-    """
     args = parse_args(argv)
-    # Live step visibility: the runner logs every executed physical action at
-    # INFO, and a real run takes seconds per LLM decision — without this the
-    # terminal stays silent mid-run and the user sees "Chrome opened, nothing
-    # happens". Stream the runner's lines to stderr so the run is observable
-    # while the final summary block still lands on stdout at the end.
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     if args.plan_only:
         if not args.goal or not args.goal.strip():
@@ -2070,15 +1812,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return rejected
     _warn_about_degraded_modes(args)
     driver_process: subprocess.Popen[bytes] | None = None
-    # ADR-1 promises the driver can die without taking the run with it, and
-    # that promise is only kept by something that brings it back. Supervision
-    # exists exactly when we started the process: a driver we merely attached
-    # to belongs to whoever launched it, and respawning it behind their back
-    # would leave two drivers fighting over one socket.
     driver_recover: Callable[[], None] | None = None
     try:
-        # When a driver binary is given we always spawn it (stale sockets are
-        # cleared first); only without --driver do we attach to a running one.
         if args.driver is not None:
             driver_binary = args.driver
             driver_socket = args.socket
@@ -2088,27 +1823,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return spawn_driver(driver_binary, driver_socket, real=driver_real)
 
             driver_process = _spawn_driver_again()
-            # The recovery hook fires only after the client's own RPC retries
-            # are spent, so a driver still running at that point is one that
-            # is not answering — ``restart_unresponsive`` ends it first rather
-            # than leaving the run to retry a socket nobody is listening on.
             driver_recover = supervisor_for(
                 _spawn_driver_again, driver_process
             ).restart_unresponsive
-        # Autonomous app resolution: the goal may carry an explicit `[App
-        # Name]` prefix, or name the target implicitly ("Excel'de aç",
-        # "YouTube'da arat"). Resolve it here so the provider sees the
-        # cleaned goal (no bracket wrapper) and the run can bring the right
-        # app to the front without the user passing --app — autonomy by
-        # design, not by configuration.
-        # Unattended work chooses its own goal per run, so none of the
-        # goal-shaped setup below applies to it. Dispatching here rather than
-        # later is the point: running any of it on an absent goal is what
-        # crashed the first attempt.
         if args.autonomous is not None:
-            # The night shift must not go blind: hold the display awake for
-            # the whole session, idle waits between runs included. No-op off
-            # macOS; always released, whatever ends the session.
             with wake_lock():
                 return _run_autonomous_session(args, driver_recover=driver_recover)
 
@@ -2127,55 +1845,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"blocked by autonomy guard: {exc}", file=sys.stderr)
         return 1
     except PermissionConfirmationRequired as exc:
-        # A guarded/destructive decision paused for human sign-off: tell the
-        # user what the model proposed so they can approve or steer it.
         print(f"confirmation required: {exc}", file=sys.stderr)
         return 1
     except DriverRpcError as exc:
-        # A driver-side refusal (missing consent, unknown method) surfaces as
-        # one clean line instead of a traceback; the driver's own message is
-        # already the actionable hint.
         print(f"driver error: {exc}", file=sys.stderr)
         return 1
     except OpenAIError as exc:
-        # Model-transport failures (missing key, API error) surface cleanly;
-        # the user fixes the key/model and reruns (Law 6.3: explicit context).
         print(f"model transport error: {exc}", file=sys.stderr)
         return 1
     except StuckLoopError as exc:
-        # The provider repeated one action with no progress (Law 2 guard): the
-        # run ended by design, not by accident — say so plainly.
         print(f"stuck loop: {exc}", file=sys.stderr)
         return 1
     except UnrecoverableFailureError as exc:
-        # The recovery ladder ran out: the agent could not get past one
-        # obstacle. Report the classified failure rather than a traceback —
-        # the kind names what to fix (consent, a wrong app, a dead driver).
         print(
             f"unrecoverable failure ({exc.failure.kind.value}): {exc}", file=sys.stderr
         )
         return 1
     except BudgetExceededError as exc:
-        # A ceiling the operator set, not a failure of the agent: the run
-        # stopped between steps with its episode and trace already written.
         print(f"budget stop: {exc}", file=sys.stderr)
         return 1
     except MaxStepsError as exc:
-        # The loop hit its step budget without a finish; the user sees why
-        # instead of a silent stop.
         print(f"max steps: {exc}", file=sys.stderr)
         return 1
     except InboxError as exc:
-        # A bad --watch folder is an argument problem, in the same style as
-        # _reject_unusable_arguments: one line, exit 2, no traceback.
-        # Placed before RuntimeError because InboxError derives from it.
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except RuntimeError as exc:
-        # Setup/startup failures (driver spawn, fail-fast sensor probe) are
-        # user-facing conditions, not bugs: one clean line beats a traceback.
-        # Kept last: OpenAIError and DriverRpcError both derive from
-        # RuntimeError, so their clauses must precede this one.
         print(f"setup error: {exc}", file=sys.stderr)
         return 1
     finally:
