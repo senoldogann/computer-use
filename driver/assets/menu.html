@@ -5542,6 +5542,8 @@
         closeActionGroup();
         closeGroup();
         lastWindowSeen = null;
+        eventsSeen = false;
+        discardProseQueue();
         window._lastTokens = 0;
         window._lastElapsedS = 0;
         window._lastCalls = 0;
@@ -6141,6 +6143,49 @@
          flag simply never flips. */
       var eventsSeen = false;
 
+      /* ----- Prose grace-buffer (step-0 double-render fix) ------------------ */
+      // Prose (stderr) and structured events (stdout) travel separate pipes
+      // with no cross-pipe ordering: step 0's prose always wins the race and
+      // both render — the same card twice in two formats. So prose step-facts
+      // render on a delay, and the first structured event discards the queue:
+      // new drivers never show prose, old drivers (no events) flush after the
+      // grace window. sessionEvents recording stays inside the renderers, so
+      // a discarded queue leaves no trace in the copy log either.
+      var PROSE_GRACE_MS = 2000;
+      var proseQueue = [];
+      var proseTimer = null;
+
+      function discardProseQueue() {
+        proseQueue = [];
+        if (proseTimer) {
+          clearTimeout(proseTimer);
+          proseTimer = null;
+        }
+      }
+
+      function flushProseQueue() {
+        proseTimer = null;
+        if (eventsSeen) {
+          proseQueue = [];
+          return;
+        }
+        var queued = proseQueue;
+        proseQueue = [];
+        queued.forEach(function (fn) {
+          try { fn(); } catch (e) { }
+        });
+      }
+
+      function bufferProseCard(fn) {
+        // Steady state: the structured stream owns the feed, drop prose facts
+        // before they allocate anything.
+        if (eventsSeen) return;
+        proseQueue.push(fn);
+        if (!proseTimer) {
+          proseTimer = setTimeout(flushProseQueue, PROSE_GRACE_MS);
+        }
+      }
+
       /* Render one structured record. The prose renderers below parse log
          wording with string offsets, which breaks silently the moment a message is
          reworded; the same facts arrive here already typed. Sibling @@CU
@@ -6161,13 +6206,21 @@
         // a future record type cannot silently suppress the prose path.
         if (ev.type && ev.type !== "step") return;
         if (emptyHero) emptyHero.style.display = "none";
+        // First structured step: it owns the feed from here on. Any prose
+        // step-facts still in the grace window (always: step 0's) are
+        // discarded rather than drawn twice.
         eventsSeen = true;
-        if (ev.thought) renderThoughtCard(ev.thought);
-        if (ev.sub_goal) renderSubgoalCard(ev.sub_goal);
+        discardProseQueue();
 
         // What the agent saw: one dimmed line per window, deduped — the same
         // frame re-observed across batch steps does not repeat itself.
         if (ev.window) renderWindowLine(ev.window);
+        // A finish step's inner monologue is not a task card: the summary
+        // card below carries the outcome, and a "Confirm ..." sub-goal reads
+        // as work that never happened.
+        var isFinishStep = !!(ev.action && ev.action.type === "finish");
+        if (ev.thought && !isFinishStep) renderThoughtCard(ev.thought);
+        if (ev.sub_goal && !isFinishStep) renderSubgoalCard(ev.sub_goal);
 
         if (ev.error) {
           closeActionGroup();
@@ -6231,27 +6284,39 @@
           // Live usage telemetry (tokens + elapsed) — updates header counters.
           updateRunStats(trimmed);
         } else if (trimmed.startsWith("ooda thought:")) {
-          renderThoughtCard(trimmed.substring(13).trim());
+          (function (text) {
+            bufferProseCard(function () { renderThoughtCard(text); });
+          })(trimmed.substring(13).trim());
         } else if (trimmed.startsWith("ooda sub_goal:")) {
-          renderSubgoalCard(trimmed.substring(14).trim());
+          (function (text) {
+            bufferProseCard(function () { renderSubgoalCard(text); });
+          })(trimmed.substring(14).trim());
         } else if (trimmed.indexOf("CONFIRMATION REQUIRED") !== -1) {
           // Law 5.1: the agent paused on a destructive/routine action; surface
           // Approve/Deny buttons that answer through the bridge to the child's
           // piped stdin (M6).
           renderConfirmCard(trimmed);
         } else if (trimmed.startsWith("ooda observe:")) {
-          renderObserveCard(trimmed.substring(13).trim());
+          (function (text) {
+            bufferProseCard(function () { renderObserveCard(text); });
+          })(trimmed.substring(13).trim());
         } else if (trimmed.startsWith("ooda step_")) {
-          var colonIdx = trimmed.indexOf(":", 5);
-          if (colonIdx > 0) {
-            var label = trimmed.substring(5, colonIdx).trim();
-            var payload = trimmed.substring(colonIdx + 1).trim();
-            renderActionCard(label, payload);
-          } else {
-            renderActionCard("step", trimmed);
-          }
+          (function (line) {
+            bufferProseCard(function () {
+              var colonIdx = line.indexOf(":", 5);
+              if (colonIdx > 0) {
+                var label = line.substring(5, colonIdx).trim();
+                var payload = line.substring(colonIdx + 1).trim();
+                renderActionCard(label, payload);
+              } else {
+                renderActionCard("step", line);
+              }
+            });
+          })(trimmed);
         } else if (trimmed.startsWith("ooda verified")) {
-          renderVerificationCard(trimmed.substring(5).trim());
+          (function (text) {
+            bufferProseCard(function () { renderVerificationCard(text); });
+          })(trimmed.substring(5).trim());
         } else if (trimmed.startsWith("ooda finished")) {
           renderSummaryCard(trimmed.substring(5).trim());
         } else if (trimmed.startsWith("distill     :")) {
@@ -7198,6 +7263,8 @@
           currentTree = null;
           closeActionGroup();
           lastWindowSeen = null;
+          eventsSeen = false;
+          discardProseQueue();
           sessionEvents = [];
           if (emptyHero) {
             log.appendChild(emptyHero);
