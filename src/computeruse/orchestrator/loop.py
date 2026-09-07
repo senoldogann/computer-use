@@ -3276,7 +3276,7 @@ class OodaRunner:
                 f"{evidence} "
                 "The success claim is unverified. Continue only if another action can "
                 "produce observable evidence; otherwise emit finish with status "
-                ""failed" and explain the verification outage."
+                "\"failed\" and explain the verification outage."
             )
 
         evidence = verdict.evidence.strip()
@@ -3290,7 +3290,7 @@ class OodaRunner:
             "completion check rejected this finish: "
             f"{reason} "
             "The goal is not yet independently verified. Either continue working "
-            "toward observable evidence, or emit finish with status "failed" and "
+            "toward observable evidence, or emit finish with status \"failed\" and "
             "explain what blocked verification."
         )
 
