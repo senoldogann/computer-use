@@ -8,8 +8,8 @@ permissions:
   contents: write
 
 jobs:
-  task3:
-    if: contains(github.event.head_commit.message, 'apply sovereign task3 runtime')
+  task4:
+    if: contains(github.event.head_commit.message, 'apply sovereign task4')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
       - name: Install isolated JavaScript runtime
         run: npm ci --prefix src/computeruse/repl --ignore-scripts
 
-      - name: Patch explicit sovereign CLI activation exactly
+      - name: Patch sovereign startup validation exactly
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -36,67 +36,73 @@ jobs:
           path = Path('src/computeruse/cli.py')
           text = path.read_text(encoding='utf-8')
 
-          level_block = (
-              "    parser.add_argument(\n"
-              "        \"--level\",\n"
-              "        type=int,\n"
-              "        choices=[0, 1, 2, 3],\n"
-              "        default=AutonomyLevel.FULL.value,\n"
-              "        help=\"Autonomy level 0-3 (default: 3 = full). Destructive actions still \"\n"
-              "        \"require explicit approval or a scoped grant, including with --yes.\",\n"
-              "    )\n"
+          reject_marker = (
+              "def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:\n"
+              "    \"\"\"Exit code for a combination that cannot start, else ``None``.\"\"\"\n"
+              "    if getattr(args, \"yes\", False) and getattr(args, \"level\", 3) in (0, 1):\n"
           )
-          sovereign_block = level_block + (
-              "    parser.add_argument(\n"
-              "        \"--sovereign\",\n"
-              "        action=\"store_true\",\n"
-              "        help=\"Explicitly delegate destructive permission for this session. \"\n"
-              "        \"This selects Sovereign autonomy without exposing it through --level; \"\n"
-              "        \"kill-switch, budgets, verification, completion audit, trace and driver \"\n"
-              "        \"safety gates remain active.\",\n"
-              "    )\n"
+          replacement = (
+              "def _has_hard_budget(args: argparse.Namespace) -> bool:\n"
+              "    \"\"\"Whether this invocation has an explicit finite runtime/spend ceiling.\"\"\"\n"
+              "    return any(\n"
+              "        value is not None\n"
+              "        for value in (args.deadline_seconds, args.max_tokens, args.max_cost)\n"
+              "    )\n\n\n"
+              "def _reject_unusable_arguments(args: argparse.Namespace) -> int | None:\n"
+              "    \"\"\"Exit code for a combination that cannot start, else ``None``.\"\"\"\n"
+              "    if getattr(args, \"sovereign\", False):\n"
+              "        if getattr(args, \"yes\", False):\n"
+              "            print(\n"
+              "                \"error: --sovereign is separate from --yes; choose one mode\",\n"
+              "                file=sys.stderr,\n"
+              "            )\n"
+              "            return 2\n"
+              "        if getattr(args, \"level\", AutonomyLevel.FULL.value) in (0, 1, 2):\n"
+              "            print(\n"
+              "                \"error: --sovereign cannot be combined with --level 0/1/2\",\n"
+              "                file=sys.stderr,\n"
+              "            )\n"
+              "            return 2\n"
+              "        if not _has_hard_budget(args):\n"
+              "            print(\n"
+              "                \"error: --sovereign requires at least one of --deadline-seconds, \"\n"
+              "                \"--max-tokens or --max-cost\",\n"
+              "                file=sys.stderr,\n"
+              "            )\n"
+              "            return 2\n"
+              "    if getattr(args, \"yes\", False) and getattr(args, \"level\", 3) in (0, 1):\n"
           )
-          if text.count(level_block) != 1:
-              raise SystemExit('level parser marker not unique')
-          text = text.replace(level_block, sovereign_block, 1)
+          if text.count(reject_marker) != 1:
+              raise SystemExit('startup validation marker not unique')
+          text = text.replace(reject_marker, replacement, 1)
 
-          parse_return = "    return parser.parse_args(argv)\n\n\ndef scripted_provider("
-          resolver = (
-              "    return parser.parse_args(argv)\n\n\n"
-              "def resolve_autonomy_level(args: argparse.Namespace) -> AutonomyLevel:\n"
-              "    \"\"\"Resolve the operator-selected autonomy mode.\n\n"
-              "    Sovereign is intentionally not part of the numeric --level surface: it\n"
-              "    requires the dedicated explicit switch so ordinary level selection cannot\n"
-              "    accidentally delegate destructive permission.\n"
-              "    \"\"\"\n"
-              "    if bool(getattr(args, \"sovereign\", False)):\n"
-              "        return AutonomyLevel.SOVEREIGN\n"
-              "    return AutonomyLevel(args.level)\n\n\n"
-              "def scripted_provider("
+          budget_block = (
+              "    if (\n"
+              "        args.deadline_seconds is None\n"
+              "        and args.max_tokens is None\n"
+              "        and args.max_cost is None\n"
+              "    ):\n"
           )
-          if text.count(parse_return) != 1:
-              raise SystemExit('parse return marker not unique')
-          text = text.replace(parse_return, resolver, 1)
-
-          old_config = "        autonomy_level=AutonomyLevel(args.level),\n"
-          new_config = "        autonomy_level=resolve_autonomy_level(args),\n"
-          if text.count(old_config) != 1:
-              raise SystemExit('AgentConfig autonomy marker not unique')
-          text = text.replace(old_config, new_config, 1)
+          if text.count(budget_block) != 1:
+              raise SystemExit('autonomous budget marker not unique')
+          text = text.replace(budget_block, "    if not _has_hard_budget(args):\n", 1)
 
           path.write_text(text, encoding='utf-8')
           PY
 
-      - name: Verify Task 3 GREEN
+      - name: Verify Task 4 GREEN and shared budget behavior
         run: |
           uv run ruff check src/computeruse/cli.py tests/smoke/test_sovereign_mode.py
           uv run pyright
-          uv run pytest -q tests/smoke/test_sovereign_mode.py tests/smoke/test_agent.py
+          uv run pytest -q \
+            tests/smoke/test_sovereign_mode.py \
+            tests/smoke/test_budget.py \
+            tests/smoke/test_folder_watch.py
 
-      - name: Commit verified Task 3
+      - name: Commit verified Task 4
         run: |
           git config user.name 'computer-use audit bot'
           git config user.email 'actions@users.noreply.github.com'
           git add src/computeruse/cli.py
-          git commit -m 'feat(cli): add explicit sovereign activation'
+          git commit -m 'fix(cli): bound sovereign startup'
           git push origin HEAD:feat/sovereign-mode-core
