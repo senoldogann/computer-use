@@ -31,10 +31,6 @@ driver/target/
 .env.*
 !.env.example
 
-# Swift desktop app (generated artifacts — source lives in desktop/Sources)
-/desktop/.build/
-/desktop/ComputerUseDesktop.app/
-/desktop/.swiftpm/
 
 # macOS
 .DS_Store
