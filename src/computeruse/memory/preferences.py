@@ -26,6 +26,8 @@ from computeruse.memory.schemas import (
 from computeruse.slug import ascii_slug
 
 LOGGER: Final = logging.getLogger(__name__)
+ACTIVE_PREFERENCE_LIMIT: Final[int] = 16
+MAX_EXPLICIT_PREFERENCE_CHARS: Final[int] = 240
 
 PreferenceWriteOutcome = Literal[
     "created",
@@ -54,6 +56,11 @@ _SENSITIVE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 )
+
+_STRUCTURED_PREFERENCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?i)^(?:preference|tercih)\s*:\s*([^=]{1,80}?)\s*=\s*(.+)$"
+)
+_CLAUSE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"[.!?;\n]+")
 
 
 def _normalize_identity_text(value: str) -> str:
@@ -282,7 +289,7 @@ def active_preferences(
     records: tuple[PreferenceRecord, ...],
     *,
     domain: PreferenceDomain | None = None,
-    limit: int | None = None,
+    limit: int = ACTIVE_PREFERENCE_LIMIT,
 ) -> tuple[PreferenceRecord, ...]:
     """Return the deterministic, contradiction-free preferences safe to stage.
 
@@ -291,7 +298,7 @@ def active_preferences(
     value. Explicit evidence wins over corrections, which win over inferred
     behavior; confidence and freshness break ties inside one source class.
     """
-    if limit is not None and limit < 0:
+    if limit < 0:
         raise ValueError("preference limit must be non-negative")
 
     superseded = _superseded_ids(records)
@@ -320,12 +327,110 @@ def active_preferences(
         key=lambda record: (
             record.domain,
             _normalize_identity_text(record.key),
+            -record.confidence,
             record.preference_id,
         )
     )
-    if limit is not None:
-        winners = winners[:limit]
-    return tuple(winners)
+    return tuple(winners[:limit])
+
+
+def _natural_clause_is_durable(clause: str) -> bool:
+    """Recognize only explicit durable-language cues, not generic task prose."""
+    lowered = clause.casefold()
+    return (
+        lowered.startswith("i prefer ")
+        or lowered.startswith("always ")
+        or lowered.startswith("from now on ")
+        or lowered.startswith("tercihim ")
+        or " tercih ederim" in lowered
+        or lowered.startswith("her zaman ")
+        or lowered.startswith("bundan sonra ")
+    )
+
+
+def _instruction_key(value: str) -> str:
+    slug = ascii_slug(value, max_chars=56)
+    if slug:
+        return f"instruction.{slug}"
+    digest = hashlib.sha256(value.encode()).hexdigest()[:12]
+    return f"instruction.{digest}"
+
+
+def extract_explicit_preference_evidence(
+    goal: str,
+    *,
+    source_id: str,
+    observed_at: datetime,
+) -> tuple[PreferenceEvidence, ...]:
+    """Extract only preferences the user explicitly framed as durable intent.
+
+    Structured ``preference: key=value`` / ``tercih: key=value`` lines map the
+    key directly. Natural language is accepted only when one of the approved
+    English/Turkish durable cues is present. The original clause is screened
+    for secrets before the bounded value is built, so truncation can never hide
+    a credential that appeared later in the user's text.
+    """
+    if not source_id.strip():
+        raise ValueError("preference source_id must be non-empty")
+
+    evidence: list[PreferenceEvidence] = []
+    seen: set[tuple[str, str]] = set()
+
+    for raw_line in goal.splitlines():
+        line = _normalize_identity_text(raw_line)
+        if not line:
+            continue
+        structured = _STRUCTURED_PREFERENCE_RE.fullmatch(line)
+        if structured is None:
+            continue
+        key = _normalize_identity_text(structured.group(1))
+        value = _normalize_identity_text(structured.group(2))
+        if not key or not value:
+            continue
+        if contains_sensitive_preference_material(f"{key}: {value}"):
+            continue
+        bounded = value[:MAX_EXPLICIT_PREFERENCE_CHARS].rstrip()
+        identity = (key, bounded)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        evidence.append(
+            PreferenceEvidence(
+                domain="general",
+                key=key,
+                value=bounded,
+                source="explicit",
+                source_id=source_id,
+                observed_at=observed_at,
+            )
+        )
+
+    for raw_clause in _CLAUSE_SPLIT_RE.split(goal):
+        clause = _normalize_identity_text(raw_clause)
+        if not clause or _STRUCTURED_PREFERENCE_RE.fullmatch(clause) is not None:
+            continue
+        if not _natural_clause_is_durable(clause):
+            continue
+        if contains_sensitive_preference_material(clause):
+            continue
+        bounded = clause[:MAX_EXPLICIT_PREFERENCE_CHARS].rstrip()
+        key = _instruction_key(bounded)
+        identity = (key, bounded)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        evidence.append(
+            PreferenceEvidence(
+                domain="general",
+                key=key,
+                value=bounded,
+                source="explicit",
+                source_id=source_id,
+                observed_at=observed_at,
+            )
+        )
+
+    return tuple(evidence)
 
 
 class PreferenceStore:
@@ -362,7 +467,7 @@ class PreferenceStore:
         self,
         *,
         domain: PreferenceDomain | None = None,
-        limit: int | None = None,
+        limit: int = ACTIVE_PREFERENCE_LIMIT,
     ) -> tuple[PreferenceRecord, ...]:
         """Return bounded active preferences without exposing contradictions."""
         return active_preferences(self.records(), domain=domain, limit=limit)
