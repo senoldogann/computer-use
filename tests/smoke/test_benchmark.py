@@ -1,20 +1,22 @@
-"""Frozen benchmark: manifest validity, prompt freeze, harness math, A/B judge.
+"""Frozen benchmark: manifest validity, semantic freeze, harness math, A/B judge.
 
 A benchmark that can drift silently is marketing, not measurement. These
-tests pin the three load-bearing properties:
+tests pin the load-bearing properties:
 
-* the manifest holds 20 valid scenarios with exact prompts and checkable
-  criteria, drawn from the fixed outcome vocabulary;
-* the manifest hash is pinned: any prompt edit without a version bump
-  fails loudly here instead of quietly redefining "20/20";
-* the repeatability math and the skill-A/B contamination detector behave
-  on synthetic records — including a reconstruction of the v1 test-14
-  shape, which must be flagged contaminated, never celebrated.
+* the manifest holds 20 valid scenarios with exact, checkable semantics;
+* the manifest hash covers the complete scenario contract, not just prompts;
+* malformed/version-mismatched manifests fail closed;
+* repeatability records cannot be attributed to the wrong scenario/attempt;
+* the repeatability math and skill-A/B contamination detector behave on
+  synthetic records.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -26,6 +28,7 @@ from computeruse.benchmark.harness import (
     run_suite,
 )
 from computeruse.benchmark.manifest import (
+    MANIFEST_VERSION,
     OUTCOME_VOCABULARY,
     BenchmarkDriftError,
     assert_frozen,
@@ -37,9 +40,11 @@ MANIFEST_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "computeruse" / "benchmark" / "scenarios_v1.json"
 )
 
-#: Pinned by hand after review: bump only together with MANIFEST_VERSION and
-#: a changelog entry saying which prompt changed and why.
-FROZEN_MANIFEST_HASH = "4714b8fae877ba20fd20e992b57737d3102dd68ce377cc3e528770886274f225"
+#: Pinned by hand after review. Updating the hash is allowed only when the
+#: complete frozen manifest semantics were intentionally reviewed. A change to
+#: the hashing implementation itself may update the pin without changing
+#: MANIFEST_VERSION only when scenario data remains byte-for-byte unchanged.
+FROZEN_MANIFEST_HASH = "bbae3e286fc32e6ba5a1fc261665b0c3d53e12384c971a7602f99d9c02f7fc05"
 
 
 def _record(scenario_id: str = "s01", attempt: int = 1, **overrides: object) -> RunRecord:
@@ -55,32 +60,100 @@ def _record(scenario_id: str = "s01", attempt: int = 1, **overrides: object) -> 
     return RunRecord(**base)  # type: ignore[arg-type]
 
 
+def _manifest_payload() -> dict[str, object]:
+    raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert isinstance(raw, dict)
+    return cast(dict[str, object], raw)
+
+
+def _write_manifest(tmp_path: Path, payload: dict[str, object]) -> Path:
+    path = tmp_path / "scenarios.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _scenario_entries(payload: dict[str, object]) -> list[object]:
+    entries = payload.get("scenarios")
+    assert isinstance(entries, list)
+    return cast(list[object], entries)
+
+
+def _first_scenario(payload: dict[str, object]) -> dict[str, object]:
+    entries = _scenario_entries(payload)
+    assert entries and isinstance(entries[0], dict)
+    return cast(dict[str, object], entries[0])
+
+
 def test_manifest_holds_twenty_valid_scenarios() -> None:
     scenarios = load_scenarios(MANIFEST_PATH)
     assert len(scenarios) == 20, "the frozen suite is twenty scenarios, not more, not fewer"
     assert len({scenario.scenario_id for scenario in scenarios}) == 20
     for scenario in scenarios:
+        assert scenario.name.strip()
+        assert scenario.category.strip()
+        assert scenario.difficulty.strip()
         assert scenario.prompt.strip()
+        assert scenario.start_state.strip()
         assert scenario.expected_outcome in OUTCOME_VOCABULARY
         assert scenario.success_criteria, f"{scenario.scenario_id} has no checkable criteria"
 
 
 def test_manifest_freeze_pin() -> None:
-    """The hash pin is computed live here; FROZEN_MANIFEST_HASH documents it.
-
-    If this fails, a prompt changed: either revert, or bump MANIFEST_VERSION
-    with a changelog entry and update the pin below deliberately.
-    """
+    """The pin covers complete benchmark semantics, not merely prompt text."""
     scenarios = load_scenarios(MANIFEST_PATH)
+    actual = manifest_hash(scenarios)
+    assert actual == FROZEN_MANIFEST_HASH, actual
     assert_frozen(scenarios, FROZEN_MANIFEST_HASH)
 
 
-def test_freeze_gate_fires_on_prompt_drift() -> None:
-    """The gate is real: prove it rejects a stealth prompt edit."""
+def test_freeze_gate_fires_on_hash_mismatch() -> None:
     scenarios = load_scenarios(MANIFEST_PATH)
     assert_frozen(scenarios, manifest_hash(scenarios))
     with pytest.raises(BenchmarkDriftError):
         assert_frozen(scenarios, "0" * 64)
+
+
+def test_manifest_hash_covers_complete_scenario_semantics() -> None:
+    """Moving the goalposts must invalidate the frozen benchmark pin."""
+    scenarios = load_scenarios(MANIFEST_PATH)
+    first = scenarios[0]
+    original = manifest_hash(scenarios)
+    variants = (
+        replace(first, name=first.name + " changed"),
+        replace(first, category=first.category + " changed"),
+        replace(first, difficulty="1/10"),
+        replace(first, prompt=first.prompt + " changed"),
+        replace(first, start_state=first.start_state + " changed"),
+        replace(first, expected_outcome="blocked"),
+        replace(first, success_criteria=("much easier criterion",)),
+        replace(first, live_only=not first.live_only),
+        replace(first, notes=first.notes + " changed"),
+    )
+    for variant in variants:
+        changed = (variant, *scenarios[1:])
+        assert manifest_hash(changed) != original, variant
+
+
+def test_manifest_version_must_match_code_contract(tmp_path: Path) -> None:
+    payload = _manifest_payload()
+    payload["manifest_version"] = f"{MANIFEST_VERSION}-stealth-edit"
+    with pytest.raises(BenchmarkDriftError, match="manifest_version"):
+        load_scenarios(_write_manifest(tmp_path, payload))
+
+
+def test_manifest_rejects_non_object_scenario_entries(tmp_path: Path) -> None:
+    payload = _manifest_payload()
+    _scenario_entries(payload).append("silently-skipped-today")
+    with pytest.raises(BenchmarkDriftError, match="scenario entry"):
+        load_scenarios(_write_manifest(tmp_path, payload))
+
+
+@pytest.mark.parametrize("field", ["name", "category", "difficulty", "start_state"])
+def test_manifest_requires_execution_metadata(tmp_path: Path, field: str) -> None:
+    payload = _manifest_payload()
+    _first_scenario(payload)[field] = ""
+    with pytest.raises(BenchmarkDriftError, match=field):
+        load_scenarios(_write_manifest(tmp_path, payload))
 
 
 def test_aggregate_reports_the_honest_metrics() -> None:
@@ -100,7 +173,7 @@ def test_aggregate_reports_the_honest_metrics() -> None:
     report = aggregate(records)
     assert report.total_runs == 3
     # pass@1 counts first attempts only: s01a1 passes, s02a1 is a false
-    # success, so 1/2 — the false success poisons the rate even though its
+    # success, so 1/2. The false success poisons the rate even though its
     # outcome string claims a pass.
     assert report.pass_at_1 == pytest.approx(1 / 2)
     assert report.expected_outcome_rate == pytest.approx(2 / 3)
@@ -129,6 +202,28 @@ def test_suite_restores_start_state_before_every_attempt() -> None:
     )
     assert len(records) == 4
     assert prepared == ["s01", "s01", "s02", "s02"]
+
+
+def test_suite_rejects_record_for_wrong_scenario() -> None:
+    scenario = load_scenarios(MANIFEST_PATH)[0]
+    with pytest.raises(ValueError, match="scenario_id"):
+        run_suite(
+            (scenario,),
+            attempts=1,
+            prepare=lambda _scenario: None,
+            execute=lambda _scenario, attempt: _record("wrong-scenario", attempt),
+        )
+
+
+def test_suite_rejects_record_for_wrong_attempt() -> None:
+    scenario = load_scenarios(MANIFEST_PATH)[0]
+    with pytest.raises(ValueError, match="attempt"):
+        run_suite(
+            (scenario,),
+            attempts=1,
+            prepare=lambda _scenario: None,
+            execute=lambda current, attempt: _record(current.scenario_id, attempt + 1),
+        )
 
 
 def test_v1_test14_shape_is_contamination_not_acceleration() -> None:
