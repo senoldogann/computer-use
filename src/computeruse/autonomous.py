@@ -108,8 +108,9 @@ def propose_goal(
     skills: SkillRegistry,
     episodes: EpisodicStore,
     *,
-    usage: tuple[UsageRecord, ...],
+    usage: tuple[UsageRecord, ...] = (),
     exclude: Container[str],
+    rng: object | None = None,
 ) -> GoalProposal | None:
     """Rank grounded memory work and return the strongest candidate.
 
@@ -118,6 +119,11 @@ def propose_goal(
     order peers inside those bands. Identical stores therefore produce the same
     proposal without an ambient random choice.
 
+    ``rng`` is accepted only as a migration seam for the pre-scheduler CLI.
+    It is deliberately ignored. Passing a different random generator cannot
+    change the selected goal, which preserves deterministic scheduling while
+    the large CLI entrypoint is migrated independently.
+
     ``exclude`` is applied before proposal construction. A parked or already
     handled goal cannot win a score and then erase another legitimate candidate
     merely because it happened to be considered first.
@@ -125,6 +131,7 @@ def propose_goal(
     Returns ``None`` when memory has nothing grounded to say. An agent with no
     evidence-backed work should do nothing, not invent a task.
     """
+    del rng
     candidates: list[GoalProposal] = []
 
     for summary in skills.index():
