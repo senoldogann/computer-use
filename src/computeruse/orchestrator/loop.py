@@ -88,7 +88,7 @@ from computeruse.orchestrator.schemas import (
     WebFetch,
     WebSearch,
 )
-from computeruse.orchestrator.trace import StepTrace
+from computeruse.orchestrator.trace import StepTrace, truncate_for_stream
 from computeruse.security.approvals import ApprovalRequiredError
 from computeruse.security.killswitch import KillSwitch
 from computeruse.security.permissions import (
@@ -1750,6 +1750,10 @@ class OodaRunner:
         # recovery diagnostics). Without the carry, the hint computed here
         # would be wiped in the same turn it was earned.
         preserved_hint: str | None = None
+        # Head of what a non-physical tool answered, for the live panel stream
+        # (the full answer already joins tool_result / tool_history / the
+        # observed trail below). None for physical actions and waits.
+        tool_preview: str | None = None
         try:
             if outcome.route == "physical":
                 # The repetition guard runs inside the recovery path, not
@@ -1779,6 +1783,7 @@ class OodaRunner:
                     self._last_tool = None
                     self._tool_streak = 0
                 answer = self._run_tool(outcome.action)
+                tool_preview = truncate_for_stream(answer) if answer else None
                 if tool_hint is not None:
                     self._last_error = tool_hint
                     preserved_hint = tool_hint
@@ -1876,7 +1881,7 @@ class OodaRunner:
             self._consecutive_search_misses = 0
             self._reset_tool_streak()
             self._record_for_progress(outcome.action)
-        self._trace_step(decision, outcome, verdict=verdict, error=None)
+        self._trace_step(decision, outcome, verdict=verdict, error=None, tool_result=tool_preview)
         # A successful action clears obsolete recovery diagnostics: the
         # provider must not keep steering around a failure that already
         # recovered (M1). A stuck-loop hint is re-injected by the next
@@ -1929,6 +1934,7 @@ class OodaRunner:
         *,
         verdict: Evidence | None,
         error: str | None,
+        tool_result: str | None = None,
     ) -> None:
         """Hand one step to the observability sink (best effort, never fatal).
 
@@ -1957,6 +1963,7 @@ class OodaRunner:
                     verdict=verdict.value if verdict is not None else None,
                     error=error,
                     screenshot_b64=self._observation.screenshot_b64,
+                    tool_result=tool_result,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - a trace sink must never kill a run

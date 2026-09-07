@@ -933,6 +933,11 @@ class Agent:
                 )
 
                 plan = decompose_goal(self._config.goal, app=app, knowledge=knowledge)
+                # The panel renders the strategic checklist from the live
+                # stream, so publish the initial plan before the first step —
+                # transitions alone would leave the run's opening stageless.
+                if self._config.on_plan_progress is not None:
+                    self._config.on_plan_progress(plan)
                 checkpoint_dir = self._config.store_dir / "checkpoints"
 
                 def _on_sub_goal_complete(current_plan: GoalPlan) -> None:
