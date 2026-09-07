@@ -1,0 +1,118 @@
+name: Apply zero-action terminal patch
+
+on:
+  push:
+    branches:
+      - fix/zero-action-terminal-outcome
+    paths:
+      - .github/workflows/patch-zero-action.yml
+      - src/computeruse/orchestrator/loop.py
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/zero-action-terminal-outcome
+      - name: Apply exact terminal-contract patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/computeruse/orchestrator/loop.py")
+          text = path.read_text()
+
+          old_run = '''        ) as exc:
+              self._finalize(
+                  self._last_state,
+                  outcome="failure",
+                  retrospective=failure_retrospective(exc),
+                  forced_completion=False,
+              )
+              raise
+          '''
+          new_run = '''        ) as exc:
+              # An abnormal ending is worth publishing only after this run
+              # actually executed something, or when a mounted skill needs its
+              # outcome reinforced. A takeover/failure before the first action
+              # remains "nothing happened" rather than a synthetic trajectory.
+              if self._executed or self._skill is not None:
+                  self._finalize(
+                      self._last_state,
+                      outcome="failure",
+                      retrospective=failure_retrospective(exc),
+                      forced_completion=False,
+                  )
+              raise
+          '''
+
+          old_doc = '''        Still gated on at least one executed action: a run that never touched
+              the host has no trajectory to remember, and the reason it failed is
+              already the caller's exception. What a *failure* trace must never do is
+              become a skill; that is the caller's call, and the retrospective is
+              passed so it can make it.
+          '''
+          new_doc = '''        A real terminal ``finish`` is an outcome even when no action was needed:
+              the requested state may already exist. The terminal callback therefore
+              publishes empty trajectories too. Abnormal endings decide their own
+              publication eligibility in :meth:`run`, while callers remain responsible
+              for deciding whether an empty trajectory contains anything worth learning.
+          '''
+
+          old_guard = '''        # Two different questions were behind one guard. "Is there a
+              # trajectory worth remembering?" is answered by whether anything ran.
+              # "How did the mounted skill fare?" is not: a run that finished in one
+              # step *because* the skill was right executed nothing, and that is the
+              # strongest evidence the recipe works — which the caller never received,
+              # so every counter stayed at zero. Measured: a second run mounted a
+              # distilled skill, finished immediately, and recorded uses=0.
+              if self.on_complete is None:
+                  return
+              if not self._executed and self._skill is None:
+                  return
+          '''
+          new_guard = '''        # Outcome publication and trajectory persistence are different
+              # questions. ``_finalize`` answers only the first: terminal finish must
+              # always reach the product shell, including an already-satisfied goal.
+              # Agent.on_complete gates episode/skill/semantic/preference persistence
+              # on ``trajectory.steps``; a mounted skill may still use an empty
+              # trajectory to record that its recipe enabled an immediate finish.
+              if self.on_complete is None:
+                  return
+          '''
+
+          replacements = (
+              ("run exception boundary", old_run, new_run),
+              ("finalize contract docs", old_doc, new_doc),
+              ("finalize publication gate", old_guard, new_guard),
+          )
+
+          changed = False
+          for label, old, new in replacements:
+              count = text.count(old)
+              if count == 1:
+                  text = text.replace(old, new, 1)
+                  changed = True
+                  continue
+              if count == 0 and new in text:
+                  continue
+              raise SystemExit(f"{label}: expected exactly one old snippet, found {count}")
+
+          if changed:
+              path.write_text(text)
+          PY
+          git diff --check
+          if git diff --quiet; then
+            echo "Patch already applied."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/computeruse/orchestrator/loop.py
+          git commit -m "fix(orchestrator): publish terminal outcomes without actuation"
+          git push origin HEAD:fix/zero-action-terminal-outcome
