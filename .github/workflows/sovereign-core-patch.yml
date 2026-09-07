@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   task1:
-    if: github.event.head_commit.message == 'chore(sovereign): apply task 1 policy patch'
+    if: contains(github.event.head_commit.message, 'apply sovereign task1')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
