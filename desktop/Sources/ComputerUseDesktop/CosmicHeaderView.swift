@@ -1,23 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Clean, deep black background for the center stage top bar when sidebar is hidden.
-struct CosmicBannerBackground: View {
-    var body: some View {
-        LinearGradient(
-            colors: [
-                Theme.canvas,
-                Theme.sidebar,
-                Theme.canvas,
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-}
-
-/// Native AppKit NSButton wrapper for titlebar toggle buttons.
-/// Prevents macOS hidden titlebar drag-gesture interception so clicks always register instantly.
+/// Standardized native title bar icon button.
+/// Subclasses NSButton with `mouseDownCanMoveWindow = false` to guarantee that clicks
+/// inside the macOS top titlebar area (y < 28pt) are never captured by window-dragging.
 struct NativeTitleBarButton: NSViewRepresentable {
     let iconName: String
     let isActive: Bool
@@ -26,28 +12,18 @@ struct NativeTitleBarButton: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TitleBarNSButton {
         let button = TitleBarNSButton(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
-        button.target = context.coordinator
-        button.action = #selector(Coordinator.clicked)
+        button.onClick = action
+        button.toolTip = tooltip
+        button.isActive = isActive
+        button.setIcon(name: iconName)
         return button
     }
 
     func updateNSView(_ button: TitleBarNSButton, context: Context) {
-        context.coordinator.action = action
+        button.onClick = action
         button.toolTip = tooltip
         button.isActive = isActive
         button.setIcon(name: iconName)
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(action: action)
-    }
-
-    class Coordinator: NSObject {
-        var action: () -> Void
-        init(action: @escaping () -> Void) { self.action = action }
-        @objc func clicked() {
-            action()
-        }
     }
 }
 
@@ -55,8 +31,12 @@ final class TitleBarNSButton: NSButton {
     var isActive: Bool = false {
         didSet { updateAppearance() }
     }
+    var onClick: (() -> Void)?
     private var isHovered = false
+    private var isPressed = false
     private var trackingArea: NSTrackingArea?
+
+    override var mouseDownCanMoveWindow: Bool { false }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -90,15 +70,12 @@ final class TitleBarNSButton: NSButton {
     }
 
     func updateAppearance() {
-        if isHovered {
+        if isHovered || isPressed {
             layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
             layer?.borderColor = NSColor(Theme.color97948E).withAlphaComponent(0.35).cgColor
             contentTintColor = NSColor(Theme.colorF5F4F2)
-        } else if isActive {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.05).cgColor
-            layer?.borderColor = NSColor(Theme.color97948E).withAlphaComponent(0.2).cgColor
-            contentTintColor = NSColor(Theme.colorFFB27F)
         } else {
+            // Idle state: absolutely NO background color and NO border
             layer?.backgroundColor = NSColor.clear.cgColor
             layer?.borderColor = NSColor.clear.cgColor
             contentTintColor = NSColor(Theme.colorAAA8A3)
@@ -112,7 +89,7 @@ final class TitleBarNSButton: NSButton {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -130,6 +107,7 @@ final class TitleBarNSButton: NSButton {
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         isHovered = false
+        isPressed = false
         updateAppearance()
         NSCursor.arrow.set()
     }
@@ -137,10 +115,24 @@ final class TitleBarNSButton: NSButton {
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
     }
+
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+        updateAppearance()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isPressed = false
+        updateAppearance()
+        let location = convert(event.locationInWindow, from: nil)
+        if bounds.contains(location) {
+            onClick?()
+        }
+    }
 }
 
-/// Top strip of the sidebar. Reserves the macOS traffic-light zone on the left
-/// and houses the sidebar collapse button on the right edge of the sidebar.
+/// Cosmic sidebar header: aligns with the window traffic-lights row.
+/// Contains the traffic light clearance on the left and the sidebar toggle button on the right.
 struct CosmicSidebarHeader: View {
     @ObservedObject var panelsStore: PanelsStore
 

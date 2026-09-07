@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Center stage:
-/// - Top bar: workspace breadcrumb · task title · status · 3-dots options menu · right-panel toggle (no bottom line)
+/// - Top bar: workspace breadcrumb · task title · status · right-panel toggle (no bottom line)
 /// - Empty: vertically centered hero + composer + chips
 /// - Active: timeline with a glass composer docked at the bottom and task rail (-)
 struct CenterStageView: View {
@@ -43,7 +43,7 @@ struct CenterStageView: View {
 
     /// Single top row shared by the whole window chrome:
     /// traffic-light clearance & left-sidebar toggle on the left, breadcrumbs in the middle,
-    /// and task options + right-panel toggle on the far right.
+    /// and right-panel toggle on the far right.
     private var topBar: some View {
         HStack(spacing: 8) {
             if !panelsStore.isSidebarVisible {
@@ -85,15 +85,6 @@ struct CenterStageView: View {
                     .padding(.horizontal, 7).padding(.vertical, 3).background(Theme.cardElevated).clipShape(Capsule())
             }
 
-            // 3-dots Menu for Console & Task Options (Dropdown)
-            if !threadsStore.isEmptyState {
-                taskOptionsMenu
-            }
-
-            // Hairline separating contextual options from pane toggle
-            Theme.borderOverlay
-                .frame(width: 1, height: 16)
-
             // Right panel toggle (live viewport)
             NativeTitleBarButton(
                 iconName: "sidebar.right",
@@ -111,65 +102,6 @@ struct CenterStageView: View {
         .frame(height: Theme.titleRowHeight)
         .padding(.top, Theme.titleRowTopPadding)
         .background(Color.clear)
-    }
-
-    private var taskOptionsMenu: some View {
-        Menu {
-            Button {
-                threadsStore.hideConsole.toggle()
-            } label: {
-                Label(
-                    threadsStore.hideConsole ? "Show Console Output" : "Hide Console Output",
-                    systemImage: threadsStore.hideConsole ? "eye" : "eye.slash"
-                )
-            }
-
-            Button {
-                let entries = threadsStore.activeThread?.entries ?? []
-                let logs = entries.filter { $0.kind == .console }.map(\.detail).joined(separator: "\n")
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(logs, forType: .string)
-                StoreDataService.shared.showToast("Console log copied to clipboard")
-            } label: {
-                Label("Copy Console Log", systemImage: "doc.on.doc")
-            }
-
-            let hasErrors = threadsStore.activeThread?.entries.contains(where: \.isFailure) ?? false
-            Button {
-                threadsStore.hideConsole = false
-                threadsStore.consoleFilter = ""
-                threadsStore.scrollTargetID = threadsStore.activeThread?.entries.first(where: \.isFailure)?.id
-            } label: {
-                Label("Jump to First Error", systemImage: "exclamationmark.triangle")
-            }
-            .disabled(!hasErrors)
-
-            if !threadsStore.consoleFilter.isEmpty {
-                Divider()
-                Button {
-                    threadsStore.consoleFilter = ""
-                } label: {
-                    Label("Clear Filter (\"\(threadsStore.consoleFilter)\")", systemImage: "xmark.circle")
-                }
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.textSecondary)
-                .frame(width: 28, height: 28)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.white.opacity(0.04))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(Theme.borderOverlay, lineWidth: 1)
-                )
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("Task & Console Options")
     }
 
     private var emptyState: some View {
@@ -225,10 +157,13 @@ struct CenterStageView: View {
                                 .frame(height: 140)
                                 .id("timeline-bottom-spacer")
                         }
+                        // Centered reading column: 780pt max width with
+                        // side margins, like a chat surface — not full-bleed.
+                        .frame(maxWidth: 780)
+                        .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.horizontal, 28)
                         .padding(.top, 16)
                     }
-                    .defaultScrollAnchor(.bottom)
                     .onChange(of: threadsStore.scrollTargetID) { _, targetID in
                         guard let targetID else { return }
                         withAnimation(.easeInOut(duration: 0.25)) {

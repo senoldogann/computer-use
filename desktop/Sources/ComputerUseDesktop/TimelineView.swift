@@ -52,6 +52,13 @@ struct TimelineView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // The console toolbar only appears once there is console output to
+            // manage; an empty conversation starts with the first message at
+            // the top instead of a row of buttons.
+            if entries.contains(where: { $0.kind == .console }) {
+                consoleToolbar
+            }
+
             ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
                 let isSubsequent = entry.kind == .userMessage && index > 0
                 TimelineRow(
@@ -74,6 +81,31 @@ struct TimelineView: View {
                 finishedFooterLine
             }
         }
+    }
+
+    private var consoleToolbar: some View {
+        HStack(spacing: 10) {
+            Button(threadsStore.hideConsole ? "Show console" : "Hide console") {
+                threadsStore.hideConsole.toggle()
+            }
+            TextField("Filter console", text: $threadsStore.consoleFilter)
+                .textFieldStyle(.plain)
+                .frame(maxWidth: 160)
+            Button("Copy log") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(entries.filter { $0.kind == .console }.map(\.detail).joined(separator: "\n"), forType: .string)
+            }
+            Button("First error") {
+                threadsStore.hideConsole = false
+                threadsStore.consoleFilter = ""
+                threadsStore.scrollTargetID = entries.first(where: \.isFailure)?.id
+            }
+            .disabled(!entries.contains(where: \.isFailure))
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(Theme.textSecondary)
+        .buttonStyle(.plain)
+        .hoverPointer(radius: 5)
     }
 
     // MARK: - Live Progress Line
@@ -518,6 +550,7 @@ private struct ShimmerModifier: ViewModifier {
                         .frame(width: geo.size.width * 0.6)
                         .offset(x: phase * geo.size.width * 1.5 - geo.size.width * 0.3)
                     }
+                    .allowsHitTesting(false)
                 )
                 .mask(content)
                 .onAppear {
