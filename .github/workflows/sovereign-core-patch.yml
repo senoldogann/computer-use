@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   task2:
-    if: contains(github.event.head_commit.message, 'apply sovereign task2')
+    if: contains(github.event.head_commit.message, 'apply sovereign task2 fixed')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,47 +29,49 @@ jobs:
           path = Path('src/computeruse/agent.py')
           text = path.read_text(encoding='utf-8')
 
-          old_import = '''from computeruse.security.autonomy import (
-    AutonomyLevel,
-    PermissionDecision,
-    Risk,
-    classify_risk,
-)
-'''
-          new_import = '''from computeruse.security.autonomy import (
-    AutonomyLevel,
-    PermissionDecision,
-    Risk,
-    classify_risk,
-    decide_permission,
-)
-'''
+          old_import = (
+              "from computeruse.security.autonomy import (\n"
+              "    AutonomyLevel,\n"
+              "    PermissionDecision,\n"
+              "    Risk,\n"
+              "    classify_risk,\n"
+              ")\n"
+          )
+          new_import = (
+              "from computeruse.security.autonomy import (\n"
+              "    AutonomyLevel,\n"
+              "    PermissionDecision,\n"
+              "    Risk,\n"
+              "    classify_risk,\n"
+              "    decide_permission,\n"
+              ")\n"
+          )
           if text.count(old_import) != 1:
               raise SystemExit('autonomy import marker not unique')
           text = text.replace(old_import, new_import, 1)
 
-          old_guard = '''        risk = classify_risk(turn, target_label=label)
-        verdict = (
-            authorize(turn, label)
-            if authorize is not None and risk is Risk.DESTRUCTIVE
-            else None
-        )
-        base = decide_with_grant(level, risk, verdict)
-'''
-          new_guard = '''        risk = classify_risk(turn, target_label=label)
-        # Resolve the selected autonomy policy before consulting delegated
-        # authority. Sovereign already ALLOWs destructive work by explicit
-        # session policy, so spending/reading grants there would be both
-        # unnecessary and misleading. FULL/GUARDED still consult grants only
-        # when their base policy actually requires confirmation.
-        base = decide_permission(level, risk)
-        if (
-            base is PermissionDecision.CONFIRM
-            and risk is Risk.DESTRUCTIVE
-            and authorize is not None
-        ):
-            base = decide_with_grant(level, risk, authorize(turn, label))
-'''
+          old_guard = (
+              "        risk = classify_risk(turn, target_label=label)\n"
+              "        verdict = (\n"
+              "            authorize(turn, label)\n"
+              "            if authorize is not None and risk is Risk.DESTRUCTIVE\n"
+              "            else None\n"
+              "        )\n"
+              "        base = decide_with_grant(level, risk, verdict)\n"
+          )
+          new_guard = (
+              "        risk = classify_risk(turn, target_label=label)\n"
+              "        # Resolve base policy before consulting delegated authority.\n"
+              "        # Sovereign already permits destructive work by explicit session policy;\n"
+              "        # FULL/GUARDED consult grants only when confirmation is still required.\n"
+              "        base = decide_permission(level, risk)\n"
+              "        if (\n"
+              "            base is PermissionDecision.CONFIRM\n"
+              "            and risk is Risk.DESTRUCTIVE\n"
+              "            and authorize is not None\n"
+              "        ):\n"
+              "            base = decide_with_grant(level, risk, authorize(turn, label))\n"
+          )
           if text.count(old_guard) != 1:
               raise SystemExit('guard marker not unique')
           text = text.replace(old_guard, new_guard, 1)
