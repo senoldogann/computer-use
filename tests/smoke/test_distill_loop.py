@@ -330,9 +330,9 @@ def test_a_skill_that_made_the_run_trivial_is_still_credited() -> None:
     assert received == [("success", "chrome.mounted")]
 
 
-def test_a_run_with_no_skill_and_no_actions_still_leaves_no_trace() -> None:
-    """The original contract is unchanged: nothing ran, nothing to remember."""
-    received: list[object] = []
+def test_a_terminal_run_with_no_skill_and_no_actions_publishes_outcome() -> None:
+    """A terminal finish is an outcome even when the requested state already exists."""
+    received: list[tuple[Trajectory, EpisodeOutcome, str | None, str | None, bool]] = []
     OodaRunner(
         provider=lambda _s: AgentTurn(
             thought="",
@@ -340,10 +340,19 @@ def test_a_run_with_no_skill_and_no_actions_still_leaves_no_trace() -> None:
             action=Finish(type="finish", status="success", summary="nothing"),
         ),
         execute_physical=lambda _a: None,
-        on_complete=lambda *args: received.append(args) or None,
+        on_complete=lambda t, o, r, sid, forced: received.append(
+            (t, o, r, sid, forced)
+        ),
         max_steps=3,
     ).run(goal="nothing to do")
-    assert received == []
+
+    assert len(received) == 1
+    trajectory, outcome, retrospective, skill_id, forced = received[0]
+    assert trajectory.steps == ()
+    assert outcome == "success"
+    assert retrospective == "nothing"
+    assert skill_id is None
+    assert forced is False
 
 
 def _a_skill() -> SkillDefinition:
