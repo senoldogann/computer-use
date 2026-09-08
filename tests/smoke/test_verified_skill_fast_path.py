@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from computeruse.orchestrator.loop import WorkingState
@@ -210,7 +211,7 @@ def test_provider_completes_semantic_fast_path_without_fallback_calls() -> None:
     )
 
     first = provider(state)
-    second = provider(state.model_copy(update={"step_index": 1}))
+    second = provider(replace(state, step_index=1))
 
     assert first.action == MouseClick(type="mouse_click", x=260, y=212)
     assert isinstance(second.action, Finish)
