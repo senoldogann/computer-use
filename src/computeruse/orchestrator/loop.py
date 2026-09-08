@@ -1561,12 +1561,17 @@ class OodaRunner:
             # needs you" from "this could not be done".
             ApprovalRequiredError,
         ) as exc:
-            self._finalize(
-                self._last_state,
-                outcome="failure",
-                retrospective=failure_retrospective(exc),
-                forced_completion=False,
-            )
+            # An abnormal ending is worth publishing only after this run
+            # actually executed something, or when a mounted skill needs its
+            # outcome reinforced. A takeover/failure before the first action
+            # remains "nothing happened" rather than a synthetic trajectory.
+            if self._executed or self._skill is not None:
+                self._finalize(
+                    self._last_state,
+                    outcome="failure",
+                    retrospective=failure_retrospective(exc),
+                    forced_completion=False,
+                )
             raise
 
     def _step_until_finished(self, state: WorkingState, goal: str) -> WorkingState:
@@ -3311,22 +3316,19 @@ class OodaRunner:
         the next attempt. Law 4.1 asks for failure retrospectives precisely
         because that is the trace worth keeping.
 
-        Still gated on at least one executed action: a run that never touched
-        the host has no trajectory to remember, and the reason it failed is
-        already the caller's exception. What a *failure* trace must never do is
-        become a skill; that is the caller's call, and the retrospective is
-        passed so it can make it.
+        A real terminal ``finish`` is an outcome even when no action was needed:
+        the requested state may already exist. The terminal callback therefore
+        publishes empty trajectories too. Abnormal endings decide their own
+        publication eligibility in :meth:`run`, while callers remain responsible
+        for deciding whether an empty trajectory contains anything worth learning.
         """
-        # Two different questions were behind one guard. "Is there a
-        # trajectory worth remembering?" is answered by whether anything ran.
-        # "How did the mounted skill fare?" is not: a run that finished in one
-        # step *because* the skill was right executed nothing, and that is the
-        # strongest evidence the recipe works — which the caller never received,
-        # so every counter stayed at zero. Measured: a second run mounted a
-        # distilled skill, finished immediately, and recorded uses=0.
+        # Outcome publication and trajectory persistence are different
+        # questions. ``_finalize`` answers only the first: terminal finish must
+        # always reach the product shell, including an already-satisfied goal.
+        # Agent.on_complete gates episode/skill/semantic/preference persistence
+        # on ``trajectory.steps``; a mounted skill may still use an empty
+        # trajectory to record that its recipe enabled an immediate finish.
         if self.on_complete is None:
-            return
-        if not self._executed and self._skill is None:
             return
         self.on_complete(
             Trajectory(
