@@ -20,7 +20,6 @@ from computeruse.bridge.server import (
 )
 
 CAPABILITY = "a" * 64
-WRONG_CAPABILITY = "b" * 64
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DRIVER_BIN = REPO_ROOT / "driver" / "target" / "debug" / "actuation-driver"
 
@@ -69,14 +68,13 @@ class RecordingProcess:
         self.returncode = -9
 
 
-def _request(socket_path: Path, capability: str) -> dict[str, object]:
+def _request(socket_path: Path) -> dict[str, object]:
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(3.0)
     try:
         connection.connect(str(socket_path))
         payload = {
             "version": 1,
-            "capability": capability,
             "method": "health",
             "params": {},
         }
@@ -127,7 +125,12 @@ def test_bind_hardens_parent_and_socket_permissions(tmp_path: Path) -> None:
     parent = tmp_path / "runtime"
     parent.mkdir(mode=0o755)
     socket_path = parent / "bridge.sock"
-    server = BridgeServer(socket_path, CAPABILITY, RecordingController())
+    server = BridgeServer(
+        socket_path,
+        CAPABILITY,
+        RecordingController(),
+        allowed_pid=os.getpid(),
+    )
 
     server.bind()
     try:
@@ -153,7 +156,12 @@ def test_bind_refuses_regular_file_or_symlink_at_socket_path(
         target.write_text("do-not-delete", encoding="utf-8")
         socket_path.symlink_to(target)
 
-    server = BridgeServer(socket_path, CAPABILITY, RecordingController())
+    server = BridgeServer(
+        socket_path,
+        CAPABILITY,
+        RecordingController(),
+        allowed_pid=os.getpid(),
+    )
     with pytest.raises(BridgeServerError) as exc:
         server.bind()
 
@@ -170,7 +178,12 @@ def test_bind_recovers_owned_stale_socket(tmp_path: Path) -> None:
     stale.close()
     assert stat.S_ISSOCK(socket_path.lstat().st_mode)
 
-    server = BridgeServer(socket_path, CAPABILITY, RecordingController())
+    server = BridgeServer(
+        socket_path,
+        CAPABILITY,
+        RecordingController(),
+        allowed_pid=os.getpid(),
+    )
     server.bind()
     try:
         assert stat.S_ISSOCK(socket_path.lstat().st_mode)
@@ -187,7 +200,12 @@ def test_bind_refuses_live_owned_socket(tmp_path: Path) -> None:
     live.bind(str(socket_path))
     live.listen(1)
     try:
-        server = BridgeServer(socket_path, CAPABILITY, RecordingController())
+        server = BridgeServer(
+            socket_path,
+            CAPABILITY,
+            RecordingController(),
+            allowed_pid=os.getpid(),
+        )
         with pytest.raises(BridgeServerError) as exc:
             server.bind()
         assert exc.value.code == "BRIDGE_SOCKET_IN_USE"
@@ -196,38 +214,48 @@ def test_bind_refuses_live_owned_socket(tmp_path: Path) -> None:
         socket_path.unlink(missing_ok=True)
 
 
-def test_capability_mismatch_is_constant_surface_and_never_dispatches(
+def test_peer_pid_mismatch_is_constant_surface_and_never_dispatches(
     tmp_path: Path,
 ) -> None:
     socket_path = tmp_path / "private" / "bridge.sock"
     controller = RecordingController()
-    server = BridgeServer(socket_path, CAPABILITY, controller)
+    server = BridgeServer(
+        socket_path,
+        CAPABILITY,
+        controller,
+        allowed_pid=os.getpid() + 1,
+    )
     server.bind()
     thread = threading.Thread(target=server.serve_once)
     thread.start()
     try:
-        response = _request(socket_path, WRONG_CAPABILITY)
+        response = _request(socket_path)
     finally:
         thread.join(timeout=3.0)
         server.close()
 
     assert response == {
         "ok": False,
-        "error": {"code": "POLICY_DENIED", "message": "bridge capability rejected"},
+        "error": {"code": "POLICY_DENIED", "message": "bridge peer rejected"},
     }
     assert controller.calls == []
     assert not thread.is_alive()
 
 
-def test_valid_capability_dispatches_one_request(tmp_path: Path) -> None:
+def test_allowed_peer_dispatches_one_secret_free_request(tmp_path: Path) -> None:
     socket_path = tmp_path / "private" / "bridge.sock"
     controller = RecordingController()
-    server = BridgeServer(socket_path, CAPABILITY, controller)
+    server = BridgeServer(
+        socket_path,
+        CAPABILITY,
+        controller,
+        allowed_pid=os.getpid(),
+    )
     server.bind()
     thread = threading.Thread(target=server.serve_once)
     thread.start()
     try:
-        response = _request(socket_path, CAPABILITY)
+        response = _request(socket_path)
     finally:
         thread.join(timeout=3.0)
         server.close()
