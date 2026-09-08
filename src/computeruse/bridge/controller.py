@@ -461,7 +461,10 @@ class BridgeController:
         return {"acted": True}
 
     def _release_inputs(self, _params: dict[str, object]) -> object:
-        self._safe_release()
+        try:
+            self._driver.release_inputs()
+        except Exception as exc:
+            raise BridgeHostError("DRIVER_UNAVAILABLE", "input release failed") from exc
         return {"released": True}
 
     def _safe_release(self) -> None:
