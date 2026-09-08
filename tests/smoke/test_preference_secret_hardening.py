@@ -38,6 +38,20 @@ def test_named_credential_values_are_sensitive(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     (
+        "password is swordfish",
+        "passwd is correcthorsebatterystaple",
+        "api key is ABCDEFGHIJKLMNOP",
+        "token is abcdefghijklmnop",
+        "secret is confidentialvalue",
+    ),
+)
+def test_copular_credential_assignments_fail_closed(text: str) -> None:
+    assert contains_sensitive_preference_material(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
         "token-efficient summaries",
         "keep the token budget small",
         "use the password manager workflow",
