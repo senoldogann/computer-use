@@ -10,7 +10,6 @@ from typing import Any, cast
 
 import pytest
 
-from computeruse.bridge.controller import BridgeController
 from computeruse.bridge.server import (
     BridgeServer,
     BridgeServerError,
@@ -18,6 +17,7 @@ from computeruse.bridge.server import (
     StartupConfig,
     parse_startup_line,
 )
+from computeruse.bridge.controller import BridgeController
 
 CAPABILITY = "a" * 64
 WRONG_CAPABILITY = "b" * 64
