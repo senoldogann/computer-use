@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import cast
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 65_536
-CAPABILITY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class BridgeProtocolError(ValueError):
@@ -22,7 +20,7 @@ class BridgeProtocolError(ValueError):
 
 @dataclass(frozen=True)
 class BridgeRequest:
-    """One secret-free bridge request."""
+    """One secret-free request received over the inherited bridge stream."""
 
     version: int
     method: str

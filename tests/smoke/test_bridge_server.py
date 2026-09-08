@@ -1,25 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import stat
-import threading
+from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
 
-import pytest
-
 from computeruse.bridge.controller import BridgeController
-from computeruse.bridge.server import (
-    BridgeServer,
-    BridgeServerError,
-    OwnedDriver,
-    StartupConfig,
-    parse_startup_line,
-)
+from computeruse.bridge.protocol import MAX_REQUEST_BYTES
+from computeruse.bridge.server import BridgeStdioServer, OwnedDriver
 
-CAPABILITY = "a" * 64
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DRIVER_BIN = REPO_ROOT / "driver" / "target" / "debug" / "actuation-driver"
 
@@ -68,201 +59,101 @@ class RecordingProcess:
         self.returncode = -9
 
 
-def _request(socket_path: Path) -> dict[str, object]:
-    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    connection.settimeout(3.0)
-    try:
-        connection.connect(str(socket_path))
-        payload = {
-            "version": 1,
-            "method": "health",
-            "params": {},
-        }
-        connection.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        chunks: list[bytes] = []
-        while True:
-            chunk = connection.recv(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if b"\n" in chunk:
-                break
-        parsed: object = json.loads(b"".join(chunks).split(b"\n", 1)[0])
-        assert isinstance(parsed, dict)
-        return cast(dict[str, object], parsed)
-    finally:
-        connection.close()
+def _frame(method: str, params: dict[str, object] | None = None) -> bytes:
+    return (
+        json.dumps({"version": 1, "method": method, "params": params or {}}) + "\n"
+    ).encode()
 
 
-def test_parse_startup_line_accepts_exact_version_and_capability() -> None:
-    startup = parse_startup_line(
-        (json.dumps({"version": 1, "capability": CAPABILITY}) + "\n").encode("utf-8")
-    )
-
-    assert startup == StartupConfig(version=1, capability=CAPABILITY)
+def _responses(writer: BytesIO) -> list[dict[str, object]]:
+    return [json.loads(line) for line in writer.getvalue().splitlines()]
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
-        b"{}\n",
-        b'{"version":2,"capability":"' + b"a" * 64 + b'"}\n',
-        b'{"version":1,"capability":"short"}\n',
-        b'{"version":1,"capability":"' + b"A" * 64 + b'"}\n',
-        b'{"version":1,"capability":"' + b"a" * 64 + b'","extra":true}\n',
-        b"not-json\n",
-        b'{"version":1,"capability":"' + b"a" * 64 + b'"}',
-    ],
-)
-def test_parse_startup_line_rejects_malformed_or_non_exact_frames(raw: bytes) -> None:
-    with pytest.raises(BridgeServerError) as exc:
-        parse_startup_line(raw)
-
-    assert exc.value.code == "BRIDGE_PROTOCOL_INVALID"
-
-
-def test_bind_hardens_parent_and_socket_permissions(tmp_path: Path) -> None:
-    parent = tmp_path / "runtime"
-    parent.mkdir(mode=0o755)
-    socket_path = parent / "bridge.sock"
-    server = BridgeServer(
-        socket_path,
-        CAPABILITY,
-        RecordingController(),
-        allowed_pid=os.getpid(),
-    )
-
-    server.bind()
-    try:
-        assert stat.S_IMODE(parent.stat().st_mode) == 0o700
-        assert stat.S_ISSOCK(socket_path.lstat().st_mode)
-        assert stat.S_IMODE(socket_path.lstat().st_mode) == 0o600
-        assert socket_path.lstat().st_uid == os.geteuid()
-    finally:
-        server.close()
-
-
-@pytest.mark.parametrize("kind", ["regular", "symlink"])
-def test_bind_refuses_regular_file_or_symlink_at_socket_path(
-    tmp_path: Path, kind: str
-) -> None:
-    parent = tmp_path / "runtime"
-    parent.mkdir(mode=0o700)
-    socket_path = parent / "bridge.sock"
-    if kind == "regular":
-        socket_path.write_text("do-not-delete", encoding="utf-8")
-    else:
-        target = parent / "target"
-        target.write_text("do-not-delete", encoding="utf-8")
-        socket_path.symlink_to(target)
-
-    server = BridgeServer(
-        socket_path,
-        CAPABILITY,
-        RecordingController(),
-        allowed_pid=os.getpid(),
-    )
-    with pytest.raises(BridgeServerError) as exc:
-        server.bind()
-
-    assert exc.value.code == "BRIDGE_SOCKET_UNSAFE"
-    assert socket_path.exists() or socket_path.is_symlink()
-
-
-def test_bind_recovers_owned_stale_socket(tmp_path: Path) -> None:
-    parent = tmp_path / "runtime"
-    parent.mkdir(mode=0o700)
-    socket_path = parent / "bridge.sock"
-    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    stale.bind(str(socket_path))
-    stale.close()
-    assert stat.S_ISSOCK(socket_path.lstat().st_mode)
-
-    server = BridgeServer(
-        socket_path,
-        CAPABILITY,
-        RecordingController(),
-        allowed_pid=os.getpid(),
-    )
-    server.bind()
-    try:
-        assert stat.S_ISSOCK(socket_path.lstat().st_mode)
-        assert stat.S_IMODE(socket_path.lstat().st_mode) == 0o600
-    finally:
-        server.close()
-
-
-def test_bind_refuses_live_owned_socket(tmp_path: Path) -> None:
-    parent = tmp_path / "runtime"
-    parent.mkdir(mode=0o700)
-    socket_path = parent / "bridge.sock"
-    live = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    live.bind(str(socket_path))
-    live.listen(1)
-    try:
-        server = BridgeServer(
-            socket_path,
-            CAPABILITY,
-            RecordingController(),
-            allowed_pid=os.getpid(),
-        )
-        with pytest.raises(BridgeServerError) as exc:
-            server.bind()
-        assert exc.value.code == "BRIDGE_SOCKET_IN_USE"
-    finally:
-        live.close()
-        socket_path.unlink(missing_ok=True)
-
-
-def test_peer_pid_mismatch_is_constant_surface_and_never_dispatches(
-    tmp_path: Path,
-) -> None:
-    socket_path = tmp_path / "private" / "bridge.sock"
+def test_stdio_bridge_dispatches_secret_free_request() -> None:
+    reader = BytesIO(_frame("health"))
+    writer = BytesIO()
     controller = RecordingController()
-    server = BridgeServer(
-        socket_path,
-        CAPABILITY,
-        controller,
-        allowed_pid=os.getpid() + 1,
-    )
-    server.bind()
-    thread = threading.Thread(target=server.serve_once)
-    thread.start()
-    try:
-        response = _request(socket_path)
-    finally:
-        thread.join(timeout=3.0)
-        server.close()
+    server = BridgeStdioServer(reader, writer, controller)
 
-    assert response == {
-        "ok": False,
-        "error": {"code": "POLICY_DENIED", "message": "bridge peer rejected"},
-    }
-    assert controller.calls == []
-    assert not thread.is_alive()
+    assert server.serve_once() is True
 
-
-def test_allowed_peer_dispatches_one_secret_free_request(tmp_path: Path) -> None:
-    socket_path = tmp_path / "private" / "bridge.sock"
-    controller = RecordingController()
-    server = BridgeServer(
-        socket_path,
-        CAPABILITY,
-        controller,
-        allowed_pid=os.getpid(),
-    )
-    server.bind()
-    thread = threading.Thread(target=server.serve_once)
-    thread.start()
-    try:
-        response = _request(socket_path)
-    finally:
-        thread.join(timeout=3.0)
-        server.close()
-
-    assert response == {"ok": True, "result": {"method": "health"}}
+    assert _responses(writer) == [{"ok": True, "result": {"method": "health"}}]
     assert controller.calls == [("health", {})]
-    assert not thread.is_alive()
+
+
+def test_stdio_bridge_rejects_capability_frame_without_dispatch() -> None:
+    reader = BytesIO(
+        (
+            json.dumps(
+                {
+                    "version": 1,
+                    "capability": "a" * 64,
+                    "method": "health",
+                    "params": {},
+                }
+            )
+            + "\n"
+        ).encode()
+    )
+    writer = BytesIO()
+    controller = RecordingController()
+    server = BridgeStdioServer(reader, writer, controller)
+
+    assert server.serve_once() is True
+
+    assert _responses(writer) == [
+        {
+            "ok": False,
+            "error": {
+                "code": "BRIDGE_PROTOCOL_INVALID",
+                "message": "bridge request fields are invalid",
+            },
+        }
+    ]
+    assert controller.calls == []
+
+
+def test_stdio_bridge_handles_multiple_frames_in_order_until_eof() -> None:
+    reader = BytesIO(_frame("health") + _frame("active_window"))
+    writer = BytesIO()
+    controller = RecordingController()
+    server = BridgeStdioServer(reader, writer, controller)
+
+    server.serve_forever()
+
+    assert _responses(writer) == [
+        {"ok": True, "result": {"method": "health"}},
+        {"ok": True, "result": {"method": "active_window"}},
+    ]
+    assert controller.calls == [("health", {}), ("active_window", {})]
+
+
+def test_stdio_bridge_stops_cleanly_at_eof() -> None:
+    writer = BytesIO()
+    controller = RecordingController()
+    server = BridgeStdioServer(BytesIO(), writer, controller)
+
+    assert server.serve_once() is False
+    assert writer.getvalue() == b""
+    assert controller.calls == []
+
+
+def test_stdio_bridge_terminates_stream_after_oversized_partial_frame() -> None:
+    writer = BytesIO()
+    controller = RecordingController()
+    server = BridgeStdioServer(BytesIO(b"x" * (MAX_REQUEST_BYTES + 1)), writer, controller)
+
+    assert server.serve_once() is False
+    assert _responses(writer) == [
+        {
+            "ok": False,
+            "error": {
+                "code": "BRIDGE_PROTOCOL_INVALID",
+                "message": "bridge request exceeds the frame limit",
+            },
+        }
+    ]
+    assert controller.calls == []
 
 
 def test_owned_driver_shutdown_order_is_fail_safe(tmp_path: Path) -> None:
@@ -270,7 +161,9 @@ def test_owned_driver_shutdown_order_is_fail_safe(tmp_path: Path) -> None:
     runtime_dir = tmp_path / "driver-runtime"
     runtime_dir.mkdir()
     driver_socket = runtime_dir / "driver.sock"
-    driver_socket.touch()
+    bound = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    bound.bind(str(driver_socket))
+    bound.close()
     client = RecordingClient(events)
     process = RecordingProcess(events)
     owned = OwnedDriver(

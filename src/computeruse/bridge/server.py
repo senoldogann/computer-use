@@ -1,12 +1,10 @@
-"""Authenticated local Unix-socket server and owned Rust-driver lifecycle.
+"""Inherited-stream bridge server and owned Rust-driver lifecycle.
 
-The bridge is a deterministic adapter, not an agent. It accepts one bounded
-secret-free request per Unix-socket connection and authenticates the connecting
-process by kernel-reported peer PID before reading any request bytes. The
-startup capability is delivered only through inherited stdin and is never sent
-over the replaceable Unix-socket path.
+The bridge is a deterministic adapter, not an agent. Its parent owns the
+stdin/stdout pipes, so requests never cross a replaceable named bridge socket
+and no authentication secret is carried in request frames.
 
-The Rust actuation driver is always a child owned by this bridge instance and
+The Rust actuation driver remains a child owned by this bridge instance and
 is started with ``--allow-pid <bridge-pid>``. Shutdown never scans for arbitrary
 processes: it releases inputs, closes the client, terminates only that child,
 and removes only artifacts inside the bridge-owned private runtime directory.
@@ -14,27 +12,20 @@ and removes only artifacts inside the bridge-owned private runtime directory.
 
 from __future__ import annotations
 
-import errno
-import json
 import os
 import signal
-import socket
 import stat
-import struct
 import subprocess
-import sys
 import tempfile
 import time
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import BinaryIO, Protocol
 
 from computeruse.bridge.controller import BridgeController, BridgeHostError
 from computeruse.bridge.protocol import (
-    CAPABILITY_PATTERN,
     MAX_REQUEST_BYTES,
-    PROTOCOL_VERSION,
     BridgeProtocolError,
     encode_error,
     encode_success,
@@ -42,62 +33,80 @@ from computeruse.bridge.protocol import (
 )
 from computeruse.orchestrator.client import ActuationClient
 
-MAX_STARTUP_BYTES = 1_024
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 DRIVER_START_TIMEOUT_SECONDS = 10.0
 DRIVER_STOP_TIMEOUT_SECONDS = 5.0
-SOCKET_PROBE_TIMEOUT_SECONDS = 0.2
-DARWIN_SOL_LOCAL = 0
-DARWIN_LOCAL_PEERPID = 0x002
 
 
 class BridgeServerError(RuntimeError):
-    """Stable bridge startup/socket/lifecycle failure."""
+    """Stable bridge startup/stream/lifecycle failure."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-@dataclass(frozen=True)
-class StartupConfig:
-    """The one secret-bearing frame accepted on bridge stdin."""
-
-    version: int
-    capability: str
-
-
 class DispatchController(Protocol):
-    """Structural controller contract used by the socket server."""
+    """Structural controller contract used by the inherited stream server."""
 
     def dispatch(self, method: str, params: dict[str, object]) -> object: ...
 
 
-def parse_startup_line(raw: bytes) -> StartupConfig:
-    """Validate the exact one-line startup contract without retaining raw input."""
-    if not raw or len(raw) > MAX_STARTUP_BYTES or not raw.endswith(b"\n"):
-        raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge startup frame")
-    if raw.count(b"\n") != 1:
-        raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge startup frame")
-    try:
-        decoded = raw[:-1].decode("utf-8")
-        payload_object: object = json.loads(decoded)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BridgeServerError(
-            "BRIDGE_PROTOCOL_INVALID", "invalid bridge startup frame"
-        ) from exc
-    if not isinstance(payload_object, dict):
-        raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge startup frame")
-    payload = cast(dict[object, object], payload_object)
-    if set(payload) != {"version", "capability"}:
-        raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge startup frame")
-    version = payload.get("version")
-    capability = payload.get("capability")
-    if version != PROTOCOL_VERSION:
-        raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge startup frame")
-    if not isinstance(capability, str) or CAPABILITY_PATTERN.fullmatch(capability) is None:
-        raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge startup frame")
-    return StartupConfig(version=PROTOCOL_VERSION, capability=capability)
+class BridgeStdioServer:
+    """Serve bounded secret-free requests over parent-owned stdin/stdout pipes."""
+
+    def __init__(
+        self,
+        reader: BinaryIO,
+        writer: BinaryIO,
+        controller: DispatchController,
+    ) -> None:
+        self._reader = reader
+        self._writer = writer
+        self._controller = controller
+
+    def serve_once(self) -> bool:
+        """Process one frame; return False at EOF or after an oversized partial frame."""
+        raw = self._reader.readline(MAX_REQUEST_BYTES + 1)
+        if raw == b"":
+            return False
+        if len(raw) > MAX_REQUEST_BYTES:
+            self._write_response(
+                encode_error("BRIDGE_PROTOCOL_INVALID", "bridge request exceeds the frame limit")
+            )
+            return False
+
+        try:
+            request = parse_request_line(raw)
+            result = self._controller.dispatch(request.method, request.params)
+            response = encode_success(result)
+        except BridgeProtocolError as exc:
+            response = encode_error(exc.code, str(exc))
+        except BridgeHostError as exc:
+            response = encode_error(exc.code, str(exc))
+        except BridgeServerError as exc:
+            response = encode_error(exc.code, str(exc))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            response = encode_error("DRIVER_UNAVAILABLE", "computer-use bridge request failed")
+
+        if len(response) > MAX_RESPONSE_BYTES:
+            response = encode_error(
+                "DRIVER_UNAVAILABLE", "computer-use bridge response exceeded limit"
+            )
+        self._write_response(response)
+        return True
+
+    def serve_forever(self) -> None:
+        """Serve sequentially until the owning parent closes stdin."""
+        while self.serve_once():
+            pass
+
+    def _write_response(self, response: bytes) -> None:
+        try:
+            self._writer.write(response)
+            self._writer.flush()
+        except OSError as exc:
+            raise BridgeServerError("BRIDGE_UNAVAILABLE", "bridge output stream is unavailable") from exc
 
 
 def _secure_owned_directory(path: Path) -> None:
@@ -120,23 +129,8 @@ def _secure_owned_directory(path: Path) -> None:
             ) from exc
 
 
-def _probe_existing_socket(path: Path) -> bool:
-    """Return True when an existing Unix socket is accepting connections."""
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(SOCKET_PROBE_TIMEOUT_SECONDS)
-    try:
-        probe.connect(str(path))
-        return True
-    except OSError as exc:
-        if exc.errno in {errno.ECONNREFUSED, errno.ENOENT}:
-            return False
-        raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "existing socket cannot be verified") from exc
-    finally:
-        probe.close()
-
-
 def _cleanup_owned_runtime(runtime_dir: Path, driver_socket: Path) -> None:
-    """Remove only the expected owned child artifact and then the empty directory."""
+    """Remove only the expected owned child socket and then the empty directory."""
     try:
         runtime_entry = runtime_dir.lstat()
     except FileNotFoundError:
@@ -151,210 +145,14 @@ def _cleanup_owned_runtime(runtime_dir: Path, driver_socket: Path) -> None:
         socket_entry = driver_socket.lstat()
     except FileNotFoundError:
         socket_entry = None
-    if socket_entry is not None and socket_entry.st_uid == os.geteuid():
+    if (
+        socket_entry is not None
+        and stat.S_ISSOCK(socket_entry.st_mode)
+        and socket_entry.st_uid == os.geteuid()
+    ):
         driver_socket.unlink(missing_ok=True)
     with suppress(OSError):
         runtime_dir.rmdir()
-
-
-def _peer_pid(connection: socket.socket) -> int | None:
-    """Return the kernel-reported Unix-socket peer PID, failing closed."""
-    try:
-        if sys.platform.startswith("linux"):
-            peercred = getattr(socket, "SO_PEERCRED", None)
-            if peercred is None:
-                return None
-            raw = connection.getsockopt(
-                socket.SOL_SOCKET,
-                peercred,
-                struct.calcsize("3i"),
-            )
-            pid, uid, _gid = struct.unpack("3i", raw)
-            if uid != os.geteuid():
-                return None
-            return pid if pid > 0 else None
-
-        if sys.platform == "darwin":
-            raw = connection.getsockopt(
-                DARWIN_SOL_LOCAL,
-                DARWIN_LOCAL_PEERPID,
-                struct.calcsize("i"),
-            )
-            (pid,) = struct.unpack("i", raw)
-            return pid if pid > 0 else None
-    except (OSError, struct.error, TypeError, ValueError):
-        return None
-    return None
-
-
-class BridgeServer:
-    """Private parent-PID-authenticated Unix-socket bridge server."""
-
-    def __init__(
-        self,
-        socket_path: Path,
-        capability: str,
-        controller: DispatchController,
-        *,
-        allowed_pid: int,
-    ) -> None:
-        if not socket_path.is_absolute():
-            raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bridge socket path must be absolute")
-        if CAPABILITY_PATTERN.fullmatch(capability) is None:
-            raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge capability")
-        if not isinstance(allowed_pid, int) or isinstance(allowed_pid, bool) or allowed_pid <= 0:
-            raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge peer policy")
-        self.socket_path = socket_path
-        self._controller = controller
-        self._allowed_pid = allowed_pid
-        self._listener: socket.socket | None = None
-        self._bound_identity: tuple[int, int] | None = None
-
-    def bind(self) -> None:
-        """Bind after proving that no unsafe or live object occupies the path."""
-        if self._listener is not None:
-            raise BridgeServerError("BRIDGE_SOCKET_IN_USE", "bridge server is already bound")
-        _secure_owned_directory(self.socket_path.parent)
-        self._prepare_socket_path()
-
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            listener.bind(str(self.socket_path))
-            entry = self.socket_path.lstat()
-            self._bound_identity = (entry.st_dev, entry.st_ino)
-            os.chmod(self.socket_path, 0o600)
-            entry = self.socket_path.lstat()
-            if (
-                not stat.S_ISSOCK(entry.st_mode)
-                or entry.st_uid != os.geteuid()
-                or stat.S_IMODE(entry.st_mode) != 0o600
-                or (entry.st_dev, entry.st_ino) != self._bound_identity
-            ):
-                raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bound bridge socket is unsafe")
-            listener.listen(16)
-        except BaseException:
-            listener.close()
-            self._unlink_bound_socket_if_owned()
-            self._bound_identity = None
-            raise
-        self._listener = listener
-
-    def _prepare_socket_path(self) -> None:
-        try:
-            entry = self.socket_path.lstat()
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bridge socket path is unreadable") from exc
-        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISSOCK(entry.st_mode):
-            raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bridge socket path is not a Unix socket")
-        if entry.st_uid != os.geteuid():
-            raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bridge socket owner is unsafe")
-        if _probe_existing_socket(self.socket_path):
-            raise BridgeServerError("BRIDGE_SOCKET_IN_USE", "bridge socket is already in use")
-
-        try:
-            current = self.socket_path.lstat()
-        except FileNotFoundError:
-            return
-        if (
-            not stat.S_ISSOCK(current.st_mode)
-            or current.st_uid != os.geteuid()
-            or (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino)
-        ):
-            raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bridge socket changed during validation")
-        self.socket_path.unlink()
-
-    def serve_once(self) -> None:
-        """Accept one connection and process at most one bounded request."""
-        listener = self._listener
-        if listener is None:
-            raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bridge server is not bound")
-        connection, _ = listener.accept()
-        try:
-            self._handle_connection(connection)
-        finally:
-            connection.close()
-
-    def _listener_closed(self) -> bool:
-        """Read mutable listener state without static narrowing across an accept call."""
-        return self._listener is None
-
-    def serve_forever(self) -> None:
-        """Serve sequentially until the listener is closed or the process exits."""
-        while not self._listener_closed():
-            try:
-                self.serve_once()
-            except OSError:
-                if self._listener_closed():
-                    return
-                raise
-
-    def _handle_connection(self, connection: socket.socket) -> None:
-        try:
-            if _peer_pid(connection) != self._allowed_pid:
-                response = encode_error("POLICY_DENIED", "bridge peer rejected")
-            else:
-                raw = self._read_one_request(connection)
-                request = parse_request_line(raw)
-                result = self._controller.dispatch(request.method, request.params)
-                response = encode_success(result)
-        except BridgeProtocolError as exc:
-            response = encode_error(exc.code, str(exc))
-        except BridgeHostError as exc:
-            response = encode_error(exc.code, str(exc))
-        except BridgeServerError as exc:
-            response = encode_error(exc.code, str(exc))
-        except (OSError, RuntimeError, TypeError, ValueError):
-            response = encode_error("DRIVER_UNAVAILABLE", "computer-use bridge request failed")
-        if len(response) > MAX_RESPONSE_BYTES:
-            response = encode_error("DRIVER_UNAVAILABLE", "computer-use bridge response exceeded limit")
-        connection.sendall(response)
-
-    @staticmethod
-    def _read_one_request(connection: socket.socket) -> bytes:
-        buffer = bytearray()
-        while True:
-            remaining = MAX_REQUEST_BYTES + 1 - len(buffer)
-            if remaining <= 0:
-                raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "bridge request exceeds limit")
-            chunk = connection.recv(min(4096, remaining))
-            if not chunk:
-                raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "bridge request ended early")
-            buffer.extend(chunk)
-            newline = buffer.find(b"\n")
-            if newline >= 0:
-                if newline != len(buffer) - 1:
-                    raise BridgeServerError(
-                        "BRIDGE_PROTOCOL_INVALID", "bridge connection must contain one request"
-                    )
-                if len(buffer) > MAX_REQUEST_BYTES:
-                    raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "bridge request exceeds limit")
-                return bytes(buffer)
-
-    def close(self) -> None:
-        """Stop accepting and remove only the socket this instance actually bound."""
-        listener = self._listener
-        self._listener = None
-        if listener is not None:
-            listener.close()
-        self._unlink_bound_socket_if_owned()
-        self._bound_identity = None
-
-    def _unlink_bound_socket_if_owned(self) -> None:
-        identity = self._bound_identity
-        if identity is None:
-            return
-        try:
-            entry = self.socket_path.lstat()
-        except (FileNotFoundError, OSError):
-            return
-        if (
-            stat.S_ISSOCK(entry.st_mode)
-            and entry.st_uid == os.geteuid()
-            and (entry.st_dev, entry.st_ino) == identity
-        ):
-            self.socket_path.unlink(missing_ok=True)
 
 
 @dataclass
@@ -377,6 +175,8 @@ class OwnedDriver:
     ) -> OwnedDriver:
         if not driver_path.is_absolute():
             raise BridgeServerError("DRIVER_UNAVAILABLE", "driver path must be absolute")
+        if not runtime_parent.is_absolute():
+            raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "runtime path must be absolute")
         try:
             driver_entry = driver_path.stat()
         except OSError as exc:
