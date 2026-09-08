@@ -36,6 +36,11 @@ PreferenceWriteOutcome = Literal[
     "superseded",
     "rejected_sensitive",
 ]
+SensitiveMaterialReason = Literal[
+    "none",
+    "named_credential_value",
+    "opaque_credential_shape",
+]
 
 _SOURCE_STRENGTH: Final[dict[PreferenceSource, int]] = {
     "repeated_behavior": 1,
@@ -43,14 +48,125 @@ _SOURCE_STRENGTH: Final[dict[PreferenceSource, int]] = {
     "explicit": 3,
 }
 
-_SENSITIVE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
-    re.compile(
-        r"(?i)\b(?:password|passwd|api[ _-]?key|token|secret)\s*[:=]\s*\S+"
+# Named credential labels need semantic handling rather than a token-complexity
+# regex. Alphabetic values are legitimate secrets, while punctuation after an
+# ordinary word is not evidence of a credential. Spaces/tabs inside ``api key``
+# are intentionally bounded so this never becomes an unbounded cross-clause
+# pattern.
+_CREDENTIAL_LABEL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"(?P<label>password|passwd|api(?:[ \t]{1,3}|[_-])key|token|secret)"
+    r"(?![A-Za-z0-9_])"
+)
+_DELIMITED_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[ \t]*[:=][ \t]*(?P<value>\S+)"
+)
+_WHITESPACE_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[ \t]+(?P<value>\S+)"
+)
+
+# Positive prose evidence. These words describe the credential *concept* rather
+# than supplying its value. Anything else after a whitespace-delimited label is
+# deliberately fail-closed: preference loss is visible and recoverable; secret
+# persistence is not. Trailing punctuation is stripped only for lexical
+# comparison and is never treated as credential complexity.
+_SAFE_CREDENTIAL_PROSE_FOLLOWERS: Final[dict[str, frozenset[str]]] = {
+    "password": frozenset(
+        {
+            "manager",
+            "managers",
+            "management",
+            "workflow",
+            "policy",
+            "policies",
+            "hygiene",
+            "rotation",
+            "rotation-policy",
+            "rules",
+            "requirements",
+            "in",
+            "is",
+            "should",
+            "must",
+        }
     ),
-    re.compile(
-        r"(?i)\b(?:password|passwd|api[ _-]?key|token|secret)\s+"
-        r"(?=\S{6,}(?:\s|$))(?=\S*(?:\d|[^A-Za-z0-9\s]))\S+"
+    "passwd": frozenset(
+        {
+            "manager",
+            "managers",
+            "management",
+            "workflow",
+            "policy",
+            "policies",
+            "hygiene",
+            "rotation",
+            "rotation-policy",
+            "rules",
+            "requirements",
+            "in",
+            "is",
+            "should",
+            "must",
+        }
     ),
+    "api key": frozenset(
+        {
+            "manager",
+            "managers",
+            "management",
+            "regularly",
+            "rotation",
+            "rotation-policy",
+            "policy",
+            "policies",
+            "lifecycle",
+            "hygiene",
+            "is",
+            "should",
+            "must",
+        }
+    ),
+    "token": frozenset(
+        {
+            "budget",
+            "budget-optimized",
+            "efficient",
+            "efficiency",
+            "usage",
+            "limit",
+            "limits",
+            "window",
+            "windows",
+            "count",
+            "counts",
+            "is",
+            "should",
+            "must",
+        }
+    ),
+    "secret": frozenset(
+        {
+            "rotation",
+            "rotation-policy",
+            "management",
+            "manager",
+            "policy",
+            "policies",
+            "storage",
+            "handling",
+            "scanner",
+            "scanning",
+            "is",
+            "should",
+            "must",
+        }
+    ),
+}
+
+# Provider-specific opaque shapes remain pattern-based because their shape is
+# itself the evidence; unlike prose punctuation, these prefixes/structures are
+# credential formats by definition.
+_OPAQUE_SENSITIVE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+\S+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
@@ -134,6 +250,15 @@ def make_preference_id(domain: PreferenceDomain, key: str, value: str) -> str:
 
 
 @dataclass(frozen=True)
+class SensitiveMaterialClassification:
+    """Secret-screening verdict that deliberately never retains the candidate value."""
+
+    sensitive: bool
+    reason: SensitiveMaterialReason
+    label: str | None = None
+
+
+@dataclass(frozen=True)
 class PreferenceEvidence:
     """One observation offered to the preference reconciler."""
 
@@ -163,9 +288,58 @@ class PreferenceWrite:
     safe_summary: str
 
 
+def _canonical_credential_label(raw: str) -> str:
+    """Normalize accepted label spelling without retaining any adjacent value."""
+    return " ".join(raw.casefold().replace("_", " ").replace("-", " ").split())
+
+
+def _prose_follower(raw: str) -> str:
+    """Normalize one following prose token; punctuation has no security meaning."""
+    return raw.strip(".,;:!?()[]{}\"'").casefold()
+
+
+def classify_sensitive_preference_material(text: str) -> SensitiveMaterialClassification:
+    """Classify credential-like text at the single preference-memory boundary.
+
+    Named labels are handled structurally. ``:`` / ``=`` assignments are
+    unambiguously sensitive. Whitespace assignments accept alphabetic values
+    and fail closed unless the following word is positive evidence that the
+    phrase is ordinary credential-related prose. Opaque provider credentials
+    are then checked by their format-specific patterns.
+    """
+    for match in _CREDENTIAL_LABEL_RE.finditer(text):
+        label = _canonical_credential_label(match.group("label"))
+        remainder = text[match.end() :]
+        if _DELIMITED_CREDENTIAL_VALUE_RE.match(remainder) is not None:
+            return SensitiveMaterialClassification(
+                sensitive=True,
+                reason="named_credential_value",
+                label=label,
+            )
+
+        whitespace_value = _WHITESPACE_CREDENTIAL_VALUE_RE.match(remainder)
+        if whitespace_value is None:
+            continue
+        follower = _prose_follower(whitespace_value.group("value"))
+        if follower and follower in _SAFE_CREDENTIAL_PROSE_FOLLOWERS[label]:
+            continue
+        return SensitiveMaterialClassification(
+            sensitive=True,
+            reason="named_credential_value",
+            label=label,
+        )
+
+    if any(pattern.search(text) is not None for pattern in _OPAQUE_SENSITIVE_PATTERNS):
+        return SensitiveMaterialClassification(
+            sensitive=True,
+            reason="opaque_credential_shape",
+        )
+    return SensitiveMaterialClassification(sensitive=False, reason="none")
+
+
 def contains_sensitive_preference_material(text: str) -> bool:
-    """Whether text resembles credentials that preference memory must never keep."""
-    return any(pattern.search(text) is not None for pattern in _SENSITIVE_PATTERNS)
+    """Compatibility predicate backed by the typed secret classifier."""
+    return classify_sensitive_preference_material(text).sensitive
 
 
 def _initial_confidence(source: PreferenceSource) -> float:
@@ -266,15 +440,13 @@ def apply_preference_evidence(
     normalized_key = _normalize_identity_text(evidence.key)
     normalized_value = _normalize_identity_text(evidence.value)
     sensitive_text = f"{normalized_key}: {normalized_value}"
-    if contains_sensitive_preference_material(sensitive_text):
+    classification = classify_sensitive_preference_material(sensitive_text)
+    if classification.sensitive:
         return PreferenceWrite(
             outcome="rejected_sensitive",
             record=None,
             replaced_id=None,
-            safe_summary=(
-                "rejected sensitive preference evidence for "
-                f"{evidence.domain}/{normalized_key}"
-            ),
+            safe_summary=f"rejected sensitive preference evidence for {evidence.domain}",
         )
 
     preference_id = make_preference_id(
@@ -460,7 +632,7 @@ def extract_explicit_preference_evidence(
         value = _normalize_identity_text(structured.group(2))
         if not key or not value:
             continue
-        if contains_sensitive_preference_material(f"{key}: {value}"):
+        if classify_sensitive_preference_material(f"{key}: {value}").sensitive:
             continue
         bounded = value[:MAX_EXPLICIT_PREFERENCE_CHARS].rstrip()
         identity = (key, bounded)
@@ -484,7 +656,7 @@ def extract_explicit_preference_evidence(
             continue
         if not _natural_clause_is_durable(clause):
             continue
-        if contains_sensitive_preference_material(clause):
+        if classify_sensitive_preference_material(clause).sensitive:
             continue
         bounded = clause[:MAX_EXPLICIT_PREFERENCE_CHARS].rstrip()
         key = _natural_preference_key(bounded)
