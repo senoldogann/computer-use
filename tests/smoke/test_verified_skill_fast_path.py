@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from computeruse.skills.fast_path import FastPathProvider, resolve_ax_target
+
 from computeruse.orchestrator.loop import WorkingState
 from computeruse.orchestrator.schemas import (
     ActivateApp,
@@ -14,7 +16,6 @@ from computeruse.orchestrator.schemas import (
     Wait,
 )
 from computeruse.skills.distiller import Trajectory, distill
-from computeruse.skills.fast_path import FastPathProvider, resolve_ax_target
 from computeruse.skills.registry import (
     SkillRegistry,
     environment_fingerprint,
