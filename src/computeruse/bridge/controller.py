@@ -267,8 +267,6 @@ class BridgeController:
         pid = self._app_pid(app) if app is not None else None
         try:
             capture = self._driver.capture(display_id=0, window_pid=pid)
-        except TypeError:
-            capture = self._driver.capture()
         except Exception as exc:
             raise BridgeHostError("DRIVER_UNAVAILABLE", "screen capture failed") from exc
         if not isinstance(capture, ScreenCapture) or not capture.data:
