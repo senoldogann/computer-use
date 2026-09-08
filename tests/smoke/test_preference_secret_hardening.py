@@ -54,13 +54,12 @@ def test_ordinary_security_language_is_not_treated_as_a_secret(text: str) -> Non
 
 
 def test_classifier_exposes_typed_secret_safe_decision() -> None:
-    classify = getattr(preferences_module, "classify_sensitive_preference_material")
+    module_symbols = vars(preferences_module)
+    classify = module_symbols["classify_sensitive_preference_material"]
+    classification_type = module_symbols["SensitiveMaterialClassification"]
     classification = classify("password swordfish")
 
-    assert isinstance(
-        classification,
-        preferences_module.SensitiveMaterialClassification,
-    )
+    assert isinstance(classification, classification_type)
     assert classification.sensitive is True
     assert classification.reason == "named_credential_value"
     assert classification.label == "password"
