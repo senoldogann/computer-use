@@ -59,13 +59,13 @@ _CREDENTIAL_LABEL_RE: Final[re.Pattern[str]] = re.compile(
     r"(?![A-Za-z0-9_])"
 )
 _DELIMITED_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
-    r"^[ \t]*[:=][ \t]*(?P<value>\S+)"
+    r"[ \t]*[:=][ \t]*(?P<value>\S+)"
 )
 _WHITESPACE_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
     r"^[ \t]+(?P<value>\S+)"
 )
 _COPULAR_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?i)^[ \t]+(?:is|should|must)(?:[ \t]+|[ \t]*[:=][ \t]*)(?P<value>\S+)"
+    r"(?i)[ \t]+(?:is|should|must)(?:[ \t]+|[ \t]*[:=][ \t]*)(?P<value>\S+)"
 )
 
 # Positive prose evidence. These words describe the credential *concept* rather
@@ -316,10 +316,10 @@ def classify_sensitive_preference_material(text: str) -> SensitiveMaterialClassi
         trailing = remainder[whitespace_value.end("value") :]
         introduces_assignment = (
             raw_follower.endswith((":", "=")) and bool(trailing.strip())
-        ) or _DELIMITED_CREDENTIAL_VALUE_RE.match(trailing) is not None
+        ) or _DELIMITED_CREDENTIAL_VALUE_RE.search(trailing) is not None
         introduces_assignment = (
             introduces_assignment
-            or _COPULAR_CREDENTIAL_VALUE_RE.match(trailing) is not None
+            or _COPULAR_CREDENTIAL_VALUE_RE.search(trailing) is not None
         )
         if (
             follower
