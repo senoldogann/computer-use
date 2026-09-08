@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from computeruse.bridge.controller import BridgeController, BridgeHostError
+from computeruse.bridge.owned_client import OwnedActuationClient
 from computeruse.bridge.protocol import (
     MAX_REQUEST_BYTES,
     BridgeProtocolError,
@@ -216,7 +217,11 @@ class OwnedDriver:
                     "DRIVER_UNAVAILABLE", "actuation driver did not create its socket"
                 )
 
-            client = ActuationClient(str(driver_socket), connect_retries=3)
+            client = OwnedActuationClient(
+                str(driver_socket),
+                connect_retries=3,
+                expected_server_pid=process.pid,
+            )
             client.connect()
             health = client.health()
             if health.get("trusted") is not True:
