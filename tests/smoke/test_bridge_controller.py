@@ -23,6 +23,7 @@ class FakeDriver:
         self.sent: list[object] = []
         self.releases = 0
         self.tripped = False
+        self.trip_after_sends: int | None = None
         self.fail_send = False
         self.root = root or AXElement(
             role="Application",
@@ -90,6 +91,8 @@ class FakeDriver:
         if self.fail_send:
             raise RuntimeError("simulated actuation failure")
         self.sent.append(action)
+        if self.trip_after_sends is not None and len(self.sent) >= self.trip_after_sends:
+            self.tripped = True
 
 
 @pytest.fixture
@@ -148,6 +151,21 @@ def test_hotkey_takeover_blocks_mutation_before_action(driver: FakeDriver) -> No
 
     assert exc.value.code == "KILL_SWITCH_TRIPPED"
     assert driver.sent == []
+
+
+def test_hotkey_takeover_between_move_and_click_blocks_second_action(
+    driver: FakeDriver,
+) -> None:
+    driver.trip_after_sends = 1
+    controller = BridgeController(driver)
+
+    with pytest.raises(BridgeHostError) as exc:
+        controller.dispatch("click", {"app": "TextEdit", "query": "Save"})
+
+    assert exc.value.code == "KILL_SWITCH_TRIPPED"
+    assert len(driver.sent) == 1
+    assert isinstance(driver.sent[0], MouseMove)
+    assert driver.releases == 1
 
 
 def test_click_resolves_unique_semantic_target_and_moves_then_clicks(driver: FakeDriver) -> None:
