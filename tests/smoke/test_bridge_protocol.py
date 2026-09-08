@@ -12,16 +12,13 @@ from computeruse.bridge.protocol import (
     parse_request_line,
 )
 
-CAPABILITY = "a" * 64
 
-
-def test_parse_request_line_accepts_one_versioned_authenticated_frame() -> None:
+def test_parse_request_line_accepts_one_versioned_secret_free_frame() -> None:
     request = parse_request_line(
         (
             json.dumps(
                 {
                     "version": 1,
-                    "capability": CAPABILITY,
                     "method": "health",
                     "params": {},
                 }
@@ -31,19 +28,38 @@ def test_parse_request_line_accepts_one_versioned_authenticated_frame() -> None:
     )
 
     assert request.version == 1
-    assert request.capability == CAPABILITY
+    assert not hasattr(request, "capability")
     assert request.method == "health"
     assert request.params == {}
+
+
+def test_parse_request_line_rejects_capability_bearing_frame() -> None:
+    with pytest.raises(BridgeProtocolError) as exc:
+        parse_request_line(
+            (
+                json.dumps(
+                    {
+                        "version": 1,
+                        "capability": "a" * 64,
+                        "method": "health",
+                        "params": {},
+                    }
+                )
+                + "\n"
+            ).encode()
+        )
+
+    assert exc.value.code == "BRIDGE_PROTOCOL_INVALID"
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         {},
-        {"version": 2, "capability": CAPABILITY, "method": "health", "params": {}},
-        {"version": 1, "capability": "short", "method": "health", "params": {}},
-        {"version": 1, "capability": CAPABILITY, "method": "", "params": {}},
-        {"version": 1, "capability": CAPABILITY, "method": "health", "params": []},
+        {"version": 2, "method": "health", "params": {}},
+        {"version": 1, "method": "", "params": {}},
+        {"version": 1, "method": "health", "params": []},
+        {"version": 1, "method": "health", "params": {}, "extra": True},
     ],
 )
 def test_parse_request_line_rejects_invalid_contract(payload: object) -> None:
