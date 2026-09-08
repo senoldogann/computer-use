@@ -54,11 +54,7 @@ class OwnedActuationClient(ActuationClient):
         recover: Callable[[], None] | None = None,
         recover_unresponsive: Callable[[], None] | None = None,
     ) -> None:
-        if (
-            not isinstance(expected_server_pid, int)
-            or isinstance(expected_server_pid, bool)
-            or expected_server_pid <= 0
-        ):
+        if isinstance(expected_server_pid, bool) or expected_server_pid <= 0:
             raise ValueError("expected_server_pid must be a positive integer")
         super().__init__(
             socket_path,
