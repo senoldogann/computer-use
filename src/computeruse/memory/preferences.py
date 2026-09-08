@@ -85,9 +85,6 @@ _SAFE_CREDENTIAL_PROSE_FOLLOWERS: Final[dict[str, frozenset[str]]] = {
             "rules",
             "requirements",
             "in",
-            "is",
-            "should",
-            "must",
         }
     ),
     "passwd": frozenset(
@@ -104,9 +101,6 @@ _SAFE_CREDENTIAL_PROSE_FOLLOWERS: Final[dict[str, frozenset[str]]] = {
             "rules",
             "requirements",
             "in",
-            "is",
-            "should",
-            "must",
         }
     ),
     "api key": frozenset(
@@ -121,9 +115,6 @@ _SAFE_CREDENTIAL_PROSE_FOLLOWERS: Final[dict[str, frozenset[str]]] = {
             "policies",
             "lifecycle",
             "hygiene",
-            "is",
-            "should",
-            "must",
         }
     ),
     "token": frozenset(
@@ -139,9 +130,6 @@ _SAFE_CREDENTIAL_PROSE_FOLLOWERS: Final[dict[str, frozenset[str]]] = {
             "windows",
             "count",
             "counts",
-            "is",
-            "should",
-            "must",
         }
     ),
     "secret": frozenset(
@@ -156,9 +144,6 @@ _SAFE_CREDENTIAL_PROSE_FOLLOWERS: Final[dict[str, frozenset[str]]] = {
             "handling",
             "scanner",
             "scanning",
-            "is",
-            "should",
-            "must",
         }
     ),
 }
