@@ -224,7 +224,10 @@ class BridgeController:
         if self._matches_app(app, self._focused()):
             return
         try:
+            self._kill_gate()
             self._driver.activate_app(app)
+        except BridgeHostError:
+            raise
         except Exception as exc:
             raise BridgeHostError("FOCUS_NOT_ACQUIRED", "target application could not be activated") from exc
         for _ in range(FOCUS_SETTLE_POLLS):
@@ -253,6 +256,7 @@ class BridgeController:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise BridgeHostError("POLICY_DENIED", "only http and https URLs are allowed")
         try:
+            self._kill_gate()
             self._url_opener(url, app)
         except BridgeHostError:
             raise
