@@ -3,9 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-
 from computeruse.bridge.controller import BridgeController, BridgeHostError
-from computeruse.orchestrator.schemas import MouseClick, MouseMove, PressHotkey, TypeText
+
+from computeruse.orchestrator.schemas import (
+    MouseClick,
+    MouseMove,
+    PressHotkey,
+    TypeText,
+)
 from computeruse.vision.ax import AXElement
 from computeruse.vision.capture import ScreenCapture
 from computeruse.vision.focus import FocusedWindow
