@@ -45,7 +45,7 @@ _SOURCE_STRENGTH: Final[dict[PreferenceSource, int]] = {
 
 _SENSITIVE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(
-        r"(?i)\b(?:password|passwd|api[_-]?key|token|secret)\s*[:=]\s*\S+"
+        r"(?i)\b(?:password|passwd|api[ _-]?key|token|secret)\s*[:=]\s*\S+"
     ),
     re.compile(
         r"(?i)\b(?:password|passwd|api[ _-]?key|token|secret)\s+"
