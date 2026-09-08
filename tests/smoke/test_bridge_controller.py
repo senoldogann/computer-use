@@ -25,6 +25,7 @@ class FakeDriver:
         self.tripped = False
         self.trip_after_sends: int | None = None
         self.fail_send = False
+        self.fail_release = False
         self.root = root or AXElement(
             role="Application",
             children=(
@@ -86,6 +87,8 @@ class FakeDriver:
 
     def release_inputs(self) -> None:
         self.releases += 1
+        if self.fail_release:
+            raise RuntimeError("simulated release failure")
 
     def send(self, action: object) -> None:
         if self.fail_send:
@@ -198,6 +201,17 @@ def test_mutation_failure_releases_inputs(driver: FakeDriver) -> None:
     with pytest.raises(RuntimeError, match="simulated actuation failure"):
         controller.dispatch("press_hotkey", {"app": "TextEdit", "modifiers": ["command"], "key": "a"})
 
+    assert driver.releases == 1
+
+
+def test_explicit_release_reports_driver_failure(driver: FakeDriver) -> None:
+    driver.fail_release = True
+    controller = BridgeController(driver)
+
+    with pytest.raises(BridgeHostError) as exc:
+        controller.dispatch("release_inputs", {})
+
+    assert exc.value.code == "DRIVER_UNAVAILABLE"
     assert driver.releases == 1
 
 
