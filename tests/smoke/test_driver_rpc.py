@@ -41,12 +41,12 @@ def test_client_health() -> None:
         assert health.get("backend") == "simulated"
 
 
-def test_client_accepts_expected_driver_server_pid(driver) -> None:
+def test_owned_client_accepts_expected_driver_server_pid(driver) -> None:
     """Owned-driver clients accept only the exact Rust child they spawned."""
-    from computeruse.orchestrator.client import ActuationClient
+    from computeruse.bridge.owned_client import OwnedActuationClient
     from tests.smoke.conftest import SOCKET_PATH
 
-    with ActuationClient(
+    with OwnedActuationClient(
         str(SOCKET_PATH),
         connect_retries=1,
         expected_server_pid=driver.pid,
@@ -56,12 +56,13 @@ def test_client_accepts_expected_driver_server_pid(driver) -> None:
         assert health.get("backend") == "simulated"
 
 
-def test_client_refuses_wrong_driver_server_pid(driver) -> None:
+def test_owned_client_refuses_wrong_driver_server_pid(driver) -> None:
     """A same-user socket server with the wrong PID is never trusted."""
-    from computeruse.orchestrator.client import ActuationClient, DriverConnectionError
+    from computeruse.bridge.owned_client import OwnedActuationClient
+    from computeruse.orchestrator.client import DriverConnectionError
     from tests.smoke.conftest import SOCKET_PATH
 
-    client = ActuationClient(
+    client = OwnedActuationClient(
         str(SOCKET_PATH),
         connect_retries=1,
         retry_delay_seconds=0,
