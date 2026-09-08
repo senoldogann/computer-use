@@ -22,10 +22,9 @@ class BridgeProtocolError(ValueError):
 
 @dataclass(frozen=True)
 class BridgeRequest:
-    """One authenticated bridge request."""
+    """One secret-free bridge request."""
 
     version: int
-    capability: str
     method: str
     params: dict[str, object]
 
@@ -48,15 +47,14 @@ def parse_request_line(raw: bytes) -> BridgeRequest:
     if not all(isinstance(key, str) for key in payload):
         raise BridgeProtocolError("bridge request keys must be strings")
     typed_payload = cast(dict[str, object], payload)
+    if set(typed_payload) != {"version", "method", "params"}:
+        raise BridgeProtocolError("bridge request fields are invalid")
 
     version = typed_payload.get("version")
-    capability = typed_payload.get("capability")
     method = typed_payload.get("method")
     params_object = typed_payload.get("params")
     if version != PROTOCOL_VERSION:
         raise BridgeProtocolError("unsupported bridge protocol version")
-    if not isinstance(capability, str) or CAPABILITY_PATTERN.fullmatch(capability) is None:
-        raise BridgeProtocolError("bridge capability must be 64 lowercase hex characters")
     if not isinstance(method, str) or not method.strip():
         raise BridgeProtocolError("bridge method must be a non-empty string")
     if not isinstance(params_object, dict):
@@ -69,7 +67,6 @@ def parse_request_line(raw: bytes) -> BridgeRequest:
 
     return BridgeRequest(
         version=PROTOCOL_VERSION,
-        capability=capability,
         method=method,
         params=dict(typed_params),
     )
