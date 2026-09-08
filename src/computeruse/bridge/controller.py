@@ -432,9 +432,16 @@ class BridgeController:
     def _press_hotkey(self, params: dict[str, object]) -> object:
         app = self._required_string(params, "app")
         key = self._required_string(params, "key")
-        modifiers = params.get("modifiers", [])
-        if not isinstance(modifiers, list) or not all(isinstance(item, str) for item in modifiers):
+        modifiers_object = params.get("modifiers", [])
+        if not isinstance(modifiers_object, list):
             raise BridgeHostError("BRIDGE_PROTOCOL_INVALID", "modifiers must be a list of strings")
+        modifiers: list[str] = []
+        for item in cast(list[object], modifiers_object):
+            if not isinstance(item, str):
+                raise BridgeHostError(
+                    "BRIDGE_PROTOCOL_INVALID", "modifiers must be a list of strings"
+                )
+            modifiers.append(item)
         self._ensure_focus(app)
         self._credential_gate(app)
         try:
