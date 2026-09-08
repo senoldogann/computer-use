@@ -308,8 +308,17 @@ def classify_sensitive_preference_material(text: str) -> SensitiveMaterialClassi
         whitespace_value = _WHITESPACE_CREDENTIAL_VALUE_RE.match(remainder)
         if whitespace_value is None:
             continue
-        follower = _prose_follower(whitespace_value.group("value"))
-        if follower and follower in _SAFE_CREDENTIAL_PROSE_FOLLOWERS[label]:
+        raw_follower = whitespace_value.group("value")
+        follower = _prose_follower(raw_follower)
+        trailing = remainder[whitespace_value.end("value") :]
+        introduces_assignment = (
+            raw_follower.endswith((":", "=")) and bool(trailing.strip())
+        ) or _DELIMITED_CREDENTIAL_VALUE_RE.match(trailing) is not None
+        if (
+            follower
+            and follower in _SAFE_CREDENTIAL_PROSE_FOLLOWERS[label]
+            and not introduces_assignment
+        ):
             continue
         return SensitiveMaterialClassification(
             sensitive=True,
