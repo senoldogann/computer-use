@@ -386,7 +386,7 @@ class BridgeController:
                     "duration_ms": params.get("duration_ms", 250),
                 }
             )
-            self._driver.send(action)
+            self._send_guarded(action)
         except Exception:
             self._safe_release()
             raise
@@ -410,7 +410,7 @@ class BridgeController:
             raise BridgeHostError("BRIDGE_PROTOCOL_INVALID", "unsupported scroll direction")
         try:
             dx, dy = axes[direction]
-            self._driver.send(MouseScroll(type="mouse_scroll", dx=dx, dy=dy))
+            self._send_guarded(MouseScroll(type="mouse_scroll", dx=dx, dy=dy))
         except Exception:
             self._safe_release()
             raise
@@ -422,7 +422,7 @@ class BridgeController:
         self._ensure_focus(app)
         self._credential_gate(app)
         try:
-            self._driver.send(
+            self._send_guarded(
                 TypeText.model_validate(
                     {"type": "type_text", "text": text, "wpm": params.get("wpm", 120)}
                 )
@@ -448,7 +448,7 @@ class BridgeController:
         self._ensure_focus(app)
         self._credential_gate(app)
         try:
-            self._driver.send(
+            self._send_guarded(
                 PressHotkey.model_validate(
                     {"type": "press_hotkey", "modifiers": modifiers, "key": key}
                 )
