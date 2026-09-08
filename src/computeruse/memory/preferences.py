@@ -47,6 +47,10 @@ _SENSITIVE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(
         r"(?i)\b(?:password|passwd|api[_-]?key|token|secret)\s*[:=]\s*\S+"
     ),
+    re.compile(
+        r"(?i)\b(?:password|passwd|api[ _-]?key|token|secret)\s+"
+        r"(?=\S{6,}(?:\s|$))(?=\S*(?:\d|[^A-Za-z0-9\s]))\S+"
+    ),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+\S+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
