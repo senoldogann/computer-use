@@ -238,15 +238,17 @@ class BridgeServer:
         finally:
             connection.close()
 
+    def _listener_closed(self) -> bool:
+        """Read mutable listener state without static narrowing across an accept call."""
+        return self._listener is None
+
     def serve_forever(self) -> None:
         """Serve sequentially until the listener is closed or the process exits."""
-        while True:
-            if self._listener is None:
-                return
+        while not self._listener_closed():
             try:
                 self.serve_once()
             except OSError:
-                if self._listener is None:
+                if self._listener_closed():
                     return
                 raise
 
