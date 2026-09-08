@@ -17,13 +17,13 @@ import errno
 import hmac
 import json
 import os
-import shutil
 import signal
 import socket
 import stat
 import subprocess
 import tempfile
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -131,6 +131,28 @@ def _probe_existing_socket(path: Path) -> bool:
         probe.close()
 
 
+def _cleanup_owned_runtime(runtime_dir: Path, driver_socket: Path) -> None:
+    """Remove only the expected owned child artifact and then the empty directory."""
+    try:
+        runtime_entry = runtime_dir.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        stat.S_ISLNK(runtime_entry.st_mode)
+        or not stat.S_ISDIR(runtime_entry.st_mode)
+        or runtime_entry.st_uid != os.geteuid()
+    ):
+        return
+    try:
+        socket_entry = driver_socket.lstat()
+    except FileNotFoundError:
+        socket_entry = None
+    if socket_entry is not None and socket_entry.st_uid == os.geteuid():
+        driver_socket.unlink(missing_ok=True)
+    with suppress(OSError):
+        runtime_dir.rmdir()
+
+
 class BridgeServer:
     """Private authenticated Unix-socket server with one request per connection."""
 
@@ -154,28 +176,30 @@ class BridgeServer:
         """Bind after proving that no unsafe or live object occupies the path."""
         if self._listener is not None:
             raise BridgeServerError("BRIDGE_SOCKET_IN_USE", "bridge server is already bound")
-        parent = self.socket_path.parent
-        _secure_owned_directory(parent)
+        _secure_owned_directory(self.socket_path.parent)
         self._prepare_socket_path()
 
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             listener.bind(str(self.socket_path))
+            entry = self.socket_path.lstat()
+            self._bound_identity = (entry.st_dev, entry.st_ino)
             os.chmod(self.socket_path, 0o600)
             entry = self.socket_path.lstat()
             if (
                 not stat.S_ISSOCK(entry.st_mode)
                 or entry.st_uid != os.geteuid()
                 or stat.S_IMODE(entry.st_mode) != 0o600
+                or (entry.st_dev, entry.st_ino) != self._bound_identity
             ):
                 raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bound bridge socket is unsafe")
             listener.listen(16)
         except BaseException:
             listener.close()
             self._unlink_bound_socket_if_owned()
+            self._bound_identity = None
             raise
         self._listener = listener
-        self._bound_identity = (entry.st_dev, entry.st_ino)
 
     def _prepare_socket_path(self) -> None:
         try:
@@ -191,8 +215,6 @@ class BridgeServer:
         if _probe_existing_socket(self.socket_path):
             raise BridgeServerError("BRIDGE_SOCKET_IN_USE", "bridge socket is already in use")
 
-        # Re-check identity immediately before unlinking so a stale-socket probe
-        # cannot be turned into a replacement-file deletion race.
         try:
             current = self.socket_path.lstat()
         except FileNotFoundError:
@@ -241,7 +263,7 @@ class BridgeServer:
             response = encode_error(exc.code, str(exc))
         except BridgeServerError as exc:
             response = encode_error(exc.code, str(exc))
-        except Exception:
+        except (OSError, RuntimeError, TypeError, ValueError):
             response = encode_error("DRIVER_UNAVAILABLE", "computer-use bridge request failed")
         if len(response) > MAX_RESPONSE_BYTES:
             response = encode_error("DRIVER_UNAVAILABLE", "computer-use bridge response exceeded limit")
@@ -283,9 +305,7 @@ class BridgeServer:
             return
         try:
             entry = self.socket_path.lstat()
-        except FileNotFoundError:
-            return
-        except OSError:
+        except (FileNotFoundError, OSError):
             return
         if (
             stat.S_ISSOCK(entry.st_mode)
@@ -373,10 +393,8 @@ class OwnedDriver:
             )
         except BaseException:
             if client is not None:
-                try:
+                with suppress(OSError, RuntimeError):
                     client.release_inputs()
-                except Exception:
-                    pass
                 client.close()
             if process is not None and process.poll() is None:
                 process.terminate()
@@ -385,17 +403,13 @@ class OwnedDriver:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=DRIVER_STOP_TIMEOUT_SECONDS)
-            shutil.rmtree(runtime_dir, ignore_errors=True)
+            _cleanup_owned_runtime(runtime_dir, driver_socket)
             raise
 
     def close(self) -> None:
         """Fail-safe shutdown: release -> close client -> stop owned child -> cleanup."""
-        try:
+        with suppress(OSError, RuntimeError):
             self.client.release_inputs()
-        except Exception:
-            # Shutdown must continue so held inputs are not followed by an
-            # orphaned actuation process merely because the release RPC failed.
-            pass
         self.client.close()
         if self.process.poll() is None:
             self.process.terminate()
@@ -404,31 +418,7 @@ class OwnedDriver:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=DRIVER_STOP_TIMEOUT_SECONDS)
-        self._cleanup_runtime()
-
-    def _cleanup_runtime(self) -> None:
-        try:
-            runtime_entry = self.runtime_dir.lstat()
-        except FileNotFoundError:
-            return
-        if (
-            stat.S_ISLNK(runtime_entry.st_mode)
-            or not stat.S_ISDIR(runtime_entry.st_mode)
-            or runtime_entry.st_uid != os.geteuid()
-        ):
-            return
-        try:
-            socket_entry = self.driver_socket.lstat()
-        except FileNotFoundError:
-            socket_entry = None
-        if socket_entry is not None and socket_entry.st_uid == os.geteuid():
-            self.driver_socket.unlink(missing_ok=True)
-        try:
-            self.runtime_dir.rmdir()
-        except OSError:
-            # A runtime directory that contains anything unexpected is left in
-            # place rather than recursively deleting data the bridge did not create.
-            return
+        _cleanup_owned_runtime(self.runtime_dir, self.driver_socket)
 
 
 def install_termination_handler() -> None:
