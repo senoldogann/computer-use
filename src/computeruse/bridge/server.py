@@ -240,7 +240,9 @@ class BridgeServer:
 
     def serve_forever(self) -> None:
         """Serve sequentially until the listener is closed or the process exits."""
-        while self._listener is not None:
+        while True:
+            if self._listener is None:
+                return
             try:
                 self.serve_once()
             except OSError:
