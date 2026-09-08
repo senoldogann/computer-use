@@ -1,9 +1,9 @@
 """Deterministic host controller for authority-scoped computer use.
 
-This module deliberately contains no model/provider loop. It translates a small
-bridge vocabulary into the existing typed actuation and perception primitives
-while preserving the physical safety floor: fresh focus checks, credential
-refusal, emergency takeover polling, target validation, and input cleanup.
+No model/provider loop lives here. The controller translates a small bridge
+vocabulary into the existing typed actuation and perception primitives while
+preserving the physical safety floor: fresh focus checks, credential refusal,
+emergency takeover polling, target validation, and input cleanup.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -24,7 +25,7 @@ from computeruse.orchestrator.schemas import (
     PressHotkey,
     TypeText,
 )
-from computeruse.vision.ax import AXElement, INTERACTIVE_ROLES, asks_for_a_credential
+from computeruse.vision.ax import INTERACTIVE_ROLES, AXElement, asks_for_a_credential
 from computeruse.vision.capture import ScreenCapture, capture_to_base64_png
 from computeruse.vision.focus import FocusedWindow
 
@@ -49,7 +50,7 @@ def _default_url_opener(url: str, app: str | None) -> None:
     if app is not None:
         argv.extend(["-a", app])
     argv.append(url)
-    completed = subprocess.run(  # noqa: S603 - fixed executable, all caller data is argv
+    completed = subprocess.run(
         argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -153,12 +154,12 @@ class BridgeController:
             root = self._driver.ax_snapshot(pid=pid)
         except Exception as exc:
             raise BridgeHostError("DRIVER_UNAVAILABLE", "accessibility snapshot is unavailable") from exc
-        if not isinstance(root, AXElement):
-            try:
-                root = AXElement.model_validate(root)
-            except ValueError as exc:
-                raise BridgeHostError("DRIVER_UNAVAILABLE", "invalid accessibility snapshot") from exc
-        return root
+        if isinstance(root, AXElement):
+            return root
+        try:
+            return AXElement.model_validate(root)
+        except ValueError as exc:
+            raise BridgeHostError("DRIVER_UNAVAILABLE", "invalid accessibility snapshot") from exc
 
     @staticmethod
     def _interactive(root: AXElement) -> tuple[AXElement, ...]:
@@ -179,8 +180,8 @@ class BridgeController:
         if not isinstance(requested, int) or isinstance(requested, bool):
             raise BridgeHostError("BRIDGE_PROTOCOL_INVALID", "max_elements must be an integer")
         limit = min(max(requested, 1), MAX_ELEMENTS)
-        root = self._snapshot_root(app)
-        elements = self._interactive(root)[:limit]
+        all_elements = self._interactive(self._snapshot_root(app))
+        elements = all_elements[:limit]
         self._last_snapshots[app] = elements
         return {
             "app": app,
@@ -198,7 +199,7 @@ class BridgeController:
                 }
                 for index, element in enumerate(elements, start=1)
             ],
-            "truncated": len(self._interactive(root)) > limit,
+            "truncated": len(all_elements) > limit,
         }
 
     def _kill_gate(self) -> None:
@@ -228,8 +229,7 @@ class BridgeController:
         raise BridgeHostError("FOCUS_NOT_ACQUIRED", "target application did not acquire focus")
 
     def _credential_gate(self, app: str) -> None:
-        root = self._snapshot_root(app)
-        if asks_for_a_credential(root):
+        if asks_for_a_credential(self._snapshot_root(app)):
             raise BridgeHostError(
                 "CREDENTIAL_ENTRY_REFUSED",
                 "keyboard input is refused while a secure credential field is present",
@@ -243,8 +243,7 @@ class BridgeController:
     def _open_url(self, params: dict[str, object]) -> object:
         self._kill_gate()
         url = self._required_string(params, "url")
-        app_raw = params.get("app")
-        app = self._optional_string(app_raw, "app")
+        app = self._optional_string(params.get("app"), "app")
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise BridgeHostError("POLICY_DENIED", "only http and https URLs are allowed")
@@ -259,8 +258,7 @@ class BridgeController:
         return {"opened": True, "app": app}
 
     def _screenshot(self, params: dict[str, object]) -> object:
-        app_raw = params.get("app")
-        app = self._optional_string(app_raw, "app")
+        app = self._optional_string(params.get("app"), "app")
         pid = self._app_pid(app) if app is not None else None
         try:
             capture = self._driver.capture(display_id=0, window_pid=pid)
@@ -283,17 +281,22 @@ class BridgeController:
             "origin_y": capture.origin_y,
         }
 
-    def _resolve_target(self, app: str, params: dict[str, object]) -> tuple[int, int, str | None]:
+    def _resolve_target(
+        self, app: str, params: dict[str, object]
+    ) -> tuple[int, int, str | None]:
         raw_x = params.get("x")
         raw_y = params.get("y")
-        if isinstance(raw_x, int) and not isinstance(raw_x, bool) and isinstance(raw_y, int) and not isinstance(raw_y, bool):
+        if (
+            isinstance(raw_x, int)
+            and not isinstance(raw_x, bool)
+            and isinstance(raw_y, int)
+            and not isinstance(raw_y, bool)
+        ):
             if raw_x < 0 or raw_y < 0:
                 raise BridgeHostError("TARGET_NOT_FOUND", "coordinates must be non-negative")
             return raw_x, raw_y, None
 
-        index_raw = params.get("element_index")
-        if index_raw is None:
-            index_raw = params.get("elementIndex")
+        index_raw = params.get("element_index", params.get("elementIndex"))
         if isinstance(index_raw, int) and not isinstance(index_raw, bool):
             previous = self._last_snapshots.get(app)
             if previous is None or index_raw < 1 or index_raw > len(previous):
@@ -306,9 +309,10 @@ class BridgeController:
                 if element.role == expected.role and element.title == expected.title
             ]
             if len(matches) != 1:
-                raise BridgeHostError("TARGET_NOT_FOUND", "element index no longer identifies one target")
-            element = matches[0]
-            return self._centre(element)
+                raise BridgeHostError(
+                    "TARGET_NOT_FOUND", "element index no longer identifies one target"
+                )
+            return self._centre(matches[0])
 
         query = self._optional_string(params.get("query"), "query")
         role = self._optional_string(params.get("role"), "role")
@@ -341,11 +345,17 @@ class BridgeController:
         app = self._required_string(params, "app")
         self._ensure_focus(app)
         x, y, _label = self._resolve_target(app, params)
-        button = params.get("button", params.get("mouse_button", "left"))
-        count = params.get("click_count", 1)
         try:
             move = MouseMove(type="mouse_move", x=x, y=y)
-            click = MouseClick(type="mouse_click", x=x, y=y, button=button, click_count=count)
+            click = MouseClick.model_validate(
+                {
+                    "type": "mouse_click",
+                    "x": x,
+                    "y": y,
+                    "button": params.get("button", params.get("mouse_button", "left")),
+                    "click_count": params.get("click_count", 1),
+                }
+            )
             self._driver.send(move)
             self._driver.send(click)
         except Exception:
@@ -362,15 +372,16 @@ class BridgeController:
             raise BridgeHostError("BRIDGE_PROTOCOL_INVALID", "drag requires start and end targets")
         start = self._resolve_target(app, cast(dict[str, object], start_raw))
         end = self._resolve_target(app, cast(dict[str, object], end_raw))
-        duration = params.get("duration_ms", 250)
         try:
-            action = MouseDrag(
-                type="mouse_drag",
-                start_x=start[0],
-                start_y=start[1],
-                end_x=end[0],
-                end_y=end[1],
-                duration_ms=duration,
+            action = MouseDrag.model_validate(
+                {
+                    "type": "mouse_drag",
+                    "start_x": start[0],
+                    "start_y": start[1],
+                    "end_x": end[0],
+                    "end_y": end[1],
+                    "duration_ms": params.get("duration_ms", 250),
+                }
             )
             self._driver.send(action)
         except Exception:
@@ -382,10 +393,10 @@ class BridgeController:
         app = self._required_string(params, "app")
         self._ensure_focus(app)
         direction = self._optional_string(params.get("direction"), "direction") or "down"
-        pages_raw = params.get("pages", 1)
-        if not isinstance(pages_raw, int) or isinstance(pages_raw, bool) or not 1 <= pages_raw <= 20:
+        pages = params.get("pages", 1)
+        if not isinstance(pages, int) or isinstance(pages, bool) or not 1 <= pages <= 20:
             raise BridgeHostError("BRIDGE_PROTOCOL_INVALID", "pages must be an integer from 1 to 20")
-        unit = 120 * pages_raw
+        unit = 120 * pages
         axes = {
             "down": (0, unit),
             "up": (0, -unit),
@@ -405,11 +416,14 @@ class BridgeController:
     def _type_text(self, params: dict[str, object]) -> object:
         app = self._required_string(params, "app")
         text = self._required_string(params, "text", allow_empty=True)
-        wpm = params.get("wpm", 120)
         self._ensure_focus(app)
         self._credential_gate(app)
         try:
-            self._driver.send(TypeText(type="type_text", text=text, wpm=wpm))
+            self._driver.send(
+                TypeText.model_validate(
+                    {"type": "type_text", "text": text, "wpm": params.get("wpm", 120)}
+                )
+            )
         except Exception:
             self._safe_release()
             raise
@@ -418,17 +432,15 @@ class BridgeController:
     def _press_hotkey(self, params: dict[str, object]) -> object:
         app = self._required_string(params, "app")
         key = self._required_string(params, "key")
-        modifiers_raw = params.get("modifiers", [])
-        if not isinstance(modifiers_raw, list) or not all(isinstance(item, str) for item in modifiers_raw):
+        modifiers = params.get("modifiers", [])
+        if not isinstance(modifiers, list) or not all(isinstance(item, str) for item in modifiers):
             raise BridgeHostError("BRIDGE_PROTOCOL_INVALID", "modifiers must be a list of strings")
         self._ensure_focus(app)
         self._credential_gate(app)
         try:
             self._driver.send(
-                PressHotkey(
-                    type="press_hotkey",
-                    modifiers=cast(list[str], modifiers_raw),
-                    key=key,
+                PressHotkey.model_validate(
+                    {"type": "press_hotkey", "modifiers": modifiers, "key": key}
                 )
             )
         except Exception:
@@ -441,10 +453,8 @@ class BridgeController:
         return {"released": True}
 
     def _safe_release(self) -> None:
-        try:
+        with suppress(Exception):
             self._driver.release_inputs()
-        except Exception:
-            pass
 
     @staticmethod
     def _required_string(
