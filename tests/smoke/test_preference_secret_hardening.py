@@ -18,6 +18,8 @@ from computeruse.memory.preferences import (
         "password hunter2",
         "passwd p@ssw0rd",
         "api key abcdef0123456789",
+        "api key: abcdef0123456789",
+        "api key = abcdef0123456789",
         "token abcdef0123456789",
         "secret 3f8a9c71d204",
     ),
