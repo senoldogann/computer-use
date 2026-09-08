@@ -66,7 +66,7 @@ _WHITESPACE_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
 )
 _COPULAR_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
     r"(?i)[ \t]+(?:"
-    r"is|was|were|should|must|"
+    r"is|was|were|been|should|must|"
     r"(?:will|would|can|could|may|might|shall)[ \t]+be"
     r")(?:[ \t]+|[ \t]*[:=][ \t]*)(?P<value>\S+)"
 )
