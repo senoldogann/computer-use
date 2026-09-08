@@ -9,7 +9,8 @@ full body (loaded per skill id when the orchestrator decides a skill applies).
 
 from __future__ import annotations
 
-from typing import Final, Literal
+from datetime import datetime
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -55,6 +56,9 @@ SKILL_ID_PATTERN: Final[str] = r"^[a-z0-9][a-z0-9._-]*$"
 #: hard budget rather than a formatting preference.
 SUMMARY_DESCRIPTION_MAX: Final[int] = 200
 
+#: Stored diagnostics are useful for ranking/review, not as an unbounded log.
+SKILL_DIAGNOSTIC_MAX: Final[int] = 240
+
 
 def condense_description(description: str) -> str:
     """Fit a description into the Stage-1 budget (pure).
@@ -90,6 +94,43 @@ def condense_description(description: str) -> str:
     return head.rstrip() + "\u2026"
 
 
+FastPathModifier = Literal["command", "shift", "alt", "control"]
+
+
+class FastPathAxPress(BaseModel):
+    """Press one semantic AX identity resolved fresh from the current frame."""
+
+    type: Literal["ax_press"]
+    target: str = Field(min_length=1, max_length=240)
+
+
+class FastPathHotkey(BaseModel):
+    """Coordinate-free keyboard shortcut safe to route through OODA."""
+
+    type: Literal["press_hotkey"]
+    modifiers: tuple[FastPathModifier, ...] = ()
+    key: str = Field(min_length=1, max_length=40)
+
+
+class FastPathActivateApp(BaseModel):
+    """Bring a named application forward through the normal action contract."""
+
+    type: Literal["activate_app"]
+    app: str = Field(min_length=1, max_length=200)
+
+
+class FastPathWait(BaseModel):
+    """Short bounded settle delay; long sleeps are never distilled as a shortcut."""
+
+    type: Literal["wait"]
+    duration_ms: int = Field(ge=0, le=5000)
+    reason: str = Field(default="skill fast-path settle", max_length=200)
+
+
+FastPathStep = FastPathAxPress | FastPathHotkey | FastPathActivateApp | FastPathWait
+FastPathInstruction = Annotated[FastPathStep, Field(discriminator="type")]
+
+
 class SkillSummary(BaseModel):
     """Stage-1 payload: the only thing that lives in the agent context."""
 
@@ -98,6 +139,11 @@ class SkillSummary(BaseModel):
     app: str
     uses: int = Field(default=0, ge=0)
     wins: int = Field(default=0, ge=0)
+    consecutive_successes: int = Field(default=0, ge=0)
+    last_successful_at: datetime | None = None
+    last_environment: str | None = Field(default=None, max_length=SKILL_DIAGNOSTIC_MAX)
+    last_failure_reason: str | None = Field(default=None, max_length=SKILL_DIAGNOSTIC_MAX)
+    fast_path_ready: bool = False
     tags: tuple[str, ...] = Field(default=(), description="Search keywords.")
     parameters: tuple[str, ...] = Field(
         default=(), description="Parameter slot names (e.g. ('query', 'url'))."
@@ -124,7 +170,14 @@ class SkillDefinition(BaseModel):
     #: being made.
     uses: int = Field(default=0, ge=0, description="Runs that mounted this skill.")
     wins: int = Field(default=0, ge=0, description="Those runs that succeeded.")
+    consecutive_successes: int = Field(default=0, ge=0)
+    last_successful_at: datetime | None = None
+    last_environment: str | None = Field(default=None, max_length=SKILL_DIAGNOSTIC_MAX)
+    last_failure_reason: str | None = Field(default=None, max_length=SKILL_DIAGNOSTIC_MAX)
     steps: tuple[str, ...] = Field(description="Human-readable ordered steps.")
+    #: Machine-replayable subset. Coordinates and mark numbers are structurally
+    #: impossible here; semantic targets are resolved again from live AX data.
+    fast_path: tuple[FastPathInstruction, ...] = ()
     # Canonical signature makes the distiller's novelty check cheap: identical
     # action sequences collapse to the same signature without re-analysis.
     signature: str
@@ -151,6 +204,11 @@ def summary_of(definition: SkillDefinition) -> SkillSummary:
         # so a skill's history has to travel with the thing being ranked.
         uses=definition.uses,
         wins=definition.wins,
+        consecutive_successes=definition.consecutive_successes,
+        last_successful_at=definition.last_successful_at,
+        last_environment=definition.last_environment,
+        last_failure_reason=definition.last_failure_reason,
+        fast_path_ready=bool(definition.fast_path),
     )
 
 
@@ -176,7 +234,12 @@ def instantiate_skill(
         version=definition.version,
         uses=definition.uses,
         wins=definition.wins,
+        consecutive_successes=definition.consecutive_successes,
+        last_successful_at=definition.last_successful_at,
+        last_environment=definition.last_environment,
+        last_failure_reason=definition.last_failure_reason,
         steps=tuple(new_steps),
+        fast_path=definition.fast_path,
         signature=definition.signature,
         phase=definition.phase,
     )
