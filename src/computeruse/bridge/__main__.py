@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -49,7 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[computeruse-bridge] {exc.code}: {exc}", file=sys.stderr)
         return 2
 
-    server = BridgeServer(socket_path, startup.capability, owned.controller)
+    server = BridgeServer(
+        socket_path,
+        startup.capability,
+        owned.controller,
+        allowed_pid=os.getppid(),
+    )
     try:
         server.bind()
         server.serve_forever()
