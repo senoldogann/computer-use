@@ -1,9 +1,10 @@
 """Authenticated local Unix-socket server and owned Rust-driver lifecycle.
 
 The bridge is a deterministic adapter, not an agent. It accepts one bounded
-request per Unix-socket connection, authenticates the in-memory startup
-capability with a constant-time comparison, and dispatches only the controller's
-typed computer-use vocabulary.
+secret-free request per Unix-socket connection and authenticates the connecting
+process by kernel-reported peer PID before reading any request bytes. The
+startup capability is delivered only through inherited stdin and is never sent
+over the replaceable Unix-socket path.
 
 The Rust actuation driver is always a child owned by this bridge instance and
 is started with ``--allow-pid <bridge-pid>``. Shutdown never scans for arbitrary
@@ -14,13 +15,14 @@ and removes only artifacts inside the bridge-owned private runtime directory.
 from __future__ import annotations
 
 import errno
-import hmac
 import json
 import os
 import signal
 import socket
 import stat
+import struct
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import suppress
@@ -45,6 +47,8 @@ MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 DRIVER_START_TIMEOUT_SECONDS = 10.0
 DRIVER_STOP_TIMEOUT_SECONDS = 5.0
 SOCKET_PROBE_TIMEOUT_SECONDS = 0.2
+DARWIN_SOL_LOCAL = 0
+DARWIN_LOCAL_PEERPID = 0x002
 
 
 class BridgeServerError(RuntimeError):
@@ -153,22 +157,56 @@ def _cleanup_owned_runtime(runtime_dir: Path, driver_socket: Path) -> None:
         runtime_dir.rmdir()
 
 
+def _peer_pid(connection: socket.socket) -> int | None:
+    """Return the kernel-reported Unix-socket peer PID, failing closed."""
+    try:
+        if sys.platform.startswith("linux"):
+            peercred = getattr(socket, "SO_PEERCRED", None)
+            if peercred is None:
+                return None
+            raw = connection.getsockopt(
+                socket.SOL_SOCKET,
+                peercred,
+                struct.calcsize("3i"),
+            )
+            pid, uid, _gid = struct.unpack("3i", raw)
+            if uid != os.geteuid():
+                return None
+            return pid if pid > 0 else None
+
+        if sys.platform == "darwin":
+            raw = connection.getsockopt(
+                DARWIN_SOL_LOCAL,
+                DARWIN_LOCAL_PEERPID,
+                struct.calcsize("i"),
+            )
+            (pid,) = struct.unpack("i", raw)
+            return pid if pid > 0 else None
+    except (OSError, struct.error, TypeError, ValueError):
+        return None
+    return None
+
+
 class BridgeServer:
-    """Private authenticated Unix-socket server with one request per connection."""
+    """Private parent-PID-authenticated Unix-socket bridge server."""
 
     def __init__(
         self,
         socket_path: Path,
         capability: str,
         controller: DispatchController,
+        *,
+        allowed_pid: int,
     ) -> None:
         if not socket_path.is_absolute():
             raise BridgeServerError("BRIDGE_SOCKET_UNSAFE", "bridge socket path must be absolute")
         if CAPABILITY_PATTERN.fullmatch(capability) is None:
             raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge capability")
+        if not isinstance(allowed_pid, int) or isinstance(allowed_pid, bool) or allowed_pid <= 0:
+            raise BridgeServerError("BRIDGE_PROTOCOL_INVALID", "invalid bridge peer policy")
         self.socket_path = socket_path
-        self._capability = capability
         self._controller = controller
+        self._allowed_pid = allowed_pid
         self._listener: socket.socket | None = None
         self._bound_identity: tuple[int, int] | None = None
 
@@ -254,11 +292,11 @@ class BridgeServer:
 
     def _handle_connection(self, connection: socket.socket) -> None:
         try:
-            raw = self._read_one_request(connection)
-            request = parse_request_line(raw)
-            if not hmac.compare_digest(request.capability, self._capability):
-                response = encode_error("POLICY_DENIED", "bridge capability rejected")
+            if _peer_pid(connection) != self._allowed_pid:
+                response = encode_error("POLICY_DENIED", "bridge peer rejected")
             else:
+                raw = self._read_one_request(connection)
+                request = parse_request_line(raw)
                 result = self._controller.dispatch(request.method, request.params)
                 response = encode_success(result)
         except BridgeProtocolError as exc:
