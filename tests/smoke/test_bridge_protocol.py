@@ -11,7 +11,6 @@ from computeruse.bridge.protocol import (
     parse_request_line,
 )
 
-
 CAPABILITY = "a" * 64
 
 
