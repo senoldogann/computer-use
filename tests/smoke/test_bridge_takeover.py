@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from computeruse.bridge.controller import BridgeController, BridgeHostError
@@ -46,6 +48,37 @@ class TakeoverAfterFocusDriver:
         self.releases += 1
 
 
+class TripAfterFirstGateDriver:
+    def __init__(self) -> None:
+        self.hotkey_checks = 0
+        self.tripped = False
+        self.frontmost = "Safari"
+        self.activated: list[str] = []
+
+    def hotkey_state(self) -> bool:
+        self.hotkey_checks += 1
+        if self.hotkey_checks == 1:
+            self.tripped = True
+            return False
+        return self.tripped
+
+    def focused_window(self) -> FocusedWindow:
+        return FocusedWindow(
+            pid=202,
+            app_name=self.frontmost,
+            bundle_id=(
+                "com.apple.TextEdit" if self.frontmost == "TextEdit" else "com.apple.Safari"
+            ),
+            window_title="Fixture",
+            cursor_x=5,
+            cursor_y=7,
+        )
+
+    def activate_app(self, app: str) -> None:
+        self.activated.append(app)
+        self.frontmost = app
+
+
 @pytest.mark.parametrize(
     ("method", "params"),
     [
@@ -78,3 +111,27 @@ def test_takeover_after_focus_blocks_every_physical_send(
     assert exc.value.code == "KILL_SWITCH_TRIPPED"
     assert driver.sent == []
     assert driver.releases == 1
+
+
+def test_takeover_after_focus_probe_blocks_app_activation() -> None:
+    driver = TripAfterFirstGateDriver()
+    controller = BridgeController(driver, sleep=lambda _seconds: None)
+
+    with pytest.raises(BridgeHostError) as exc:
+        controller.dispatch("open_app", {"app": "TextEdit"})
+
+    assert exc.value.code == "KILL_SWITCH_TRIPPED"
+    assert driver.activated == []
+
+
+def test_takeover_after_initial_gate_blocks_url_opener() -> None:
+    driver = TripAfterFirstGateDriver()
+    opened: list[tuple[str, str | None]] = []
+    opener: Callable[[str, str | None], None] = lambda url, app: opened.append((url, app))
+    controller = BridgeController(driver, url_opener=opener)
+
+    with pytest.raises(BridgeHostError) as exc:
+        controller.dispatch("open_url", {"url": "https://example.com/path?q=1#frag"})
+
+    assert exc.value.code == "KILL_SWITCH_TRIPPED"
+    assert opened == []
