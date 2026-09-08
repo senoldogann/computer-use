@@ -55,7 +55,7 @@ _SOURCE_STRENGTH: Final[dict[PreferenceSource, int]] = {
 # pattern.
 _CREDENTIAL_LABEL_RE: Final[re.Pattern[str]] = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
-    r"(?P<label>password|passwd|api(?:[ \t]{1,3}|[_-])key|token|secret)"
+    r"(?P<label>password|passwd|api(?:[ \t]{1,3}|[_-])?key|token|secret)"
     r"(?![A-Za-z0-9_])"
 )
 _DELIMITED_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
@@ -275,7 +275,10 @@ class PreferenceWrite:
 
 def _canonical_credential_label(raw: str) -> str:
     """Normalize accepted label spelling without retaining any adjacent value."""
-    return " ".join(raw.casefold().replace("_", " ").replace("-", " ").split())
+    normalized = " ".join(
+        raw.casefold().replace("_", " ").replace("-", " ").split()
+    )
+    return "api key" if normalized == "apikey" else normalized
 
 
 def _prose_follower(raw: str) -> str:
