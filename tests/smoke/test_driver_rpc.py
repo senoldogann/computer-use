@@ -7,6 +7,8 @@ malformed input is rejected by the driver, not by the client.
 
 from __future__ import annotations
 
+import pytest
+
 from tests.smoke.conftest import rpc_call
 
 
@@ -37,6 +39,38 @@ def test_client_health() -> None:
         health = client.health()
         assert health.get("ok") == "health"
         assert health.get("backend") == "simulated"
+
+
+def test_owned_client_accepts_expected_driver_server_pid(driver) -> None:
+    """Owned-driver clients accept only the exact Rust child they spawned."""
+    from computeruse.bridge.owned_client import OwnedActuationClient
+    from tests.smoke.conftest import SOCKET_PATH
+
+    with OwnedActuationClient(
+        str(SOCKET_PATH),
+        connect_retries=1,
+        expected_server_pid=driver.pid,
+    ) as client:
+        health = client.health()
+        assert health.get("ok") == "health"
+        assert health.get("backend") == "simulated"
+
+
+def test_owned_client_refuses_wrong_driver_server_pid(driver) -> None:
+    """A same-user socket server with the wrong PID is never trusted."""
+    from computeruse.bridge.owned_client import OwnedActuationClient
+    from computeruse.orchestrator.client import DriverConnectionError
+    from tests.smoke.conftest import SOCKET_PATH
+
+    client = OwnedActuationClient(
+        str(SOCKET_PATH),
+        connect_retries=1,
+        retry_delay_seconds=0,
+        expected_server_pid=driver.pid + 1,
+    )
+    with pytest.raises(DriverConnectionError):
+        client.connect()
+    assert client.is_connected is False
 
 
 def test_client_refuses_symlink_socket(tmp_path) -> None:
