@@ -14,8 +14,25 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from computeruse.orchestrator.schemas import Action, ActivateApp, CallTool
-from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition
+from computeruse.orchestrator.schemas import (
+    Action,
+    ActivateApp,
+    CallTool,
+    ClickMark,
+    Finish,
+    MouseClick,
+    PressHotkey,
+    Wait,
+)
+from computeruse.skills.schemas import (
+    UNINFORMATIVE_WORDS,
+    FastPathActivateApp,
+    FastPathAxPress,
+    FastPathHotkey,
+    FastPathInstruction,
+    FastPathWait,
+    SkillDefinition,
+)
 from computeruse.slug import ascii_slug
 
 
@@ -45,33 +62,14 @@ class DistillResult:
     signature: str | None = None
 
 
-# A "complex workflow" worth distilling needs more than a single trivial click;
-# anything shorter is noise vs. signal for the skill store (Law 3.1).
 _MIN_STEPS: int = 2
-
-
-#: Enough for any application name; the signature carries the identity.
 APP_SLUG_MAX_CHARS: Final[int] = 60
-
-
-#: Dynamic fragments abstracted out of the string fields that still reach the
-#: signature: digit runs (version numbers, counts) and URLs. Typed and pasted
-#: text no longer reaches the hash at all — it left ``_SEMANTIC_KEYS`` — so
-#: what these normalise now is naming: "Photoshop 2024" and "Photoshop 2025"
-#: are one application to a workflow, not two.
 _DYNAMIC_NUMBER: Final = re.compile(r"\d+(?:[.,]\d+)*")
 _DYNAMIC_URL: Final = re.compile(r"https?://\S+", flags=re.IGNORECASE)
 
 
 def _abstract_dynamic(text: str) -> str:
-    """Template the dynamic fragments of a signature input (pure).
-
-    Applied to the string fields that still feed the hash (``app``,
-    ``skill_id``, ``key``, ``button``): case is a naming accident rather than
-    intent, and a version number inside an application name is not what makes
-    one workflow different from another. Operand text is no longer routed
-    through here — it is excluded from the signature outright.
-    """
+    """Template the dynamic fragments of a signature input (pure)."""
     templated = _DYNAMIC_URL.sub("<url>", text.lower())
     return _DYNAMIC_NUMBER.sub("<num>", templated)
 
@@ -79,34 +77,9 @@ def _abstract_dynamic(text: str) -> str:
 def signature_of(trajectory: Trajectory) -> str:
     """A stable content-hash describing the workflow's action sequence.
 
-    Two runs of the *same* UI flow in the same app must produce the same
-    signature (so the distiller can de-duplicate); two different flows must
-    differ. We hash the ordered (action-type, semantic-params) pairs
-    plus the app. The action sequence itself (type + key/modifiers/button/
-    click_count + app) makes different click sequences and hotkey flows
-    distinct without relying on run-to-run variations in natural language step
-    descriptions.
-
-    Coordinates are deliberately *excluded*: pixel positions drift between
-    runs of the same workflow, so including them would defeat de-dup. Dynamic
-    operands (typed or pasted text) and natural-language step descriptions
-    (intent) vary across runs of one parametric workflow, so they are excluded
-    from the hash.
-
-    Dropping the coordinates left the hash with nothing to say about *what* a
-    click hit, and the action sequence alone does not distinguish two workflows
-    that happen to have the same shape. Measured: "save a draft" and "delete a
-    draft" — a click into the document, then a click on a toolbar button — hash
-    identically, so the second is filed as a duplicate of the first and never
-    becomes a skill. ``step_targets`` is the missing witness: the accessibility
-    identity (``Button "Save"``) of the element each step acted on, which is
-    stable across runs of one workflow in a way a pixel position is not.
-
-    A step whose target is unknown contributes no ``target`` key at all rather
-    than an empty one, so a trajectory recorded without accessibility data
-    hashes exactly as it did before this field existed — old episodes on disk
-    keep the signature they were stored with, and de-dup against them still
-    works.
+    Coordinates are deliberately excluded. ``step_targets`` contributes the
+    stable AX identity of positional actions so two same-shaped workflows that
+    target different controls do not collapse into one skill.
     """
     targets = trajectory.step_targets
     flow: list[dict[str, str]] = []
@@ -123,16 +96,68 @@ def signature_of(trajectory: Trajectory) -> str:
         {"app": trajectory.app, "flow": flow}, sort_keys=True, separators=(",", ":")
     )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    # First 16 hex chars: collision-improbable for a skill index, much shorter.
     return digest[:16]
 
 
-def distill(trajectory: Trajectory, known_signatures: set[str]) -> DistillResult:
-    """Turn a trajectory into a skill, unless it's trivial or already known.
+def fast_path_from_trajectory(
+    trajectory: Trajectory,
+) -> tuple[FastPathInstruction, ...]:
+    """Extract the replay-safe semantic subset of one verified trajectory.
 
-    ``known_signatures`` is the set of signatures already in the store, so a
-    re-run of a captured flow yields ``duplicate`` instead of a second copy.
+    V1 is deliberately all-or-nothing. If any step needs a dynamic operand,
+    pointer geometry, an unstable mark index, a tool result, or an unknown AX
+    target, the whole fast path is refused. A partial recipe is worse than no
+    recipe because it can leave the normal provider halfway through a workflow
+    it did not choose.
     """
+    instructions: list[FastPathInstruction] = []
+    for index, action in enumerate(trajectory.steps):
+        if isinstance(action, Finish):
+            continue
+        if isinstance(action, (MouseClick, ClickMark)):
+            if action.button != "left" or action.click_count != 1:
+                return ()
+            target = (
+                trajectory.step_targets[index]
+                if index < len(trajectory.step_targets)
+                else ""
+            )
+            target = " ".join(target.split())
+            if not target:
+                return ()
+            instructions.append(FastPathAxPress(type="ax_press", target=target))
+            continue
+        if isinstance(action, PressHotkey):
+            instructions.append(
+                FastPathHotkey(
+                    type="press_hotkey",
+                    modifiers=tuple(action.modifiers),
+                    key=action.key,
+                )
+            )
+            continue
+        if isinstance(action, ActivateApp):
+            instructions.append(
+                FastPathActivateApp(type="activate_app", app=action.app)
+            )
+            continue
+        if isinstance(action, Wait):
+            if action.duration_ms > 5000:
+                return ()
+            instructions.append(
+                FastPathWait(
+                    type="wait",
+                    duration_ms=action.duration_ms,
+                    reason=action.reason,
+                )
+            )
+            continue
+        return ()
+    return tuple(instructions)
+
+
+def distill(trajectory: Trajectory, known_signatures: set[str]) -> DistillResult:
+    """Turn a trajectory into a skill, unless it's trivial or already known."""
     if len(trajectory.steps) < _MIN_STEPS:
         return DistillResult(kind="too_short")
 
@@ -147,30 +172,22 @@ def distill(trajectory: Trajectory, known_signatures: set[str]) -> DistillResult
         for i, step in enumerate(trajectory.steps)
     )
     definition = SkillDefinition(
-        # Dot separator: ``:`` would break both the id regex and Windows
-        # filenames (skill_id becomes the store's filename).
         skill_id=f"{_slug(trajectory.app)}.{signature}",
         description=trajectory.description,
         app=trajectory.app,
         tags=trajectory.tags or derive_tags(trajectory),
         steps=steps_readable,
+        fast_path=fast_path_from_trajectory(trajectory),
         signature=signature,
     )
     return DistillResult(kind="skill", definition=definition, signature=signature)
 
 
-#: How many derived tags to keep. Enough to describe what a workflow did,
-#: few enough that one verbose run cannot dominate the search index.
 TAG_LIMIT: Final[int] = 12
 
 
 def visited_apps(trajectory: Trajectory) -> tuple[str, ...]:
-    """Every application the run touched, primary first (pure).
-
-    A multi-app flow belongs to all of its apps, not just the one it started
-    in: without this a Calculator-then-Notes chain is retrievable only as
-    "Calculator", and a later run searching inside Notes never sees it.
-    """
+    """Every application the run touched, primary first (pure)."""
     apps: list[str] = []
     for name in (trajectory.app,) + tuple(
         step.app for step in trajectory.steps if isinstance(step, ActivateApp)
@@ -181,12 +198,7 @@ def visited_apps(trajectory: Trajectory) -> tuple[str, ...]:
 
 
 def _app_tag_words(app: str) -> tuple[str, ...]:
-    """An app name as tag tokens (pure).
-
-    Same token rules as content words, so "Google Chrome" becomes the
-    retrievable "google" and "chrome" the registry's substring tag match
-    already understands.
-    """
+    """An app name as tag tokens (pure)."""
     cleaned = re.sub(r"[^\w]+", " ", app.lower(), flags=re.UNICODE)
     return tuple(
         token
@@ -196,19 +208,7 @@ def _app_tag_words(app: str) -> tuple[str, ...]:
 
 
 def derive_tags(trajectory: Trajectory) -> tuple[str, ...]:
-    """Search keywords for a skill, taken from what the run actually did (pure).
-
-    Distillation used to leave this empty, and the registry scored *only* app
-    and tags — so a real store held twelve skills that no realistic query could
-    reach. Scoring the description fixed the worst of that, but the description
-    is only the goal as *asked*; the sub-goals record what the agent actually
-    had to do to satisfy it, which is what a later run is really searching for.
-
-    The visited applications lead: identity before content, so a flow spanning
-    Calculator and Notes answers to both names. Deterministic and cheap, in
-    first-seen order so two runs of the same flow produce the same tags and
-    de-duplication still works.
-    """
+    """Search keywords for a skill, taken from what the run actually did (pure)."""
 
     def take(tags: list[str], token: str) -> bool:
         if token in tags:
@@ -231,17 +231,9 @@ def derive_tags(trajectory: Trajectory) -> tuple[str, ...]:
     return tuple(tags)
 
 
-_COORDINATE_KEYS: frozenset[str] = frozenset({"x", "y", "start_x", "start_y", "end_x", "end_y"})
-# Fields that carry *workflow meaning* and must feed the signature hash. The
-# exact pixel coordinates are deliberately absent so UI drift doesn't break
-# de-dup, and so are the *pacing* fields (``duration_ms`` for waits/moves,
-# ``wpm`` for typing): the same flow run at a different pace is still the same
-# flow — hashing pacing would break de-dup across two runs of one workflow
-# (L14). Typed/pasted text (``text``) is likewise excluded: written or pasted
-# content is an operand, not workflow structure ("paste text into Notes" is
-# one flow regardless of what text is pasted; hashing text would fork every
-# payload into its own skill copy). Keys/modifiers/buttons/click_count/
-# skill_id/app do distinguish otherwise-identical flows.
+_COORDINATE_KEYS: frozenset[str] = frozenset(
+    {"x", "y", "start_x", "start_y", "end_x", "end_y"}
+)
 _SEMANTIC_KEYS: frozenset[str] = frozenset(
     {
         "key",
@@ -256,31 +248,38 @@ _SEMANTIC_KEYS: frozenset[str] = frozenset(
 
 
 def _semantic_params(action: Action) -> str:
-    """Return a stable, coordinate-free summary of an action's params.
-
-    Coordinates are dropped; everything else that defines the *meaning* of the
-    step is kept, sorted for determinism. This is what makes the signature
-    distinguish real workflow differences while staying insensitive to
-    pixel drift between runs. The string fields that remain are normalised
-    through :func:`_abstract_dynamic`, so an application's version number does
-    not fork one workflow into two.
-    """
+    """Return a stable, coordinate-free summary of an action's params."""
     data = action.model_dump(exclude_none=True)
     data.pop("type", None)
-    kept = {k: data[k] for k in _SEMANTIC_KEYS if k in data and k not in _COORDINATE_KEYS}
+    kept = {
+        key: data[key]
+        for key in _SEMANTIC_KEYS
+        if key in data and key not in _COORDINATE_KEYS
+    }
     rendered: list[str] = []
     if isinstance(action, CallTool):
         rendered.append(f"tool={action.tool}")
         if "code" in action.arguments:
             code = str(action.arguments["code"])
-            calls = re.findall(r"\b(click|typeText|pressKey|drag|setValue|scroll|navigate)\s*\(\s*['\"]?([^'\"\)\n]+)", code)
+            calls = re.findall(
+                r"\b(click|typeText|pressKey|drag|setValue|scroll|navigate)"
+                r"\s*\(\s*['\"]?([^'\"\)\n]+)",
+                code,
+            )
             if calls:
-                sig_calls = ";".join(f"{m}:{_abstract_dynamic(t.strip())}" for m, t in calls[:4])
+                sig_calls = ";".join(
+                    f"{method}:{_abstract_dynamic(target.strip())}"
+                    for method, target in calls[:4]
+                )
                 rendered.append(f"calls={sig_calls}")
             else:
                 rendered.append(f"code_len={len(code)}")
         elif action.arguments:
-            sorted_args = sorted((k, _abstract_dynamic(str(v)[:40])) for k, v in action.arguments.items() if k not in _COORDINATE_KEYS)
+            sorted_args = sorted(
+                (key, _abstract_dynamic(str(value)[:40]))
+                for key, value in action.arguments.items()
+                if key not in _COORDINATE_KEYS
+            )
             rendered.append(f"args={sorted_args}")
     for key in sorted(kept):
         if key == "tool":
@@ -293,25 +292,12 @@ def _semantic_params(action: Action) -> str:
 
 
 def _compact_params(action: Action) -> str:
-    """Summarize an action's params to a short stable string for the record.
-
-    Screen coordinates are deliberately omitted. They are only meaningful on
-    the screen that produced them: the window that was at (404, 227) yesterday
-    is a different link today, and a stored skill that names one invites the
-    model to click it again. Measured: replaying a distilled skill took 18
-    steps where the cold run took 10, and the skill's own text told the agent
-    to click a coordinate belonging to a story that had since moved. The
-    sub-goal preceding each step already says *what* was being clicked, which
-    is the part that transfers.
-
-    They were already excluded from the de-duplication signature for a related
-    reason — UI drift must not fork one workflow into many skills.
-    """
+    """Summarize an action's params without persisting screen coordinates."""
     data = action.model_dump(exclude_none=True)
     data.pop("type", None)
     for key in _COORDINATE_KEYS:
         data.pop(key, None)
-    return ",".join(f"{k}={data[k]}" for k in sorted(data))
+    return ",".join(f"{key}={data[key]}" for key in sorted(data))
 
 
 def _slug(app: str) -> str:
