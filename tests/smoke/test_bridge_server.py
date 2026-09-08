@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
 from computeruse.bridge.server import (
     BridgeServer,
     BridgeServerError,
