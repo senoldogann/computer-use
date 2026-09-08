@@ -65,7 +65,7 @@ _WHITESPACE_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
     r"^[ \t]+(?P<value>\S+)"
 )
 _COPULAR_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?i)[ \t]+(?:is|should|must)(?:[ \t]+|[ \t]*[:=][ \t]*)(?P<value>\S+)"
+    r"(?i)[ \t]+(?:is|was|were|should|must)(?:[ \t]+|[ \t]*[:=][ \t]*)(?P<value>\S+)"
 )
 
 # Positive prose evidence. These words describe the credential *concept* rather
