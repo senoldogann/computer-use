@@ -64,6 +64,9 @@ _DELIMITED_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
 _WHITESPACE_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
     r"^[ \t]+(?P<value>\S+)"
 )
+_COPULAR_CREDENTIAL_VALUE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?i)^[ \t]+(?:is|should|must)(?:[ \t]+|[ \t]*[:=][ \t]*)(?P<value>\S+)"
+)
 
 # Positive prose evidence. These words describe the credential *concept* rather
 # than supplying its value. Anything else after a whitespace-delimited label is
@@ -314,6 +317,10 @@ def classify_sensitive_preference_material(text: str) -> SensitiveMaterialClassi
         introduces_assignment = (
             raw_follower.endswith((":", "=")) and bool(trailing.strip())
         ) or _DELIMITED_CREDENTIAL_VALUE_RE.match(trailing) is not None
+        introduces_assignment = (
+            introduces_assignment
+            or _COPULAR_CREDENTIAL_VALUE_RE.match(trailing) is not None
+        )
         if (
             follower
             and follower in _SAFE_CREDENTIAL_PROSE_FOLLOWERS[label]
