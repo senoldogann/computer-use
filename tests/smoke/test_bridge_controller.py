@@ -98,6 +98,18 @@ class FakeDriver:
             self.tripped = True
 
 
+class TargetedCaptureTypeErrorDriver(FakeDriver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.capture_calls: list[tuple[int, int | None]] = []
+
+    def capture(self, display_id: int = 0, window_pid: int | None = None) -> ScreenCapture:
+        self.capture_calls.append((display_id, window_pid))
+        if window_pid is not None:
+            raise TypeError("simulated targeted capture failure")
+        return super().capture(display_id=display_id, window_pid=window_pid)
+
+
 @pytest.fixture
 def driver() -> FakeDriver:
     return FakeDriver()
@@ -239,6 +251,17 @@ def test_screenshot_returns_real_png_payload_not_raw_frame(driver: FakeDriver) -
     assert result["height"] == 2
     assert isinstance(result["data_base64"], str)
     assert result["data_base64"].startswith("iVBOR")
+
+
+def test_targeted_screenshot_type_error_does_not_fallback_to_full_screen() -> None:
+    driver = TargetedCaptureTypeErrorDriver()
+    controller = BridgeController(driver)
+
+    with pytest.raises(BridgeHostError) as exc:
+        controller.dispatch("screenshot", {"app": "TextEdit"})
+
+    assert exc.value.code == "DRIVER_UNAVAILABLE"
+    assert driver.capture_calls == [(0, 101)]
 
 
 def test_press_hotkey_uses_typed_action(driver: FakeDriver) -> None:
