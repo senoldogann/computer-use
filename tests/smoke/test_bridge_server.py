@@ -17,6 +17,7 @@ from computeruse.bridge.server import (
     StartupConfig,
     parse_startup_line,
 )
+
 from computeruse.bridge.controller import BridgeController
 
 CAPABILITY = "a" * 64
