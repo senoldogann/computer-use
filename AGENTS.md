@@ -32,8 +32,9 @@ Every line of code, agent decision, and architectural module within this reposit
 
 ### Law 4: Multi-Tiered Memory & Experiential Continuity
 1. **Episodic Memory**: Full trace of past sessions, successful task trajectories, and failure retrospectives saved in structured formats. Above the episode sits the **mission** (`orchestrator/mission.py`): the durable work item, carrying its plan and therefore its progress across the runs that attempt it. Resuming hands over `remaining_goal` — what is actually left — never the original goal, because on a physical host re-running a completed sub-goal is not wasted work, it is that step happening again.
-2. **Semantic Knowledge Store**: Searchable memory index containing application-specific UI patterns, user preferences, coordinate maps, and shortcut behaviors.
-3. **Working Context (Scratchpad)**: Minimal, clean, rolling state tracking current goal, completed steps, pending sub-tasks, and latest visual diffs.
+2. **Semantic Knowledge Store**: Searchable app/UI knowledge containing application-specific UI patterns, coordinate maps, site-scoped facts, and shortcut behaviors. Semantic memory does not own durable user preferences.
+3. **Durable Preference Store**: `memory/preferences.py` stores typed user-preference records and evidence separately from semantic app facts. Evidence retains provenance and contradiction history; only verified runs may teach the store; credential-like material is rejected before persistence; and retrieval exposes a bounded, contradiction-free set of active preferences.
+4. **Working Context (Scratchpad)**: Minimal, clean, rolling state tracking current goal, completed steps, pending sub-tasks, and latest visual diffs.
 
 ### Law 5: Explicit Permission Governance & Security Boundaries
 1. **Configurable Autonomy Levels**:
@@ -79,6 +80,7 @@ Every line of code, agent decision, and architectural module within this reposit
 │  │ • Screenshot Capture   │  │  • Working State      │  │  • Summary Index  │  │
 │  │ • Coordinate Scale/DPI │  │  • Episodic Trajectory│  │  • Lazy-Load      │  │
 │  │ • Element Grounding    │  │  • Semantic Store     │  │  • Distiller      │  │
+│  │                        │  │  • Preference Store   │  │                   │  │
 │  └───────────┬────────────┘  └───────────┬───────────┘  └─────────┬─────────┘  │
 │              │                           │                        │            │
 │              └───────────────────────────┼────────────────────────┘            │
@@ -282,8 +284,9 @@ computeruse/
 │   │   └── schemas.py         # SkillDefinition / SkillSummary types
 │   ├── memory/
 │   │   ├── episodic.py        # Past execution traces & retrospectives
-│   │   ├── semantic.py        # Key-value UI patterns & preferences
-│   │   └── schemas.py         # Episodic/semantic memory payload types
+│   │   ├── semantic.py        # App/UI knowledge only
+│   │   ├── preferences.py     # Typed durable user preferences + evidence/reconciliation
+│   │   └── schemas.py         # Episodic/semantic/preference memory payload types
 │   └── security/
 │       ├── autonomy.py        # Autonomy levels, permission guard, confirmation requirement
 │       └── killswitch.py      # Interrupt detection & handoff
