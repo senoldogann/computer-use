@@ -210,6 +210,11 @@ class BridgeController:
         if tripped is True:
             raise BridgeHostError("KILL_SWITCH_TRIPPED", "the user reclaimed control")
 
+    def _send_guarded(self, action: object) -> None:
+        """Re-check emergency takeover immediately before one physical send."""
+        self._kill_gate()
+        self._driver.send(action)
+
     @staticmethod
     def _matches_app(app: str, focused: FocusedWindow) -> bool:
         return app_evidence(app, focused.app_name, focused.bundle_id) is Evidence.CONFIRMED
@@ -356,8 +361,8 @@ class BridgeController:
                     "click_count": params.get("click_count", 1),
                 }
             )
-            self._driver.send(move)
-            self._driver.send(click)
+            self._send_guarded(move)
+            self._send_guarded(click)
         except Exception:
             self._safe_release()
             raise
