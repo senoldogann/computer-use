@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from computeruse.bridge.protocol import (
     MAX_REQUEST_BYTES,
     BridgeProtocolError,
