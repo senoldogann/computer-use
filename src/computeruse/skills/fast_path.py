@@ -25,7 +25,6 @@ from computeruse.skills.schemas import (
     FastPathAxPress,
     FastPathHotkey,
     FastPathInstruction,
-    FastPathWait,
 )
 
 if TYPE_CHECKING:
@@ -98,15 +97,13 @@ def _turn_for_instruction(
     elif isinstance(instruction, FastPathActivateApp):
         action = ActivateApp(type="activate_app", app=instruction.app)
         sub_goal = f"Activate {instruction.app}"
-    elif isinstance(instruction, FastPathWait):
+    else:
         action = Wait(
             type="wait",
             duration_ms=instruction.duration_ms,
             reason=instruction.reason,
         )
         sub_goal = instruction.reason
-    else:
-        return None
     return AgentTurn(
         thought="Use the verified semantic skill step against the current machine state.",
         sub_goal=sub_goal,
