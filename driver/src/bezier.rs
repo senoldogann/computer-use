@@ -128,18 +128,20 @@ fn ease_in_out(p: f64) -> f64 {
 }
 
 /// Natural duration for a cursor move (pure): humans scale speed with
-/// distance, so a 1200px cross-screen sweep takes ~660ms while a 30px nudge
-/// takes ~190ms — a fixed duration reads as a teleport for long moves (Law 1).
+/// distance, so a 1200px cross-screen sweep takes ~430ms while a 30px nudge
+/// takes ~140ms — a fixed duration reads as a teleport for long moves (Law 1).
 /// The caller's explicit request is never shortened (they may deliberately ask
 /// for a slow, deliberate move), but a too-short request for a long distance
-/// is stretched up to a 1000ms ceiling so no move is ever instantaneous.
+/// is stretched up to an 800ms ceiling so no move is ever instantaneous.
 pub fn human_move_duration(from: Point, to: Point, requested_ms: u64) -> u64 {
     let dx = (to.x - from.x) as f64;
     let dy = (to.y - from.y) as f64;
     let dist = (dx * dx + dy * dy).sqrt();
-    // ~180ms base + 0.4ms per logical pixel of travel.
-    let natural = 180.0 + dist * 0.4;
-    (requested_ms as f64).max(natural.min(1000.0)).round() as u64
+    // ~130ms base + 0.25ms per logical pixel of travel: brisk but still a
+    // real hand (measured band, tuned so routine nudges stay ~140ms and a
+    // full screen sweep stays under half a second).
+    let natural = 130.0 + dist * 0.25;
+    (requested_ms as f64).max(natural.min(800.0)).round() as u64
 }
 
 /// Plan a human-like cursor path (pure): a cubic Bezier sampled into steps,
@@ -215,13 +217,13 @@ mod tests {
     #[test]
     fn move_duration_scales_with_distance_never_teleports() {
         // A zero-length nudge keeps the base duration.
-        assert_eq!(human_move_duration(point(0, 0), point(0, 0), 180), 180);
-        // A cross-screen sweep is stretched far beyond the default 180ms.
-        let sweep = human_move_duration(point(0, 0), point(1200, 0), 180);
-        assert!((600..=700).contains(&sweep), "sweep took {sweep}ms");
+        assert_eq!(human_move_duration(point(0, 0), point(0, 0), 130), 130);
+        // A cross-screen sweep is stretched far beyond the default request.
+        let sweep = human_move_duration(point(0, 0), point(1200, 0), 130);
+        assert!((400..=460).contains(&sweep), "sweep took {sweep}ms");
         // A 30px nudge barely grows.
-        let nudge = human_move_duration(point(0, 0), point(30, 0), 180);
-        assert!((180..=220).contains(&nudge), "nudge took {nudge}ms");
+        let nudge = human_move_duration(point(0, 0), point(30, 0), 130);
+        assert!((130..=160).contains(&nudge), "nudge took {nudge}ms");
     }
 
     #[test]
@@ -231,7 +233,7 @@ mod tests {
         // An explicit longer-than-natural request always wins.
         assert_eq!(human_move_duration(point(0, 0), point(1200, 0), 5000), 5000);
         // The distance stretch is capped so a pathological span stays sane.
-        let huge = human_move_duration(point(0, 0), point(10_000, 10_000), 180);
-        assert!(huge <= 1000, "huge move took {huge}ms");
+        let huge = human_move_duration(point(0, 0), point(10_000, 10_000), 130);
+        assert!(huge <= 800, "huge move took {huge}ms");
     }
 }

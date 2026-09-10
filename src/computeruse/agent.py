@@ -58,6 +58,7 @@ from computeruse.memory.preferences import (
 )
 from computeruse.memory.schemas import Episode, EpisodeOutcome, PreferenceRecord
 from computeruse.memory.semantic import SemanticStore
+from computeruse.orchestrator.activity import ActivityEmitter
 from computeruse.orchestrator.client import (
     AX_MAX_DEPTH,
     AX_MAX_NODES,
@@ -78,7 +79,12 @@ from computeruse.orchestrator.loop import (
 )
 from computeruse.orchestrator.planner import GoalPlan
 from computeruse.orchestrator.schemas import Action, AgentTurn
-from computeruse.orchestrator.trace import RunTracer, StepTrace, event_line, new_run_id
+from computeruse.orchestrator.trace import (
+    RunTracer,
+    StepTrace,
+    new_run_id,
+    step_trace_dict,
+)
 from computeruse.security.approvals import (
     ApprovalQueue,
     ApprovalRequest,
@@ -103,7 +109,12 @@ from computeruse.security.grants import (
 from computeruse.security.killswitch import KillSwitch
 from computeruse.skills.distiller import DistillResult, Trajectory, distill
 from computeruse.skills.playbook import PlaybookRegistry
-from computeruse.skills.registry import SkillRegistry, refined_route, skill_for_goal
+from computeruse.skills.registry import (
+    SkillRegistry,
+    environment_fingerprint,
+    refined_route,
+    skill_for_goal,
+)
 from computeruse.skills.schemas import SkillDefinition, SkillSummary
 from computeruse.vision import AXElement
 from computeruse.vision.ax import (
@@ -217,6 +228,10 @@ class AgentConfig:
     # persisted. The callback is observability only; an exception is logged and
     # can never turn a successfully completed physical task into a failure.
     on_preference_write: Callable[[PreferenceWrite], None] | None = None
+    # Groups runs into a session for the activity timeline. Empty by default:
+    # a single run reports no session rather than inventing one, and callers
+    # that own a session concept (autonomous nights) pass theirs in.
+    session_id: str = ""
     # Observability: when set, every step of the run is appended as one JSON
     # object to ``trace_dir/<run_id>/steps.jsonl``. None disables tracing
     # entirely — a run pays nothing for a diagnostic nobody asked for.
@@ -464,9 +479,13 @@ class Agent:
         # structured line whether or not a trace file is being written. Without
         # it the window watching a run could only show the prose the log
         # happened to emit, while the plan, the reasoning and the verification
-        # verdict stayed inside the process.
+        # verdict stayed inside the process. Steps ride the versioned
+        # activity envelope (same fields, plus identity/sequence), so the
+        # panel can order them deterministically.
+        activity = ActivityEmitter(run_id=run_id, session_id=self._config.session_id)
+
         def announce(record: StepTrace) -> None:
-            print(event_line(record), flush=True)
+            activity.emit("step", step_trace_dict(record, screenshot=None))
 
         trace_sink: Callable[[StepTrace], None] = announce
         if self._config.trace_dir is not None:
@@ -512,7 +531,12 @@ class Agent:
             # a skill that keeps failing is eventually withheld.
             if mounted_skill_id is not None:
                 skills_registry.record_outcome(
-                    mounted_skill_id, succeeded=verified
+                    mounted_skill_id,
+                    succeeded=verified,
+                    env=environment_fingerprint(
+                        trajectory.app, trajectory.description
+                    ),
+                    failure_reason="" if verified else (retrospective or ""),
                 )
             if not trajectory.steps:
                 # Nothing ran, so there is nothing to remember or distil — the
@@ -566,6 +590,14 @@ class Agent:
                 )
                 for evidence in preference_evidence:
                     write = preference_store.record(evidence)
+                    activity.emit(
+                        "memory_written",
+                        {
+                            "outcome": write.outcome,
+                            "summary": write.safe_summary,
+                            "replaced_id": write.replaced_id,
+                        },
+                    )
                     if self._config.on_preference_write is None:
                         continue
                     try:
@@ -582,6 +614,21 @@ class Agent:
             recover=self._config.driver_recover,
             recover_unresponsive=self._config.driver_recover,
         ) as client:
+            # A second, independent driver connection for the AX walk. The
+            # loop reads the accessibility tree and the screenshot
+            # concurrently (one thread per probe), and two threads sharing
+            # one socket would interleave request/response pairs (see
+            # DriverTimeoutError: pairing honesty is structural). The driver
+            # serves one thread per connection, so this is a second lane.
+            # No recovery hooks: the main client owns driver healing, and a
+            # second healer would double-restart. The AX probe is best-effort
+            # anyway and reconnects on its own once the main client heals.
+            # Closed in the finally around runner.run below; construction
+            # opens no socket, so an early raise leaks nothing.
+            ax_client = ActuationClient(
+                self._config.socket_path,
+                connect_retries=self._config.connect_retries,
+            )
             # OBSERVE precondition: when the caller named a specific app,
             # bring it forward before any probe — otherwise the focused
             # window (and every click) would target whatever was frontmost
@@ -713,7 +760,7 @@ class Agent:
                 nonlocal cached_pid
                 nonlocal target_window_warned
                 if background_actuation:
-                    pid = target_pid()
+                    pid = target_pid(client)
                     if pid is not None:
                         try:
                             window = client.app_window(pid)
@@ -742,9 +789,12 @@ class Agent:
                     cached_pid = current.pid
                 return current
 
-            def _current_pid() -> int | None:
+            def _current_pid(via: ActuationClient) -> int | None:
                 """The last pid perception resolved, re-read when unset.
 
+                ``via`` names which connection reads: the AX probe runs on
+                its own thread with its own client, and sharing the main
+                client's socket across threads would corrupt pairing.
                 Frontmost in an ordinary run; in background mode the window
                 probe caches the *target* instead, which is the pid every
                 other probe in that mode wants anyway.
@@ -753,7 +803,7 @@ class Agent:
                 if cached_pid is not None and cached_pid > 0:
                     return cached_pid
                 try:
-                    current = client.focused_window()
+                    current = via.focused_window()
                     if current.pid > 0:
                         cached_pid = current.pid
                 except Exception:  # noqa: BLE001 - probe is best-effort fallback
@@ -773,21 +823,23 @@ class Agent:
                 nonlocal working_app
                 working_app = app
 
-            def target_pid() -> int | None:
+            def target_pid(via: ActuationClient) -> int | None:
                 """The app this run works in, which in background mode is not
                 the frontmost one.
 
-                Resolved fresh rather than cached: an app can be launched or
-                relaunched mid-run, and a stale pid would silently point
-                perception at a process that no longer exists.
+                ``via`` is threaded through for the same reason as in
+                :func:`_current_pid` — the AX probe resolves its pid on its
+                own connection. Resolved fresh rather than cached: an app can
+                be launched or relaunched mid-run, and a stale pid would
+                silently point perception at a process that no longer exists.
                 """
                 if not self._config.background_actuation or working_app is None:
-                    return _current_pid()
+                    return _current_pid(via)
                 try:
-                    return client.app_pid(working_app) or _current_pid()
+                    return via.app_pid(working_app) or _current_pid(via)
                 except Exception as exc:  # noqa: BLE001 - fall back to frontmost
                     LOGGER.debug("target pid lookup failed: %s", exc)
-                    return _current_pid()
+                    return _current_pid(via)
 
             def quiet_type(text: str) -> bool:
                 """Put text into whichever element the target app has focused.
@@ -796,7 +848,7 @@ class Agent:
                 quiet path needs to find that element itself. The AX tree marks
                 it, and its centre is the point the driver writes to.
                 """
-                pid = target_pid()
+                pid = target_pid(client)
                 if pid is None:
                     return False
                 try:
@@ -827,7 +879,11 @@ class Agent:
                 not. The frame carries the window's own origin, so coordinates
                 convert off it with the machinery already in place.
                 """
-                pid = target_pid() if self._config.background_actuation else None
+                pid = (
+                    target_pid(client)
+                    if self._config.background_actuation
+                    else None
+                )
                 # Passed only when it is asked for, so a sensor that predates
                 # window capture — another client, an older driver — keeps its
                 # exact previous call.
@@ -838,7 +894,9 @@ class Agent:
             viewport = _display_viewport(
                 client,
                 self._config.display_id,
-                target_pid() if self._config.background_actuation else None,
+                target_pid(client)
+                if self._config.background_actuation
+                else None,
             )
 
             def quiet_press(point: Point) -> bool:
@@ -850,13 +908,14 @@ class Agent:
                 three system-wide presses all reported success, Chrome absorbed
                 them, and the calculator never moved.
                 """
-                current_pid = target_pid()
+                current_pid = target_pid(client)
                 if current_pid is None:
                     return False
                 return client.ax_press(current_pid, point.x, point.y)
 
             def ocr_fallback(
                 summaries: tuple[str, ...],
+                via: ActuationClient,
             ) -> tuple[tuple[str, ...], tuple[str, ...]]:
                 """Read the screen with OCR when the AX tree gave us nothing.
 
@@ -883,10 +942,10 @@ class Agent:
                 ):
                     return (), ()
                 try:
-                    lines = client.recognize_text(
+                    lines = via.recognize_text(
                         display_id=self._config.display_id,
                         window_pid=(
-                            _current_pid()
+                            _current_pid(via)
                             if self._config.background_actuation
                             else None
                         ),
@@ -913,10 +972,13 @@ class Agent:
                 return base, ocr_dialog_notes(lines)
 
             def ax_probe() -> AxProbeResult:
-                current_pid = target_pid()
+                # Runs on its own thread beside the screenshot capture, on
+                # its own connection (see ax_client above) — everything this
+                # probe touches must come through ax_client, never client.
+                current_pid = target_pid(ax_client)
                 if current_pid is None:
                     return AxProbeResult()
-                tree = client.ax_snapshot(
+                tree = ax_client.ax_snapshot(
                     pid=current_pid,
                     max_depth=AX_MAX_DEPTH,
                     max_nodes=AX_MAX_NODES,
@@ -962,7 +1024,7 @@ class Agent:
                     summaries = summaries + (
                         "(the page extends below the visible area — scroll down with mouse_scroll dy>0 after moving the cursor over the content)",
                     )
-                ocr_summaries, ocr_notes = ocr_fallback(summaries)
+                ocr_summaries, ocr_notes = ocr_fallback(summaries, ax_client)
                 summaries = summaries + ocr_summaries
                 return AxProbeResult(
                     summaries=summaries,
@@ -978,7 +1040,7 @@ class Agent:
 
             def focused_text_value_probe() -> str | None:
                 """Value of the focused text field via the driver's AX tree."""
-                current_pid = _current_pid()
+                current_pid = _current_pid(client)
                 if current_pid is None:
                     return None
                 try:
@@ -1182,6 +1244,12 @@ class Agent:
                 # full definition.
                 skill_scan=lambda q: tuple(skills_registry.search(q)),
                 skill_loader=skills_registry.load,
+                # Fast-path misses report back through the same bookkeeping
+                # as end-of-run verdicts: a stale recipe must reset the
+                # streak it would otherwise keep spending.
+                record_skill_failure=lambda skill_id, reason: skills_registry.record_outcome(
+                    skill_id, succeeded=False, failure_reason=reason
+                ),
                 playbook_scan=lambda q: playbook_registry.best(q, min_score=PLAYBOOK_MOUNT_MIN_SCORE),
                 app=app,
                 # The focus guard only makes sense for a run pinned to a named
@@ -1205,7 +1273,19 @@ class Agent:
             )
             try:
                 state = runner.run(self._config.goal)
+            except BaseException as exc:
+                # Abnormal ending (kill switch, budget stop, driver death):
+                # the timeline must show the run died, not leave it hanging
+                # as perpetually running. Re-raised untouched — this is a
+                # witness, never a handler.
+                activity.emit(
+                    "run_failed",
+                    {"error": f"{type(exc).__name__}: {exc}"},
+                    severity="error",
+                )
+                raise
             finally:
+                ax_client.close()
                 if cua_repl_engine is not None:
                     cua_repl_engine.stop()
                 # MCP servers are other people's programs, started as our
@@ -1216,7 +1296,7 @@ class Agent:
                 if mcp is not None:
                     mcp.close()
 
-        return AgentResult(
+        result = AgentResult(
             state=state,
             succeeded=succeeded,
             app=app,
@@ -1229,3 +1309,13 @@ class Agent:
             skill=state.skill,
             run_id=run_id,
         )
+        activity.emit(
+            "run_completed",
+            {
+                "outcome": result.outcome,
+                "succeeded": result.succeeded,
+                "steps": len(result.state.completed_steps),
+                "app": result.app,
+            },
+        )
+        return result

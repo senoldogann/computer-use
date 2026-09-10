@@ -22,10 +22,8 @@ from __future__ import annotations
 import argparse
 import importlib
 import inspect
-import json
 import logging
 import os
-import random
 import subprocess
 import sys
 import threading
@@ -70,6 +68,7 @@ from computeruse.inbox import (
     sweep_processing,
 )
 from computeruse.memory.episodic import EpisodicStore
+from computeruse.orchestrator.activity import translate_legacy_record
 from computeruse.orchestrator.budget import (
     BudgetExceededError,
     RunBudget,
@@ -130,6 +129,7 @@ from computeruse.providers.openai import (
     openai_model,
     price_for,
 )
+from computeruse.scheduler import estimate_expected_cost, make_proposal
 from computeruse.security.approvals import (
     ApprovalQueue,
     ApprovalRequest,
@@ -166,6 +166,15 @@ DEFAULT_STORE = Path.home() / ".computeruse"
 DEFAULT_SOCKET = str(DEFAULT_STORE / "run" / "actuation-driver.sock")
 DEMO_PROVIDER: str = "demo"
 OPENAI_PREFIX: str = "openai"
+CODEX_PREFIX: str = "codex"
+CLAUDE_PREFIX: str = "claude"
+OPENCODE_PREFIX: str = "opencode"
+#: Bound for one subscription-CLI decide turn. Generous on purpose: the
+#: child bootstraps an agent per call, so API-scale timeouts would kill
+#: healthy turns mid-answer.
+CODEX_TIMEOUT_SECONDS: Final[float] = 300.0
+CLAUDE_TIMEOUT_SECONDS: Final[float] = 300.0
+OPENCODE_TIMEOUT_SECONDS: Final[float] = 300.0
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -360,8 +369,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Raw text model; wrapped by the weak-model scaffolding (prompt "
         f"building + corrective retries). '{OPENAI_PREFIX}[:model_id]' uses the "
         f"built-in OpenAI transport (default model {DEFAULT_MODEL!r}, key from "
-        "OPENAI_API_KEY); otherwise 'module:callable' (str -> str). Takes "
-        "precedence over --provider.",
+        "OPENAI_API_KEY); 'codex[:model_id]' bills the ChatGPT subscription "
+        "via the Codex CLI (codex login required); 'claude[:model_id]' bills "
+        "the Claude subscription via the Claude Code CLI (subscription login "
+        "required); 'opencode[:provider/model]' uses an OpenCode-authenticated "
+        "provider (bare 'opencode' inherits the CLI default); otherwise "
+        "'module:callable' (str -> str). Takes precedence over --provider.",
+    )
+    parser.add_argument(
+        "--audit-model",
+        default=None,
+        help="Bind the completion auditor to a different transport than the "
+        "decide turns — typically a cheaper or free one (e.g. "
+        "'opencode:opencode/muse-spark-1.3-contributor-free'), since an audit "
+        "re-reads one screen against one claim. Token totals still include "
+        "audit calls; dollar cost is billed at the main model's price. "
+        "Omit to audit on the main transport.",
     )
     parser.add_argument(
         "--level",
@@ -596,6 +619,74 @@ class ModelBinding:
     completion_check: Callable[[WorkingState, str], CompletionVerdict]
 
 
+def _resolve_transport(
+    spec: str,
+    *,
+    stats_sink: Callable[[object], None] | None,
+    enforce_decision_schema: bool,
+) -> Callable[[str], str]:
+    """One raw ``str -> str`` transport for a model spec (no scaffolding).
+
+    Split out of :func:`load_model_binding` so decide turns and the
+    completion audit can ride different transports. ``enforce_decision_schema``
+    selects the schema-enforcing variant where one exists (Codex, Claude);
+    transports without the concept (OpenAI's fixed response_format, OpenCode,
+    ``module:callable``) ignore it, so resolving the same spec twice behaves
+    exactly as the old shared instance did.
+    """
+    if spec == OPENAI_PREFIX or spec.startswith(f"{OPENAI_PREFIX}:"):
+        model_id = spec.split(":", 1)[1].strip() if ":" in spec else ""
+        if _accepts_keyword(openai_model, "stats_sink"):
+            return cast(
+                Callable[[str], str],
+                openai_model(model_id or None, stats_sink=stats_sink),
+            )
+        # Legacy/experimental transports that predate usage telemetry get
+        # a plain call; the panel then simply shows no token counters.
+        return cast(Callable[[str], str], openai_model(model_id or None))
+    if spec == CODEX_PREFIX or spec.startswith(f"{CODEX_PREFIX}:"):
+        from computeruse.providers.codex_cli import codex_model
+
+        model_id = spec.split(":", 1)[1].strip() if ":" in spec else ""
+        # Subscription turns are slower than API calls (agent bootstrap per
+        # decide), so the bound is explicit and generous rather than shared.
+        return cast(
+            Callable[[str], str],
+            codex_model(
+                model_id or None,
+                timeout_seconds=CODEX_TIMEOUT_SECONDS,
+                stats_sink=stats_sink,
+                enforce_decision_schema=enforce_decision_schema,
+            ),
+        )
+    if spec == OPENCODE_PREFIX or spec.startswith(f"{OPENCODE_PREFIX}:"):
+        from computeruse.providers.opencode_cli import opencode_model
+
+        model_id = spec.split(":", 1)[1].strip() if ":" in spec else ""
+        return cast(
+            Callable[[str], str],
+            opencode_model(
+                model_id or None,
+                timeout_seconds=OPENCODE_TIMEOUT_SECONDS,
+                stats_sink=stats_sink,
+            ),
+        )
+    if spec == CLAUDE_PREFIX or spec.startswith(f"{CLAUDE_PREFIX}:"):
+        from computeruse.providers.claude_cli import claude_model
+
+        model_id = spec.split(":", 1)[1].strip() if ":" in spec else ""
+        return cast(
+            Callable[[str], str],
+            claude_model(
+                model_id or None,
+                timeout_seconds=CLAUDE_TIMEOUT_SECONDS,
+                stats_sink=stats_sink,
+                enforce_decision_schema=enforce_decision_schema,
+            ),
+        )
+    return cast(Callable[[str], str], _load_callable(spec, "model"))
+
+
 def load_model_binding(
     spec: str,
     *,
@@ -603,6 +694,7 @@ def load_model_binding(
     max_steps: int = 100,
     background: bool = False,
     stats_sink: Callable[[object], None] | None = None,
+    audit_spec: str | None = None,
 ) -> ModelBinding:
     """Resolve a raw text model and wrap it with the weak-model scaffolding.
 
@@ -613,27 +705,34 @@ def load_model_binding(
     (goal, last error, knowledge, mounted skill) and retries with corrective hints
     when the model emits invalid JSON (Law 2.1). ``max_steps`` is passed through
     so the prompt always states the true step budget.
+
+    ``audit_spec`` optionally binds the completion auditor to a *different*
+    transport than the decide turns — typically a cheaper or free one, since
+    an audit re-reads one screen against one claim instead of reasoning over
+    a full working state. Both transports report through the same
+    ``stats_sink``, so token totals stay honest; dollar cost is still billed
+    at the main model's price, which overstates a cheaper auditor rather
+    than understating spend (fail-closed direction for ``--max-cost``).
     """
     load_api_key()
 
-    if spec == OPENAI_PREFIX or spec.startswith(f"{OPENAI_PREFIX}:"):
-        model_id = spec.split(":", 1)[1].strip() if ":" in spec else ""
-        if _accepts_keyword(openai_model, "stats_sink"):
-            model = cast(
-                Callable[[str], str],
-                openai_model(model_id or None, stats_sink=stats_sink),
-            )
-        else:
-            # Legacy/experimental transports that predate usage telemetry get
-            # a plain call; the panel then simply shows no token counters.
-            model = cast(Callable[[str], str], openai_model(model_id or None))
-    else:
-        model = cast(Callable[[str], str], _load_callable(spec, "model"))
+    decide_model = _resolve_transport(
+        spec, stats_sink=stats_sink, enforce_decision_schema=True
+    )
+    # The auditor's verdict has its own shape — enforcing the decision schema
+    # there rejects every audit — so the audit binding is always built with
+    # the flag off, whether it shares the decide transport or not. Both
+    # bindings are always constructed (cheap closures, no side effects);
+    # sharing one instance would smuggle the decide flag onto the auditor
+    # for schema-enforcing transports.
+    audit_model = _resolve_transport(
+        audit_spec or spec, stats_sink=stats_sink, enforce_decision_schema=False
+    )
     return ModelBinding(
         provider=scaffolded_provider(
-            model, app=app, max_steps=max_steps, background=background
+            decide_model, app=app, max_steps=max_steps, background=background
         ),
-        completion_check=completion_auditor(model, app=app),
+        completion_check=completion_auditor(audit_model, app=app),
     )
 
 
@@ -810,6 +909,19 @@ def resolve_cost_price(args: argparse.Namespace) -> TokenPrice | None:
         raise OpenAIError(
             "--max-cost needs a model to price; pass --model openai[:model_id]"
         )
+    for prefix in (CODEX_PREFIX, CLAUDE_PREFIX, OPENCODE_PREFIX):
+        if model_spec == prefix or model_spec.startswith(f"{prefix}:"):
+            # Subscription transports have no published per-token price: the
+            # ceiling cannot be enforced in dollars. Warning, not error, by
+            # operator decision — but --max-tokens still bounds these runs,
+            # because every transport reports token counts.
+            print(
+                f"warning: --max-cost cannot price the {prefix} subscription "
+                f"transport, so spend is unbounded in dollars; use --max-tokens "
+                f"to bound this run",
+                file=sys.stderr,
+            )
+            return None
     if model_spec != OPENAI_PREFIX and not model_spec.startswith(f"{OPENAI_PREFIX}:"):
         raise OpenAIError(
             f"--max-cost cannot price the custom transport {model_spec!r}; "
@@ -817,6 +929,24 @@ def resolve_cost_price(args: argparse.Namespace) -> TokenPrice | None:
         )
     model_id = model_spec.split(":", 1)[1].strip() if ":" in model_spec else ""
     return price_for(model_id or DEFAULT_MODEL)
+
+
+def session_call_cost(
+    price: TokenPrice | None, call: object
+) -> tuple[int, float]:
+    """Tokens and dollars one model call adds to session counters (pure).
+
+    Mirrors the single-run sink exactly: cost is billed from token counts
+    against the published price, never read off the stats object — which
+    carries no cost field, so reading one always yields zero. ``None`` price
+    means no cost ceiling was asked for: the call adds its tokens and no
+    dollars, the same receipt shape a single run without --max-cost writes.
+    """
+    if not isinstance(call, ModelCallStats):
+        return (0, 0.0)
+    if price is None:
+        return (call.total_tokens, 0.0)
+    return (call.total_tokens, call_cost_usd(price, call))
 
 
 def build_config(
@@ -848,6 +978,7 @@ def build_config(
             max_steps=args.max_steps,
             background=getattr(args, "background", False),
             stats_sink=stats_sink,
+            audit_spec=getattr(args, "audit_model", None),
         )
         provider = binding.provider
         # Only a real model can audit its own completion claim against the
@@ -1011,6 +1142,59 @@ def spawn_driver(
     raise RuntimeError(f"driver did not create socket {socket_path} in time: {detail}")
 
 
+def driver_matches_mode(health: dict[str, object], *, real: bool) -> bool:
+    """Pure: does a serving driver's backend match what was requested?
+
+    The health payload names it (``"simulated"`` vs ``"quartz/real"``).
+    Anything unparseable fails closed to a respawn: attaching to a driver
+    whose mode we cannot prove is how a real run ends up clicking through
+    a simulated backend that touches nothing.
+    """
+    backend = health.get("backend")
+    if not isinstance(backend, str):
+        return False
+    return (backend != "simulated") if real else (backend == "simulated")
+
+
+def adopt_warm_driver(socket_path: str, *, real: bool) -> bool:
+    """True when a live driver already serves this socket in the right mode.
+
+    Spawning unconditionally made every CLI invocation pay process start,
+    AppKit init and consent checks, then kill the driver at exit — so two
+    panel runs in a row paid startup twice, and a slow spawn looked like a
+    hung run. A warm driver is adopted instead: same socket, zero startup.
+    Stale socket files, dead listeners and mode mismatches all fall through
+    to a fresh spawn; adoption never kills, so a foreign owner's driver is
+    used, never replaced.
+    """
+    from computeruse.orchestrator.client import ActuationClient
+
+    if not Path(socket_path).exists():
+        return False
+    try:
+        with ActuationClient(
+            socket_path, connect_retries=1, retry_delay_seconds=0.1
+        ) as client:
+            health = client.health()
+    except Exception as exc:  # noqa: BLE001 - any failure means "not adoptable"
+        LOGGER.info("no warm driver on %s (%s); spawning", socket_path, exc)
+        return False
+    if not driver_matches_mode(health, real=real):
+        LOGGER.info(
+            "driver on %s runs backend %r; respawning for %s mode",
+            socket_path,
+            health.get("backend"),
+            "real" if real else "simulated",
+        )
+        return False
+    LOGGER.info(
+        "attaching to warm driver on %s (backend %r)",
+        socket_path,
+        health.get("backend"),
+    )
+    return True
+
+
 def _run_autonomous_session(
     args: argparse.Namespace, *, driver_recover: Callable[[], None] | None
 ) -> int:
@@ -1026,7 +1210,6 @@ def _run_autonomous_session(
     episodes = EpisodicStore(store / "episodes")
     missions = MissionStore(store / "missions")
     approvals = ApprovalQueue(store / "approvals")
-    rng = random.Random()
     # A watched folder, when the operator passed --watch. Off (None) unless
     # given: watching is an explicit opt-in to world-born work.
     watch_dir = Path(args.watch).expanduser() if getattr(args, "watch", None) else None
@@ -1060,6 +1243,11 @@ def _run_autonomous_session(
         max_tokens=args.max_tokens,
         max_cost_usd=args.max_cost,
     )
+    # Resolved once, before the session: a cost ceiling against an unpriced
+    # transport must fail here with an actionable message — the single-run
+    # path's rule — not bill $0.00 per run while the session guard watches a
+    # counter that can never move.
+    session_price = resolve_cost_price(args)
 
     def observe() -> MachineActivity:
         with ActuationClient(args.socket, connect_retries=2) as client:
@@ -1079,13 +1267,18 @@ def _run_autonomous_session(
     session_started_at = time.monotonic()
     tokens = {"total": 0}
     cost = {"usd": 0.0}
+    calls = {"total": 0}
 
     def stats_sink(call: object) -> None:
-        tokens["total"] += int(getattr(call, "total_tokens", 0) or 0)
-        cost["usd"] += float(getattr(call, "cost_usd", 0.0) or 0.0)
+        spent_tokens, spent_cost = session_call_cost(session_price, call)
+        tokens["total"] += spent_tokens
+        cost["usd"] += spent_cost
+        calls["total"] += 1
 
-    def usage_since(mark: tuple[int, float, float]) -> tuple[int, float, float]:
-        """What has been spent since ``mark`` (tokens, dollars, seconds).
+    def usage_since(
+        mark: tuple[int, float, int, float],
+    ) -> tuple[int, float, int, float]:
+        """What has been spent since ``mark`` (tokens, dollars, calls, seconds).
 
         The session's counters are cumulative because the *budget* is the
         session's, so a per-run record has to be a delta — charging each run
@@ -1095,7 +1288,8 @@ def _run_autonomous_session(
         return (
             tokens["total"] - mark[0],
             cost["usd"] - mark[1],
-            time.monotonic() - mark[2],
+            calls["total"] - mark[2],
+            time.monotonic() - mark[3],
         )
 
     def budget_guard() -> None:
@@ -1121,7 +1315,7 @@ def _run_autonomous_session(
             # parked, failure) count the same — the file is consumed.
             operator_goals.add(proposal.goal)
         attempted_goals.append(proposal.goal)
-        mark = (tokens["total"], cost["usd"], time.monotonic())
+        mark = (tokens["total"], cost["usd"], calls["total"], time.monotonic())
         # The mission is opened *before* the run, so a session killed
         # mid-action still leaves a record that this work was started and how
         # far it got. Its attempt is spent here for the same reason.
@@ -1182,7 +1376,7 @@ def _run_autonomous_session(
             config = replace(config, app=proposal.app)
 
         def record(run_id: str, outcome: str, steps: int) -> None:
-            spent_tokens, spent_cost, spent_seconds = usage_since(mark)
+            spent_tokens, spent_cost, spent_calls, spent_seconds = usage_since(mark)
             _record_usage(
                 store,
                 run_id=run_id,
@@ -1192,6 +1386,7 @@ def _run_autonomous_session(
                 steps=steps,
                 tokens=spent_tokens,
                 cost_usd=spent_cost,
+                calls=spent_calls,
                 elapsed_seconds=spent_seconds,
             )
 
@@ -1281,6 +1476,11 @@ def _run_autonomous_session(
         # same question again. Its mission is already held back; this closes
         # the same hole in the episode channel.
         waiting = goals_awaiting_decision(approvals.requests())
+        # Cost history is read fresh on every proposal, not snapshotted for
+        # the session: a run that just recorded what its goal cost should
+        # change what the next proposal estimates. The store read is already
+        # fail-soft (missing or unreadable files read as no history).
+        usage_records = UsageStore(store / "usage").records()
         if watch_dir is not None:
             while True:
                 claimed = claim_next_task(watch_dir, now=time.time(), pid=os.getpid())
@@ -1295,9 +1495,15 @@ def _run_autonomous_session(
                     )
                     continue
                 pending_claim["claim"] = claimed
-                return GoalProposal(
+                return make_proposal(
                     goal=claimed.task.goal,
                     app=claimed.task.app,
+                    source_type="operator_inbox",
+                    source_id=claimed.task.source_name,
+                    confidence=1.0,
+                    expected_cost=estimate_expected_cost(
+                        claimed.task.goal, usage_records
+                    ),
                     reason=(
                         f"task file {claimed.task.source_name!r} claimed "
                         f"from watched folder {watch_dir}"
@@ -1314,19 +1520,30 @@ def _run_autonomous_session(
             if mission.goal in waiting:
                 continue
             pending_mission["mission"] = mission
-            return GoalProposal(
+            return make_proposal(
                 goal=remaining_goal(mission),
                 app=mission.app,
+                source_type="mission_resume",
+                source_id=mission.mission_id,
+                confidence=max(0.5, 1.0 - 0.2 * mission.attempts),
+                expected_cost=estimate_expected_cost(
+                    remaining_goal(mission), usage_records
+                ),
                 reason=(
                     f"mission {mission.mission_id} was started and never "
                     f"finished ({mission.attempts} attempt(s) so far)"
                 ),
             )
-        # Exclusion filters the pools before the die is cast: rejecting after
-        # rng.choice would discard the legitimate candidates left in the pool
+        # Exclusion filters the pools before ranking: rejecting after the
+        # ranking would discard the legitimate candidates left in the pool
         # along with the excluded one and end the session early. A None here
-        # therefore means the pools are genuinely empty — not an unlucky roll.
-        return propose_goal(skills, episodes, rng=rng, exclude=waiting | operator_goals | exhausted_goals)
+        # therefore means the pools are genuinely empty.
+        return propose_goal(
+            skills,
+            episodes,
+            usage=usage_records,
+            exclude=waiting | operator_goals | exhausted_goals,
+        )
 
     done = run_autonomously(
         SessionLimits(
@@ -1401,6 +1618,7 @@ def _record_usage(
     steps: int,
     tokens: int,
     cost_usd: float,
+    calls: int,
     elapsed_seconds: float,
 ) -> None:
     """Write what a run consumed, whatever ending it had.
@@ -1408,7 +1626,9 @@ def _record_usage(
     Best effort by contract: a run that did its work and then failed to write
     its own receipt should not report failure for that reason, so a store that
     cannot be written is logged and skipped. The counters are otherwise lost
-    with the terminal — they only ever existed in this process.
+    with the terminal — they only ever existed in this process. ``calls``
+    counts model turns (decide + audit) so batch adherence — steps per
+    turn — stays measurable after the fact.
     """
     try:
         UsageStore(store / "usage").record(
@@ -1420,6 +1640,7 @@ def _record_usage(
                 steps=steps,
                 total_tokens=tokens,
                 cost_usd=cost_usd,
+                calls=calls,
                 elapsed_seconds=elapsed_seconds,
                 recorded_at=now_utc(),
             )
@@ -1903,7 +2124,15 @@ def _resolve_target_app(args: argparse.Namespace) -> tuple[bool, bool]:
 
 def _emit_plan(plan: GoalPlan) -> None:
     """Publish additive plan events without changing existing step records."""
-    print("@@CU " + json.dumps({"type": "plan", "plan": plan.model_dump(mode="json")}, ensure_ascii=False), flush=True)
+    print(
+        translate_legacy_record(
+            {"type": "plan", "plan": plan.model_dump(mode="json")},
+            run_id="",
+            session_id="",
+            sequence=0,
+        ),
+        flush=True,
+    )
 
 
 def _run_goal(
@@ -1941,11 +2170,21 @@ def _run_goal(
             if price is not None:
                 run_cost["usd"] += call_cost_usd(price, call)
         elapsed = time.monotonic() - run_started_at
-        print("@@CU " + json.dumps({
-            "type": "stats", "total_tokens": run_tokens["total"],
-            "cost_usd": run_cost["usd"] if price is not None else None,
-            "elapsed_seconds": elapsed, "calls": run_calls,
-        }), flush=True)
+        print(
+            translate_legacy_record(
+                {
+                    "type": "stats",
+                    "total_tokens": run_tokens["total"],
+                    "cost_usd": run_cost["usd"] if price is not None else None,
+                    "elapsed_seconds": elapsed,
+                    "calls": run_calls,
+                },
+                run_id="",
+                session_id="",
+                sequence=0,
+            ),
+            flush=True,
+        )
         print(
             f"st : tok_total={run_tokens['total']} elapsed={elapsed:.1f}s calls={run_calls}",
             file=sys.stderr,
@@ -2002,6 +2241,7 @@ def _run_goal(
             steps=0,
             tokens=run_tokens["total"],
             cost_usd=run_cost["usd"],
+            calls=run_calls,
             elapsed_seconds=time.monotonic() - run_started_at,
         )
         raise
@@ -2014,6 +2254,7 @@ def _run_goal(
         steps=len(result.state.completed_steps),
         tokens=run_tokens["total"],
         cost_usd=run_cost["usd"],
+        calls=run_calls,
         elapsed_seconds=time.monotonic() - run_started_at,
     )
 
@@ -2026,6 +2267,7 @@ def _run_goal(
     if config.activate_app_on_start:
         print(f"activated   : {config.app}")
     print(f"steps       : {len(result.state.completed_steps)}")
+    print(f"calls       : {run_calls}")
     if result.state.last_error:
         print(f"last_error  : {result.state.last_error}")
     if result.distilled is not None:
@@ -2077,8 +2319,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # would leave two drivers fighting over one socket.
     driver_recover: Callable[[], None] | None = None
     try:
-        # When a driver binary is given we always spawn it (stale sockets are
-        # cleared first); only without --driver do we attach to a running one.
+        # When a driver binary is given we spawn it — unless a live driver
+        # already serves the socket in the requested mode, in which case we
+        # attach (stale sockets are still cleared first on the spawn path).
+        # Only without --driver do we unconditionally attach to a running one.
         if args.driver is not None:
             driver_binary = args.driver
             driver_socket = args.socket
@@ -2087,14 +2331,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             def _spawn_driver_again() -> subprocess.Popen[bytes]:
                 return spawn_driver(driver_binary, driver_socket, real=driver_real)
 
-            driver_process = _spawn_driver_again()
-            # The recovery hook fires only after the client's own RPC retries
-            # are spent, so a driver still running at that point is one that
-            # is not answering — ``restart_unresponsive`` ends it first rather
-            # than leaving the run to retry a socket nobody is listening on.
-            driver_recover = supervisor_for(
-                _spawn_driver_again, driver_process
-            ).restart_unresponsive
+            if adopt_warm_driver(driver_socket, real=driver_real):
+                # Adopted, not owned: the finally clause below only kills
+                # processes we spawned, so a foreign driver's lifetime is
+                # untouched — and without a handle there is nothing to
+                # supervise, so a dead adopted driver fails the run loudly
+                # instead of being resurrected behind its owner's back.
+                driver_process = None
+                driver_recover = None
+            else:
+                driver_process = _spawn_driver_again()
+                # The recovery hook fires only after the client's own RPC retries
+                # are spent, so a driver still running at that point is one that
+                # is not answering — ``restart_unresponsive`` ends it first rather
+                # than leaving the run to retry a socket nobody is listening on.
+                driver_recover = supervisor_for(
+                    _spawn_driver_again, driver_process
+                ).restart_unresponsive
         # Autonomous app resolution: the goal may carry an explicit `[App
         # Name]` prefix, or name the target implicitly ("Excel'de aç",
         # "YouTube'da arat"). Resolve it here so the provider sees the

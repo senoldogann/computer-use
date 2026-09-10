@@ -9,6 +9,7 @@ full body (loaded per skill id when the orchestrator decides a skill applies).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Final, Literal
 
 from pydantic import BaseModel, Field
@@ -55,6 +56,59 @@ SKILL_ID_PATTERN: Final[str] = r"^[a-z0-9][a-z0-9._-]*$"
 #: hard budget rather than a formatting preference.
 SUMMARY_DESCRIPTION_MAX: Final[int] = 200
 
+#: Action types a skill recipe may replay without a model turn. Physical
+#: actuation and waits only: ``call_tool`` answers feed reasoning and cannot
+#: run blind, ``finish``/``load_skill`` never reach the physical layer, and
+#: ``click_mark`` carries a frame-bound index that is meaningless across
+#: runs (its resolved click is what the trajectory records). ``mouse_drag``
+#: is excluded deliberately: only its *end* point has a recorded AX
+#: identity, and re-grounding the start from the current cursor would turn
+#: thumb-drags into presses-from-wherever. ``mouse_move`` is excluded for
+#: the mirror reason: a move names no target, so replaying it would be raw
+#: coordinate replay; scrolling replays at the cursor the replayed clicks
+#: leave behind.
+REPLAYABLE_ACTION_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        "mouse_click",
+        "mouse_scroll",
+        "type_text",
+        "clipboard_paste",
+        "press_hotkey",
+        "activate_app",
+        "navigate",
+        "wait",
+    }
+)
+
+#: Payload keys that name screen coordinates. Stripped when a recipe step is
+#: stored and again when it is replayed: the stored values are never trusted,
+#: only the re-grounded ones actuate.
+RECIPE_COORDINATE_KEYS: Final[frozenset[str]] = frozenset(
+    {"x", "y", "start_x", "start_y", "end_x", "end_y"}
+)
+
+#: JSON scalar shapes a recipe parameter may carry. A closed union, not
+#: ``Any``: params are rebuilt into a validated action via
+#: ``action_from_payload`` at replay, and anything outside these shapes fails
+#: closed there instead of actuating.
+RecipeParamValue = str | int | float | bool | list[str] | None
+
+
+class RecipeStep(BaseModel):
+    """One machine-replayable skill step: what to do and what to do it to.
+
+    Coordinates are never stored (they drift between runs); ``target`` names
+    the accessibility identity the step acted on and is re-grounded against
+    the live mark list at replay — a target that is not on screen ends the
+    fast path instead of clicking blind. Operand text (typed/pasted) IS
+    stored: the fast path replays only for the exact goal the skill was
+    distilled from, so the operand belongs to this task, not a past one.
+    """
+
+    action_type: str
+    params: dict[str, RecipeParamValue] = Field(default_factory=dict)
+    target: str = ""
+
 
 def condense_description(description: str) -> str:
     """Fit a description into the Stage-1 budget (pure).
@@ -98,6 +152,12 @@ class SkillSummary(BaseModel):
     app: str
     uses: int = Field(default=0, ge=0)
     wins: int = Field(default=0, ge=0)
+    #: Consecutive successful runs, for fast-path eligibility. Projected
+    #: (not recomputed) because ranking happens over summaries.
+    consecutive_wins: int = Field(default=0, ge=0)
+    #: Whether a machine-readable recipe exists. The recipe itself stays in
+    #: Stage 2: the summary only says there is one worth loading.
+    has_recipe: bool = False
     tags: tuple[str, ...] = Field(default=(), description="Search keywords.")
     parameters: tuple[str, ...] = Field(
         default=(), description="Parameter slot names (e.g. ('query', 'url'))."
@@ -124,6 +184,24 @@ class SkillDefinition(BaseModel):
     #: being made.
     uses: int = Field(default=0, ge=0, description="Runs that mounted this skill.")
     wins: int = Field(default=0, ge=0, description="Those runs that succeeded.")
+    #: Consecutive successful runs. The fast path trusts streaks, not totals:
+    #: a skill that worked twice in a row in this environment is a safer
+    #: replay bet than one with ten old wins and three recent misses.
+    consecutive_wins: int = Field(default=0, ge=0)
+    #: When the streak's latest win happened. Informational: staleness policy
+    #: is a follow-up, and a field nobody reads is a lie about what matters.
+    last_success_at: datetime | None = None
+    #: Where the streak was earned, as "{app}|{site}". A recipe proven in one
+    #: app or site does not replay in another.
+    last_env: str = ""
+    #: Why the streak last broke (bounded at write time). The next failure
+    #: overwrites it; a later success clears it.
+    last_failure_reason: str = ""
+    #: Machine-readable replay prefix for the fast path. Empty for skills
+    #: distilled before recipes existed and for flows no prefix of which
+    #: replays (tool-first trajectories) — both stay valid skills, never
+    #: fast-path eligible.
+    recipe: tuple[RecipeStep, ...] = ()
     steps: tuple[str, ...] = Field(description="Human-readable ordered steps.")
     # Canonical signature makes the distiller's novelty check cheap: identical
     # action sequences collapse to the same signature without re-analysis.
@@ -151,6 +229,8 @@ def summary_of(definition: SkillDefinition) -> SkillSummary:
         # so a skill's history has to travel with the thing being ranked.
         uses=definition.uses,
         wins=definition.wins,
+        consecutive_wins=definition.consecutive_wins,
+        has_recipe=bool(definition.recipe),
     )
 
 
@@ -176,6 +256,11 @@ def instantiate_skill(
         version=definition.version,
         uses=definition.uses,
         wins=definition.wins,
+        consecutive_wins=definition.consecutive_wins,
+        last_success_at=definition.last_success_at,
+        last_env=definition.last_env,
+        last_failure_reason=definition.last_failure_reason,
+        recipe=definition.recipe,
         steps=tuple(new_steps),
         signature=definition.signature,
         phase=definition.phase,

@@ -63,6 +63,12 @@ class UsageRecord(BaseModel):
     cost_usd: float = Field(ge=0.0)
     elapsed_seconds: float = Field(ge=0.0)
     recorded_at: datetime
+    # Model turns (decide + audit calls) behind those steps. Steps-per-call
+    # is the batch-adherence metric: a run that fills five fields in twelve
+    # turns is not batching, and without this counter that fact evaporates
+    # with the terminal. Defaulted so receipts written before it existed
+    # keep validating.
+    calls: int = Field(default=0, ge=0)
 
 
 @dataclass(frozen=True)
@@ -110,12 +116,34 @@ class RunReport:
         return sum(record.cost_usd for record in self.usage)
 
     @property
+    def total_calls(self) -> int:
+        return sum(record.calls for record in self.usage)
+
+    @property
+    def usage_only(self) -> tuple[UsageRecord, ...]:
+        """Usage receipts with no episode to join to (pure).
+
+        A zero-action run verifies and finishes without ever producing a
+        trajectory, so no episode is persisted — but its receipt still is.
+        Joining on ``run_id`` (the key the agent stamps on both records) keeps
+        a receipt that belongs to an episode from rendering twice; a receipt
+        that joins to nothing renders as what it is, so spend is never
+        silently absent from the report.
+        """
+        episode_runs = {episode.run_id for episode in self.episodes}
+        return tuple(
+            record for record in self.usage if record.run_id not in episode_runs
+        )
+
+    @property
     def is_quiet(self) -> bool:
-        """Nothing ran, nothing is waiting — the period has nothing to say."""
+        """Nothing ran, nothing spent, nothing is waiting."""
         inbox_open = self.inbox is not None and bool(
             self.inbox.failed or self.inbox.orphaned
         )
-        return not (self.episodes or self.blocked or self.waiting or inbox_open)
+        return not (
+            self.episodes or self.usage or self.blocked or self.waiting or inbox_open
+        )
 
 
 def summarize(
@@ -250,9 +278,16 @@ def render(report: RunReport) -> str:
     if report.inbox is not None:
         lines.extend(_inbox_lines(report.inbox))
 
+    extra_finished = sum(
+        1 for record in report.usage_only if record.outcome == "success"
+    )
+    extra_unfinished = sum(
+        1 for record in report.usage_only if record.outcome == "failure"
+    )
     lines.append(
-        f"ran — {len(report.episodes)} run(s): "
-        f"{report.succeeded} finished, {report.failed} did not"
+        f"ran — {len(report.episodes) + len(report.usage_only)} run(s): "
+        f"{report.succeeded + extra_finished} finished, "
+        f"{report.failed + extra_unfinished} did not"
     )
     for episode in report.episodes:
         mark = "ok  " if episode.outcome == "success" else "lost"
@@ -261,11 +296,23 @@ def render(report: RunReport) -> str:
         )
         if episode.outcome != "success" and episode.retrospective:
             lines.append(f"       {_ellipsis(episode.retrospective, GOAL_LINE_MAX_CHARS)}")
+    for record in report.usage_only:
+        if record.outcome == "success":
+            mark = "ok  "
+        elif record.outcome == "failure":
+            mark = "lost"
+        else:
+            mark = "held"
+        lines.append(
+            f"  {mark} [{record.app}] {_ellipsis(record.goal, GOAL_LINE_MAX_CHARS)}"
+            " (receipt only: no episode persisted)"
+        )
     lines.append("")
 
     if report.usage:
         lines.append(
-            f"spent — {report.total_tokens:,} tokens, ${report.total_cost_usd:.2f}"
+            f"spent — {report.total_calls} model calls, "
+            f"{report.total_tokens:,} tokens, ${report.total_cost_usd:.2f}"
         )
         lines.append("")
     else:

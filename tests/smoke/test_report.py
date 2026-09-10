@@ -37,7 +37,12 @@ LAST_WEEK = NOW - timedelta(days=7)
 
 
 def _episode(
-    *, description: str, outcome: str, at: datetime, retrospective: str | None = None
+    *,
+    description: str,
+    outcome: str,
+    at: datetime,
+    retrospective: str | None = None,
+    run_id: str | None = None,
 ) -> Episode:
     return Episode(
         episode_id=f"safari.{int(at.timestamp())}{outcome[0]}",
@@ -47,19 +52,28 @@ def _episode(
         outcome=outcome,  # type: ignore[arg-type]
         retrospective=retrospective,
         signature="deadbeef",
+        run_id=run_id,
         recorded_at=at,
     )
 
 
-def _usage(*, at: datetime, tokens: int, cost: float) -> UsageRecord:
+def _usage(
+    *,
+    at: datetime,
+    tokens: int,
+    cost: float,
+    run_id: str | None = None,
+    calls: int = 0,
+) -> UsageRecord:
     return UsageRecord(
-        run_id=f"run-{int(at.timestamp())}",
+        run_id=run_id if run_id is not None else f"run-{int(at.timestamp())}",
         goal="tidy the exports",
         app="Safari",
         outcome="success",
         steps=4,
         total_tokens=tokens,
         cost_usd=cost,
+        calls=calls,
         elapsed_seconds=42.0,
         recorded_at=at,
     )
@@ -259,6 +273,78 @@ def test_recorded_zero_spend_is_shown_as_zero() -> None:
     )
     assert "$0.00" in text
     assert "not recorded" not in text
+
+
+def test_usage_without_episodes_breaks_the_quiet() -> None:
+    """A zero-action run leaves a receipt but no episode; the spend it
+    records is exactly what the report exists to surface.
+
+    Measured on the real host: three verified zero-action runs spent model
+    budget and the report answered "nothing ran" — the spend line below the
+    quiet early-return never printed.
+    """
+    text = render(_report(usage=(_usage(at=LAST_NIGHT, tokens=1200, cost=0.42),)))
+    assert "nothing ran, and nothing is waiting on you." not in text
+    assert "ran — 1 run(s): 1 finished, 0 did not" in text
+    assert "(receipt only: no episode persisted)" in text
+    assert "1,200 tokens, $0.42" in text
+
+
+def test_spent_line_counts_model_calls() -> None:
+    """Steps-per-call is the batch-adherence metric: the receipt must carry
+    turns, not just tokens, or the next analysis round is blind again."""
+    text = render(
+        _report(
+            usage=(
+                _usage(at=LAST_NIGHT, tokens=1200, cost=0.42, calls=3),
+                _usage(at=LAST_NIGHT, tokens=800, cost=0.18, calls=2),
+            )
+        )
+    )
+    assert "5 model calls" in text
+    assert "2,000 tokens, $0.60" in text
+
+
+def test_old_receipts_without_calls_still_validate() -> None:
+    """Receipts written before the counter existed read as zero calls —
+    history must not break on a new field."""
+    record = UsageRecord.model_validate(
+        {
+            "run_id": "run-old",
+            "goal": "x",
+            "app": "Safari",
+            "outcome": "success",
+            "steps": 1,
+            "total_tokens": 10,
+            "cost_usd": 0.01,
+            "elapsed_seconds": 1.0,
+            "recorded_at": "2026-09-03T02:00:00Z",
+        }
+    )
+    assert record.calls == 0
+    assert "0 model calls" in render(_report(usage=(record,)))
+
+
+def test_usage_joined_to_an_episode_is_not_double_counted() -> None:
+    """The run_id join keeps one run as one line, not two."""
+    text = render(
+        _report(
+            episodes=(
+                _episode(description="a", outcome="success", at=LAST_NIGHT, run_id="run-9"),
+            ),
+            usage=(_usage(at=LAST_NIGHT, tokens=100, cost=0.01, run_id="run-9"),),
+        )
+    )
+    assert "ran — 1 run(s): 1 finished, 0 did not" in text
+    assert "receipt only" not in text
+
+
+def test_usage_only_failure_counts_as_not_finished() -> None:
+    record = _usage(at=LAST_NIGHT, tokens=100, cost=0.01)
+    record = record.model_copy(update={"outcome": "failure"})
+    text = render(_report(usage=(record,)))
+    assert "ran — 1 run(s): 0 finished, 1 did not" in text
+    assert "lost" in text
 
 
 def test_a_long_goal_is_trimmed_to_one_line() -> None:

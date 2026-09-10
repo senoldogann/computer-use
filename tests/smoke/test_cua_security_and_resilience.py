@@ -164,7 +164,10 @@ def test_cua_repl_self_healing_stale_locators() -> None:
     def snapshot_provider(app_name: str) -> tuple[AXElement, str]:
         nonlocal version
         if version == 1:
-            # Initial layout: Submit button is index 1
+            # Initial layout: Details button is index 1. Deliberately not
+            # "Submit": a submit-labeled control must ask first (send
+            # family), which is a different test — this one is only about
+            # healing a stale index, so the fixture stays benign.
             root = AXElement(
                 role="Window",
                 title="Form",
@@ -173,7 +176,7 @@ def test_cua_repl_self_healing_stale_locators() -> None:
                 children=(
                     AXElement(
                         role="Button",
-                        title="Submit",
+                        title="Details",
                         x=100,
                         y=100,
                         width=80,
@@ -183,7 +186,7 @@ def test_cua_repl_self_healing_stale_locators() -> None:
             )
             return root, "Form"
 
-        # Mutated layout: A new banner appeared above, pushing Submit to index 2 and y=250
+        # Mutated layout: A new banner appeared above, pushing Details to index 2 and y=250
         root = AXElement(
             role="Window",
             title="Form",
@@ -200,7 +203,7 @@ def test_cua_repl_self_healing_stale_locators() -> None:
                 ),
                 AXElement(
                     role="Button",
-                    title="Submit",
+                    title="Details",
                     x=100,
                     y=250,
                     width=80,
@@ -216,10 +219,10 @@ def test_cua_repl_self_healing_stale_locators() -> None:
     )
 
     try:
-        # Step 1: Initialize app (records historical Submit at index 1, y=100)
+        # Step 1: Initialize app (records historical Details at index 1, y=100)
         res1 = engine.execute('var app = await cua.getApp("WebForm");')
         assert res1.status == "completed"
-        assert '[1] Button "Submit"' in res1.content
+        assert '[1] Button "Details"' in res1.content
 
         # Background mutation happens: layout changes
         version = 2
@@ -232,9 +235,53 @@ def test_cua_repl_self_healing_stale_locators() -> None:
         )
         assert res2.status == "completed"
 
-        # The driver should have clicked the newly healed Submit button at y=250 (centre_y=265)!
+        # The driver should have clicked the newly healed Details button at y=250 (centre_y=265)!
         click = next(a for a in driver.sent_actions if isinstance(a, MouseClick))
         assert click.y == 265
+    finally:
+        engine.stop()
+
+
+def test_cua_repl_submit_labeled_click_is_refused() -> None:
+    """The REPL enforces the same send family as the OODA guard: a script
+    clicking a control titled "Submit" is refused under FULL autonomy rather
+    than dispatched. A live run once submitted a Finnish contact form with no
+    confirmation because "submit" was not a send verb; both enforcement
+    points now agree."""
+    driver = MockDriverClient()
+
+    def snapshot_provider(app_name: str) -> tuple[AXElement, str]:
+        root = AXElement(
+            role="Window",
+            title="Form",
+            width=600,
+            height=400,
+            children=(
+                AXElement(
+                    role="Button",
+                    title="Submit",
+                    x=100,
+                    y=100,
+                    width=80,
+                    height=30,
+                ),
+            ),
+        )
+        return root, "Form"
+
+    engine = CuaReplEngine(
+        driver_client=driver,
+        snapshot_provider=snapshot_provider,
+    )
+
+    try:
+        res = engine.execute(
+            'var app = await cua.getApp("WebForm"); await app.click(1);'
+        )
+        assert res.status == "failed"
+        assert not [
+            a for a in driver.sent_actions if isinstance(a, MouseClick)
+        ], "a submit control must never reach the driver unasked"
     finally:
         engine.stop()
 

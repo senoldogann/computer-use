@@ -32,3 +32,24 @@ Bu belge, otonom bilgisayar kullanım ajanının (Computer Use Agent) yerel veya
 * GitHub Analiz Raporu: [`target/real-world-external-benchmarks-20260906/GITHUB_ANALIZ_RAPORU.md`](file:///Users/dogan/Desktop/computeruse/target/real-world-external-benchmarks-20260906/GITHUB_ANALIZ_RAPORU.md)
 * Hacker News Raporu: [`target/real-world-external-benchmarks-20260906/HACKERNEWS_CANLI_ANALIZ.md`](file:///Users/dogan/Desktop/computeruse/target/real-world-external-benchmarks-20260906/HACKERNEWS_CANLI_ANALIZ.md)
 * Master JSON: [`target/real-world-external-benchmarks-20260906/MASTER_REAL_WORLD_SUMMARY.json`](file:///Users/dogan/Desktop/computeruse/target/real-world-external-benchmarks-20260906/MASTER_REAL_WORLD_SUMMARY.json)
+
+---
+
+## 🧪 2026-09-08 — Yeni Güvenlik/Bellek Katmanlarının Gerçek-Host Doğrulaması
+
+Sovereign mode, ranked scheduler (CLI migrasyonu sonrası) ve adaptive preference memory'nin simulated backend dışındaki ilk ölçümü. Scratch store (`/tmp/cu-realcheck`) kullanıldı, gerçek hafıza kirletilmedi. Sürücü kaynaktan taze derlendi (`cargo build --release`, 11.31 sn), model `gpt-5.6-terra`, ön uygulama `T3 Code (Nightly)`.
+
+| # | Hedef | Adım | Token | Gerçek Maliyet | Sonuç |
+|---|---|---|---|---|---|
+| 1. Sovereign smoke (`--sovereign`, sıfır-eylem hedefi) | Ön pencere başlığını raporla, ekrana dokunma | 1 | 12.064 | $0.025 | ✅ success, completion-auditor onaylı, ekranda değişiklik yok |
+| 2. Preference, sıfır-eylemli goal (`tercih: cevap dili = Türkçe` + salt-okuma) | Başlığı raporla | 1 | 15.698 | $0.033 | ✅ success ama tercih **yazılmadı** — tasarım gereği: trajectory boşken `on_complete` öğrenmeden erken döner |
+| 3. Scheduler, inbox yolu (`--autonomous 1 --watch`) | `task1.txt`'teki hedefi çalıştır | 1 | 15.807 | $0.033 (makbuza **$0.00** yazıldı — Bug 2) | ✅ success; `task file 'task1.txt' claimed…` logu, `.processed/` arşivi doğrulandı |
+| 4. Preference, tek-tıklamalı goal (Aşama 2 tekrarı) | Pencereye 1 odak tıklaması + başlığı raporla | 2 | 26.381 | $0.059 | ✅ success; `general.cevap-dili = Türkçe` (conf 1.0, explicit, evidence=run_id) store'a yazıldı ve `active()` ile geri okundu |
+
+* **Toplam:** `4/4 success`, `69.950 token`, gerçek harcama `~$0.15`
+* **Faz metrikleri (`phase_s`)** dört run'da da mevcut: karar turu (decide_s ≈ 2.5–6.4 sn) baskın maliyet; gözlem + eylem ≈ 4–8 sn.
+
+### Deneyin bulduğu ve aynı gün kapatılan iki bug
+
+1. **Rapor harcamayı gizliyordu:** sıfır-episode'lu run'ların makbuzları `--report`'ta görünmüyor, spend satırı hiç yazılmıyordu (`is_quiet` usage'a bakmıyordu). Düzeltme: `run_id` join anahtarıyla `usage_only` render edilir.
+2. **Otonom oturumlar $0.00 faturalıyordu:** session `stats_sink`'i stats objesindeki var-olmayan `cost_usd` alanını okuyordu; sonuç olarak tüm otonom makbuzlar $0.00 ve `--max-cost` tavanı otonomda **asla tetiklenmiyordu**. Düzeltme: single-run ile birebir aynı kural (startup'ta fiyat çözümleme + `call_cost_usd`).

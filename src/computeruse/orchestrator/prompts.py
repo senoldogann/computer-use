@@ -76,7 +76,7 @@ ACTION_CONTRACT: Final[str] = (
     '    "sub_goal": "<the single immediate objective this action advances>",\n'
     '    "action": {"type": "<action_type>", ...}\n'
     '  }\n'
-    "  Action batch (up to 3 actions executed back-to-back in this ONE turn):\n"
+    "  Action batch (up to 5 actions executed back-to-back in this ONE turn):\n"
     '  {\n'
     '    "thought": "<observation>",\n'
     '    "sub_goal": "<objective advanced by the whole batch>",\n'
@@ -84,10 +84,12 @@ ACTION_CONTRACT: Final[str] = (
     '    "actions": [{"type": "<action_type>", ...}, {"type": "<action_type>", ...}]\n'
     '  }\n'
     '  (In the batch form, "action" repeats the FIRST element of "actions".)\n'
-    "  BATCHING RULES: batch only actions that are safe to execute SEQUENTIALLY from the CURRENT screen without re-observation — e.g. Cmd+L, then paste a URL, then Return; or two clicks on already-visible elements. NEVER batch an action whose target depends on a screen change caused by an earlier action in the same batch (e.g. do not click a search result in the same batch as the Return that submits the search). If any doubt, emit a single action. `finish` must be the LAST action of a batch.\n"
+    "  BATCHING RULES: turns are the expensive unit (a full re-observation cycle each), so batch aggressively: any actions safe to execute SEQUENTIALLY from the CURRENT screen go in ONE turn — e.g. click field + Cmd+A + paste, repeated per visible field. Opening a URL is NOT a batch: emit ONE navigate action (the loop performs and verifies the whole sequence). NEVER batch an action whose target depends on a screen change caused by an earlier action in the same batch (e.g. do not click a search result in the same batch as the Return that submits the search). If any doubt, emit a single action. NEVER click a control that is already focused, open, or selected — proceed to its option or the next step instead (a second click on an open dropdown closes it or wastes a turn). `finish` must be the LAST action of a batch.\n"
+  "  FORM FILLING IS THE CANONICAL BATCH: when every target field is already visible on the CURRENT screen, fill them back-to-back in ONE turn — e.g. click Nimi + Cmd+A + paste name, then click Sähköposti + Cmd+A + paste email, then click Viesti + paste message. One model turn costs a full re-observation cycle (~10 seconds wall clock): batching routine fills is the DEFAULT, single actions the exception. NEVER batch the submit/send click with the fills — verify the filled values on a fresh observation first, then submit.\n"
     "\n"
     "2. SUPPORTED ACTIONS:\n"
-    '- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2}\n'
+    '- navigate: {"type": "navigate", "url": "https://..."} — THE ONLY WAY to open a URL. NEVER focus the address bar + paste + Return by hand: the loop performs exactly that sequence and verifies the page actually arrived (title must move), which bare keystrokes cannot prove. http/https only.\n'
+'- mouse_click: {"type": "mouse_click", "x": int, "y": int, "button": "left|right|middle", "click_count": 1|2}\n'
     '- click_mark: {"type": "click_mark", "mark": int} — clicks the exact centre of an element identified by its [mark] index in the AX UI elements list. PREFERRED over coordinate estimation whenever the target element has a mark.\n'
     '- mouse_move: {"type": "mouse_move", "x": int, "y": int, "duration_ms": int (default 180)} — ONLY when hover, tooltip, or drag preparation is explicitly needed\n'
     '- mouse_drag: {"type": "mouse_drag", "start_x": int, "start_y": int, "end_x": int, "end_y": int, "duration_ms": int (default 200)}\n'

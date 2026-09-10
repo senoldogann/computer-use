@@ -3916,28 +3916,42 @@
     }
 
     .palette-sidebar {
-      width: 44px !important;
+      width: 56px !important;
       background: #151413 !important;
       border-right: 0.5px solid #252422 !important;
       display: flex !important;
       flex-direction: column !important;
       align-items: center !important;
       padding: 8px 0 !important;
-      gap: 8px !important;
+      gap: 6px !important;
       flex-shrink: 0 !important;
     }
 
     .palette-provider-btn {
-      width: 28px !important;
-      height: 28px !important;
+      width: 46px !important;
+      height: 32px !important;
       border-radius: 6px !important;
-      display: grid !important;
-      place-items: center !important;
+      display: flex !important;
+      flex-direction: column !important;
+      align-items: center !important;
+      justify-content: center !important;
+      gap: 2px !important;
       background: transparent !important;
       border: none !important;
       color: #7A7874 !important;
       cursor: pointer !important;
       transition: all 0.12s ease !important;
+    }
+
+    .palette-provider-caption {
+      font-size: 8px !important;
+      line-height: 1 !important;
+      letter-spacing: 0.02em !important;
+      color: inherit !important;
+      max-width: 46px !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+      white-space: nowrap !important;
     }
 
     .palette-provider-btn:hover {
@@ -4814,6 +4828,10 @@
 
     .model-palette-popover.open {
       display: flex !important;
+      /* The earlier rule sets flex-direction:column (invisible with a single
+         child); the icon sidebar needs a row. Later rule wins on display
+         but does NOT reset direction — stated explicitly. */
+      flex-direction: row !important;
       animation: none !important;
     }
 
@@ -5402,6 +5420,18 @@
 
     <!-- Model Palette Popover (OpenAI Native & Live Models) -->
     <div class="luxury-floating-popover model-palette-popover" id="modelPaletteModal" style="display:none;">
+      <div class="palette-sidebar" id="paletteSidebar">
+        <button class="palette-provider-btn active" data-prov="all" title="Tümü"
+          onclick="filterByProvider('all', event)">★</button>
+        <button class="palette-provider-btn" data-prov="openai" title="OpenAI API"
+          onclick="filterByProvider('openai', event)"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg><span class="palette-provider-caption">OpenAI</span></button>
+        <button class="palette-provider-btn" data-prov="codex" title="Codex (ChatGPT)"
+          onclick="filterByProvider('codex', event)"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 4v-4H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg><span class="palette-provider-caption">Codex</span></button>
+        <button class="palette-provider-btn" data-prov="claude" title="Claude"
+          onclick="filterByProvider('claude', event)"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg><span class="palette-provider-caption">Claude</span></button>
+        <button class="palette-provider-btn" data-prov="opencode" title="OpenCode"
+          onclick="filterByProvider('opencode', event)"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM5 6h14v12H5zM7.5 8.5L11 12l-3.5 3.5L9 17l5-5-5-5zM13 16h5v2h-5z"/></svg><span class="palette-provider-caption">OpenCode</span></button>
+      </div>
       <div class="palette-main">
         <div class="palette-search-wrapper">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#AAA8A3" stroke-width="2.5">
@@ -5409,7 +5439,7 @@
             <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
           <input class="palette-search-input" id="paletteSearchInput"
-            placeholder="Model ara... (terra, sol, luna, astra)"
+            placeholder="Model ara... (terra, copilot, kimi, codex)"
             oninput="filterPaletteModels(this.value)">
           <button class="palette-close-btn"
             onclick="event.preventDefault(); event.stopPropagation(); window.closeAllLuxuryPopovers();"
@@ -5423,7 +5453,7 @@
                developers.openai.com/api/docs/models/gpt-5.6-sol|terra|luna ve
                /api/docs/models/gpt-6-astra). Başka model gösterilmez. -->
           <div class="palette-model-item selected" data-model="openai:gpt-5.6-terra"
-            onclick="selectPaletteModel('openai:gpt-5.6-terra', 'gpt-5.6-terra', 'OpenAI', event)">
+            onclick="selectPaletteModel('openai:gpt-5.6-terra', 'gpt-5.6-terra', 'OpenAI', event)" data-prov="openai">
             <div>
               <div class="palette-model-title">gpt-5.6-terra</div>
               <div class="palette-model-meta"><span class="provider-status-dot active"></span> Varsayılan • Dengeli
@@ -5436,7 +5466,7 @@
           </div>
 
           <div class="palette-model-item" data-model="openai:gpt-5.6-sol"
-            onclick="selectPaletteModel('openai:gpt-5.6-sol', 'gpt-5.6-sol', 'OpenAI', event)">
+            onclick="selectPaletteModel('openai:gpt-5.6-sol', 'gpt-5.6-sol', 'OpenAI', event)" data-prov="openai">
             <div>
               <div class="palette-model-title">gpt-5.6-sol</div>
               <div class="palette-model-meta"><span class="provider-status-dot active"></span> Flagship • Maksimum
@@ -5449,7 +5479,7 @@
           </div>
 
           <div class="palette-model-item" data-model="openai:gpt-5.6-luna"
-            onclick="selectPaletteModel('openai:gpt-5.6-luna', 'gpt-5.6-luna', 'OpenAI', event)">
+            onclick="selectPaletteModel('openai:gpt-5.6-luna', 'gpt-5.6-luna', 'OpenAI', event)" data-prov="openai">
             <div>
               <div class="palette-model-title">gpt-5.6-luna</div>
               <div class="palette-model-meta"><span class="provider-status-dot active"></span> Ultra Hızlı • Düşük
@@ -5462,7 +5492,7 @@
           </div>
 
           <div class="palette-model-item" data-model="openai:gpt-6-astra"
-            onclick="selectPaletteModel('openai:gpt-6-astra', 'gpt-6-astra', 'OpenAI', event)">
+            onclick="selectPaletteModel('openai:gpt-6-astra', 'gpt-6-astra', 'OpenAI', event)" data-prov="openai">
             <div>
               <div class="palette-model-title">gpt-6-astra</div>
               <div class="palette-model-meta"><span class="provider-status-dot active"></span> En Yetkin • Computer
@@ -5474,9 +5504,65 @@
             </div>
           </div>
 
+          <div class="curated-section-header" style="margin-top:6px;">ABONELİK — MEVCUT GİRİŞLERİNİZ</div>
+
+          <!-- Abonelik transportları: faturalama kendi CLI'ında (ChatGPT /
+               Claude planı, opencode auth.json). API anahtarı gerekmez;
+               panel key dayatması bu spec'lerde kalkar (menu.rs). -->
+          <div class="palette-model-item" data-model="codex"
+            onclick="selectPaletteModel('codex', 'codex (ChatGPT)', 'Codex', event)" data-prov="codex">
+            <div>
+              <div class="palette-model-title">codex (ChatGPT)</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> ChatGPT aboneliği •
+                kota harcar • şema-korumalı</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘5</span>
+              <span class="palette-star">★</span>
+            </div>
+          </div>
+
+          <div class="palette-model-item" data-model="claude"
+            onclick="selectPaletteModel('claude', 'claude (Claude)', 'Claude', event)" data-prov="claude">
+            <div>
+              <div class="palette-model-title">claude (Claude)</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> Claude aboneliği •
+                kota harcar • şema-korumalı</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘6</span>
+              <span class="palette-star">★</span>
+            </div>
+          </div>
+
+          <div class="palette-model-item" data-model="opencode"
+            onclick="selectPaletteModel('opencode', 'opencode (varsayılan)', 'OpenCode', event)" data-prov="opencode">
+            <div>
+              <div class="palette-model-title">opencode (varsayılan)</div>
+              <div class="palette-model-meta"><span class="provider-status-dot active"></span> opencode auth.json •
+                sağlayıcıya göre • ücretsiz katmanlar mevcut</div>
+            </div>
+            <div class="palette-model-actions">
+              <span class="palette-shortcut">⌘7</span>
+              <span class="palette-star">★</span>
+            </div>
+          </div>
+
+          <div class="curated-section-header" id="codexSectionHeader" style="margin-top:6px; display:none;">
+            CODEX MODELLERİ</div>
+          <div id="codexModelsContainer"></div>
+
+          <div class="curated-section-header" id="claudeSectionHeader" style="margin-top:6px; display:none;">
+            CLAUDE MODELLERİ</div>
+          <div id="claudeModelsContainer"></div>
+
           <div class="curated-section-header" id="dynamicSectionHeader" style="margin-top:6px;">HESABINIZDAKİ DİĞER
             MODELLER</div>
           <div id="dynamicModelsContainer"></div>
+
+          <div class="curated-section-header" id="opencodeSectionHeader" style="margin-top:6px; display:none;">
+            OPENCODE SAĞLAYICILARI</div>
+          <div id="opencodeModelsContainer"></div>
         </div>
 
         <div class="palette-footer-row" onclick="requestRefreshModels(event)">
@@ -5554,7 +5640,7 @@
       <button class="opt-item" type="button" data-opt="reasoning">
         <span class="opt-key">Akıl Yürütme</span>
         <span class="opt-val">
-          <span id="reasoningTriggerLabel">Medium</span>
+          <span id="reasoningTriggerLabel">Low</span>
         </span>
         <svg class="opt-chev" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2.5">
@@ -8395,7 +8481,7 @@
     /* ==========================================================================
        High-End IDE Popover Logic (Reasoning, Autonomy, Multi-Provider Model Palette)
        ========================================================================== */
-    window.selectedReasoning = "medium";
+    window.selectedReasoning = "low";
     window.selectedServiceTier = "standard";
     window.selectedAutonomyMode = "full";
     window.selectedModelId = "openai:gpt-5.6-terra";
@@ -8410,11 +8496,11 @@
        listeler, run sadece profil izin verirse gönderir.
        ======================================================================== */
     var MODEL_CAPS = {
-      "gpt-5.6-sol": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" },
-      "gpt-5.6-terra": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" },
-      "gpt-5.6-luna": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" },
+      "gpt-5.6-sol": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "low" },
+      "gpt-5.6-terra": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "low" },
+      "gpt-5.6-luna": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "low" },
       "gpt-6-astra": { reasoning: ["low", "medium", "high", "xhigh", "max"], def: "medium" },
-      "gpt-5.6": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" }
+      "gpt-5.6": { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "low" }
     };
     var EFFORT_LABELS = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
 
@@ -8424,7 +8510,7 @@
       // Bilinmeyen ID'ler: sadece izin verilen 4 model ailesi effort alır.
       // GPT-5.6 varyantları tam set, GPT-6 varyantları `none` hariç tam set.
       if (base.indexOf("gpt-5.6") === 0) {
-        return { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "medium" };
+        return { reasoning: ["none", "low", "medium", "high", "xhigh", "max"], def: "low" };
       }
       if (base.indexOf("gpt-6") === 0) {
         return { reasoning: ["low", "medium", "high", "xhigh", "max"], def: "medium" };
@@ -8530,7 +8616,24 @@
         if (searchInput) {
           setTimeout(function () { searchInput.focus(); }, 50);
         }
+        // First open lands on the OpenAI API tab (the default model's
+        // provider): a clean, short list instead of every catalogue at once.
+        // Later opens remember the tab the operator picked last.
+        if (!window._paletteTabInitialized) {
+          window._paletteTabInitialized = true;
+          window.filterByProvider("openai", { preventDefault: function(){}, stopPropagation: function(){} });
+        }
         post({ cmd: "get_models" });
+        // Second catalogue, same open: opencode-authenticated providers.
+        // Both callbacks render into their own containers; either may
+        // arrive empty (offline, no key) without hiding the other.
+        post({ cmd: "get_opencode_models" });
+        // Subscription CLI catalogues: the codex and claude CLIs' own
+        // runnable model ids (menu.rs). Each renders into its own
+        // container; an empty arrival (CLI missing, quota blocked) only
+        // hides that one section.
+        post({ cmd: "get_provider_models", provider: "codex" });
+        post({ cmd: "get_provider_models", provider: "claude" });
       }
     };
 
@@ -8608,49 +8711,61 @@
       window.closeAllLuxuryPopovers();
     };
 
+    window._provFilter = "all";
+
     window.filterByProvider = function (prov, e) {
       if (e) { e.preventDefault(); e.stopPropagation(); }
       document.querySelectorAll(".palette-sidebar .palette-provider-btn").forEach(function (b) {
         if (b.getAttribute("data-prov") === prov) b.classList.add("active");
         else b.classList.remove("active");
       });
-
-      var notice = document.getElementById("unconfiguredProviderNotice");
-      var list = document.getElementById("paletteModelList");
-
-      if (prov !== "openai") {
-        if (notice) {
-          notice.style.display = "block";
-          var titles = { anthropic: "Anthropic / Claude", google: "Google / Gemini", local: "Local / Ollama" };
-          var envKeys = { anthropic: "ANTHROPIC_API_KEY", google: "GEMINI_API_KEY", local: "OLLAMA_HOST" };
-          document.getElementById("unconfiguredProviderTitle").textContent = (titles[prov] || prov) + " Yapılandırılmadı";
-          document.getElementById("unconfiguredProviderDesc").textContent = "Bu sağlayıcıyı kullanmak için ~/.computeruse/env dosyasına " + (envKeys[prov] || "API anahtarını") + " ekleyin.";
-        }
-        if (list) list.style.display = "none";
-      } else {
-        if (notice) notice.style.display = "none";
-        if (list) list.style.display = "flex";
-      }
+      // Provider filter composes with the text search: both must pass.
+      window._provFilter = prov || "all";
+      var q = document.getElementById("paletteSearchInput");
+      window.filterPaletteModels(q ? q.value : "");
     };
 
     window.filterPaletteModels = function (query) {
       var q = (query || "").toLowerCase().trim();
+      var prov = window._provFilter || "all";
+      // A non-empty search is GLOBAL: it spans every provider, so a query
+      // never comes back empty just because the wrong tab is active (the
+      // placeholder promises terra/copilot/kimi/codex at once). Tab
+      // filtering applies only while the search box is empty.
+      var effectiveProv = q ? "all" : prov;
       document.querySelectorAll("#paletteModelList .palette-model-item").forEach(function (item) {
         var title = (item.querySelector(".palette-model-title") ? item.querySelector(".palette-model-title").textContent : "").toLowerCase();
         var meta = (item.querySelector(".palette-model-meta") ? item.querySelector(".palette-model-meta").textContent : "").toLowerCase();
         var modelAttr = (item.getAttribute("data-model") || "").toLowerCase();
-        if (!q || title.indexOf(q) !== -1 || meta.indexOf(q) !== -1 || modelAttr.indexOf(q) !== -1) {
+        var itemProv = item.getAttribute("data-prov");
+        var provOk = (effectiveProv === "all") || (itemProv === effectiveProv);
+        var textOk = (!q || title.indexOf(q) !== -1 || meta.indexOf(q) !== -1 || modelAttr.indexOf(q) !== -1);
+        if (provOk && textOk) {
           item.style.display = "flex";
         } else {
           item.style.display = "none";
         }
       });
-    };
+    // A filtered list reads as flat results (no orphan section headers).
+    var hideHeaders = (effectiveProv !== "all") || !!q;
+    document.querySelectorAll("#paletteModelList .curated-section-header").forEach(function (h) {
+      // Section containers manage their own visibility when empty.
+      if (h.id === "opencodeSectionHeader" && !document.getElementById("opencodeModelsContainer").hasChildNodes()) return;
+      if (h.id === "dynamicSectionHeader" && !document.getElementById("dynamicModelsContainer").hasChildNodes()) return;
+      if (h.id === "codexSectionHeader" && !document.getElementById("codexModelsContainer").hasChildNodes()) return;
+      if (h.id === "claudeSectionHeader" && !document.getElementById("claudeModelsContainer").hasChildNodes()) return;
+      h.style.display = hideHeaders ? "none" : "block";
+    });
+  };
 
     // Dynamic Model Loader from Rust / OpenAI API
     // Sadece GPT-5.6 + GPT-6 Astra gösterilir: /v1/models ham listeyi
     // döndürür ({"object":"list","data":[{"id":...}]}), Rust tarafı zaten
     // filtreler; burada ikinci kapı olarak izin listesi dışındakiler atılır.
+    // Same scoping hazard as below: local escaper, no outer dependency.
+    function escModels(s) {
+      return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
     window.onModelsLoaded = function (data) {
       if (!data) return;
       var list = data.models || [];
@@ -8676,7 +8791,7 @@
         };
         item.innerHTML =
           '<div>' +
-          '<div class="palette-model-title">' + escapeHtml(id) + '</div>' +
+          '<div class="palette-model-title">' + escModels(id) + '</div>' +
           '<div class="palette-model-meta"><span class="provider-status-dot active"></span> OpenAI Hesabı</div>' +
           '</div>' +
           '<div class="palette-model-actions">' +
@@ -8688,20 +8803,149 @@
       var header = document.getElementById("dynamicSectionHeader");
       if (header) {
         header.textContent = "Hesabınızdaki Diğer Modeller (" + extraModels.length + ")";
+        header.style.display = extraModels.length ? "block" : "none";
       }
+      // Rows arriving late must respect an already-active filter/search.
+      window.filterPaletteModels(
+        (document.getElementById("paletteSearchInput") || {}).value || ""
+      );
+    };
+
+    // OpenCode provider catalogue (Rust: get_opencode_models). Only
+    // providers authenticated in opencode's auth.json arrive here (plus the
+    // keyless opencode free tier); every row reuses the standard selection
+    // flow, so effort/caps handling needs no special case — unknown ids
+    // hide the reasoning row by construction.
+    // Local escaper: the shared escapeHtml lives in another scope that
+    // these data callbacks cannot rely on (its absence killed both dynamic
+    // sections silently — fire-and-forget bridge, no console). Identical
+    // semantics, zero outer dependency.
+    function escOpencode(s) {
+      return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    window.onOpencodeModelsLoaded = function (data) {
+      if (!data) return;
+      var list = data.opencode_models || [];
+      var container = document.getElementById("opencodeModelsContainer");
+      if (!container) return;
+      container.innerHTML = "";
+      var header = document.getElementById("opencodeSectionHeader");
+      // Every opencode-billed model lives under the single OpenCode tab,
+      // regardless of the billing provider behind it — the sidebar has
+      // exactly four providers, and this section is one of them.
+      list.forEach(function (m) {
+        var provider = (m.provider || "opencode").replace(/[^a-z0-9_-]/gi, "") || "opencode";
+        var spec = "opencode:" + provider + "/" + m.name;
+        var item = document.createElement("div");
+        item.className = "palette-model-item";
+        item.setAttribute("data-model", spec);
+        item.setAttribute("data-prov", "opencode");
+        item.onclick = function (e) {
+          window.selectPaletteModel(spec, m.name, "OpenCode", e);
+        };
+        item.innerHTML =
+          '<div>' +
+          '<div class="palette-model-title">' + escOpencode(m.name) + '</div>' +
+          '<div class="palette-model-meta"><span class="provider-status-dot active"></span> OpenCode \u00B7 ' + escOpencode(provider) + '</div>' +
+          '</div>' +
+          '<div class="palette-model-actions">' +
+          '<span class="palette-star">\u2605</span>' +
+          '</div>';
+        container.appendChild(item);
+      });
+
+      if (header) {
+        header.style.display = list.length ? "block" : "none";
+        header.textContent = "OPENCODE MODELLER\u0130 (" + list.length + ")";
+      }
+      // Rows arriving late must respect an already-active filter/search.
+      window.filterPaletteModels(
+        (document.getElementById("paletteSearchInput") || {}).value || ""
+      );
+    };
+
+    // Subscription CLI catalogues (Rust: get_provider_models). Rows are the
+    // installed CLIs' own runnable model ids (codex binary/config, claude
+    // model list / binary); the bare transport row for each provider stays
+    // curated above. Selection stores the full `codex:<id>` / `claude:<id>`
+    // spec the transports expect, so the run never guesses.
+    // Local escaper: same zero-outer-dependency rule as the siblings above.
+    function escProvider(s) {
+      return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    window.onProviderModelsLoaded = function (data) {
+      if (!data) return;
+      var provider = data.provider === "claude" ? "claude" : "codex";
+      var list = data.models || [];
+      var container = document.getElementById(
+        provider === "claude" ? "claudeModelsContainer" : "codexModelsContainer"
+      );
+      if (!container) return;
+      container.innerHTML = "";
+      var header = document.getElementById(
+        provider === "claude" ? "claudeSectionHeader" : "codexSectionHeader"
+      );
+      var metaText = provider === "claude"
+        ? "Claude CLI \u00B7 plan kotal\u0131"
+        : "Codex CLI \u00B7 plan kotal\u0131";
+
+      list.forEach(function (m) {
+        var name = (m && m.name) || "";
+        if (!name) return;
+        var spec = provider + ":" + name;
+        var item = document.createElement("div");
+        item.className = "palette-model-item";
+        item.setAttribute("data-model", spec);
+        item.setAttribute("data-prov", provider);
+        item.onclick = function (e) {
+          window.selectPaletteModel(spec, name, provider === "claude" ? "Claude" : "Codex", e);
+        };
+        item.innerHTML =
+          '<div>' +
+          '<div class="palette-model-title">' + escProvider(name) + '</div>' +
+          '<div class="palette-model-meta"><span class="provider-status-dot active"></span> ' + metaText + '</div>' +
+          '</div>' +
+          '<div class="palette-model-actions">' +
+          '<span class="palette-star">\u2605</span>' +
+          '</div>';
+        container.appendChild(item);
+      });
+
+      if (header) {
+        header.style.display = list.length ? "block" : "none";
+        header.textContent = (provider === "claude" ? "CLAUDE MODELLER\u0130 (" : "CODEX MODELLER\u0130 (") + list.length + ")";
+      }
+      // Rows arriving late must respect an already-active filter/search.
+      window.filterPaletteModels(
+        (document.getElementById("paletteSearchInput") || {}).value || ""
+      );
     };
 
     window.requestRefreshModels = function (e) {
       if (e) { e.preventDefault(); e.stopPropagation(); }
       post({ cmd: "get_models" });
+      post({ cmd: "get_provider_models", provider: "codex" });
+      post({ cmd: "get_provider_models", provider: "claude" });
     };
 
-    // Global click outside to dismiss luxury popovers
+    // Global click outside to dismiss luxury popovers. The model palette's
+    // provider sidebar sits INSIDE the popover, so those clicks never reach
+    // here; this guard is only for clicks truly outside both.
     document.addEventListener("click", function (e) {
       var target = e.target;
       if (!target.closest(".luxury-floating-popover") && !target.closest(".ide-popover-trigger")) {
         window.closeAllLuxuryPopovers();
       }
+    });
+
+    // Belt-and-braces for the palette search: the input's inline oninput
+    // attribute is the primary path; this listener is the same call when
+    // the inline attribute is lost, and it keeps working if the model list
+    // is re-rendered.
+    document.addEventListener("input", function (e) {
+      var input = e.target;
+      if (!input || input.id !== "paletteSearchInput") return;
+      window.filterPaletteModels(input.value);
     });
 
     // Global keyboard shortcuts (Escape and Cmd+1..4 → 4 curated models)

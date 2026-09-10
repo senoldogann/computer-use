@@ -180,6 +180,12 @@ def classify_failure(exc: BaseException, action: Action | None) -> Failure:
         "SemanticVerificationFailedError": FailureKind.TEXT_PLACEMENT,
         "FocusLostError": FailureKind.FOCUS,
         "StaleObservationError": FailureKind.STALE,
+        # The address bar was submitted but the page never arrived: the
+        # action was ACKed yet nothing corroborated it, which is exactly
+        # what VERIFICATION means. The ladder answers with a re-look, and
+        # the repeat guard (navigate is repetition-sensitive) catches the
+        # retry-the-identical-submit loop.
+        "NavigationFailedError": FailureKind.VERIFICATION,
         # A mark that no longer describes what the model picked is the same
         # problem as a stale observation, and wants the same answer: the frame
         # this decision came from is gone, so decide again from the live one.

@@ -239,14 +239,17 @@ def test_cli_load_model_resolves_openai_specs(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(cli_module, "openai_model", fake_openai_model)
     # Bare `openai` resolves to the transport default (None -> DEFAULT_MODEL).
+    # Two constructions per binding by design: decide turns and the auditor
+    # each get their own transport instance (the flag differs where a schema
+    # variant exists; openai ignores it, so both instances behave alike).
     provider = load_model("openai", app="Safari")
     turn = provider(WorkingState(goal="g"))
     assert isinstance(turn, AgentTurn)
     assert turn.action.type == "mouse_click"
-    assert seen == [None]
+    assert seen == [None, None]
     # An explicit tier is passed through.
     load_model("openai:gpt-5.6-luna", app="Safari")
-    assert seen == [None, "gpt-5.6-luna"]
+    assert seen == [None, None, "gpt-5.6-luna", "gpt-5.6-luna"]
 
 
 def test_openai_model_multimodal_request_shape() -> None:

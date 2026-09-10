@@ -1,14 +1,57 @@
-# Computer Use
+# 🖥️ Computer Use
 
-An **autonomous, human-centric computer-use system** that operates directly on
-the physical host — perceiving pixels, moving the real cursor along human-like
-trajectories, and driving native desktop applications (real Dock icons, real
-browser profiles, real OS dialogs), never a headless/sandboxed bypass.
+**An autonomous, human-centric computer-use agent that operates directly on your physical Mac** — perceiving pixels, moving the real cursor along human-like trajectories, and driving native desktop applications (real Dock icons, real browser profiles, real OS dialogs). No headless browser, no sandbox, no synthetic bypass: the agent does exactly what a person would do, and you can watch it happen.
 
-The design thesis is **Prompt & Orchestration Supremacy**: the scaffolding —
-strict JSON contracts, the OODA loop, validation gates, and self-correction —
-must be so resilient that even a weak LLM stays reliable. The full project
-constitution lives in [`AGENTS.md`](AGENTS.md); key architecture and
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-actuation%20driver-B7410E?logo=rust&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-native-000000?logo=apple&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-1236%20passing-2ea44f)
+![License](https://img.shields.io/badge/license-MIT-blue)
+
+The design thesis is **Prompt & Orchestration Supremacy**: the scaffolding — strict JSON contracts, the OODA loop, validation gates, and self-correction — is so resilient that even a *weak* LLM stays reliable, while the system's own **multi-provider model seam** lets you drive the agent with OpenAI's API, your ChatGPT plan (Codex CLI), your Claude plan (Claude Code CLI), or any of 20+ opencode-authenticated providers — all from one menu-bar panel.
+
+## Showcase
+
+| The panel (menu-bar chat launcher) | Model palette — 4 providers, live catalogues |
+|---|---|
+| ![Panel](docs/screenshots/panel-home.png) | ![Model palette](docs/screenshots/palette.png) |
+
+> The panel is a real macOS menu-bar app: type a goal in natural language, pick a model & autonomy level, and watch the agent's step-by-step progress stream live. The model palette discovers each provider's *runnable* models from the installed CLIs themselves — no hardcoded model lists.
+
+## Highlights
+
+- **Real-host actuation, human kinematics** — cubic-Bezier mouse trajectories with distance-adaptive pacing, natural click dwell, variable typing cadence. A 1200px sweep takes ~430ms, a nudge ~140ms; nothing ever teleports.
+- **Accessibility-first grounding, pixels as verifier** — exact per-element coordinates from the macOS Accessibility API (the same API VoiceOver uses), confirmed by AX witnesses and an optional visual diff before acting. OCR is the fallback for apps with no AX tree, not the source.
+- **OODA loop with evidence-based verification** — every action declares an expected postcondition; independent witnesses (AX surface, focus, AXValue, frontmost app, pixel diff) confirm or refute it. A direct denial is conclusive; two silent circumstantial witnesses must agree. Failed actions enter a bounded **recovery ladder**: RETRY → ALTERNATE → REPLAN → ABORT.
+- **Weak-model scaffolding** — Pydantic-validated action contracts (11 action types), strict JSON schemas enforced *inside* the model transports, stuck-loop guard (3rd identical action gets a corrective hint, 5th aborts), and injected error diagnostics.
+- **Dynamic skill distillation** — successful multi-step workflows are distilled into reusable skills with two-stage retrieval (summary scan first, full instructions loaded on demand). Zero context bloat.
+- **Multi-tiered memory** — episodic traces with retrospectives, a searchable semantic app-knowledge store, and a typed durable preference store with provenance & contradiction handling.
+- **Explicit permission governance (Levels 0–4)** — from advisory mode to full unattended autonomy, with destructive actions parked for a human (approval queue + resumable missions), capability grants with real decrementing use counts, and `--sovereign` as the explicit session-wide delegation. Kill-switch: `Cmd+Shift+Escape`, grab-the-mouse shake, or Ctrl-C — checked before, during and after every action.
+- **Multi-provider model seam** — one `--model` flag, five transports: `openai[:id]`, `codex[:id]` (ChatGPT plan), `claude[:id]` (Claude plan), `opencode:provider/model` (any opencode-authenticated provider), or your own `module:callable`.
+
+## Architecture
+
+```
+┌─────────────────────────┐      ┌──────────────────────────────────────────┐
+│   Python 3.12 core      │      │   Rust actuation micro-driver (ADR-1)    │
+│                         │      │                                          │
+│  OODA loop ─────────────┼─────▶│  JSON-RPC over Unix socket (typed both  │
+│  Pydantic action schema │      │  sides — contract-drift tests)           │
+│  Skills / Memory /      │      │  CGEvent mouse+keyboard (Quartz)         │
+│  Autonomy guard         │      │  Cubic-Bezier trajectory planner         │
+│  Providers (5 CLIs)     │      │  AXUIElement tree + OCR (Vision)         │
+│  Verification witnesses │      │  Kill-switch event tap + halo indicator  │
+└─────────┬───────────────┘      └──────────────────────────────────────────┘
+          │
+          ▼
+   Your real macOS desktop — real apps, real windows, real system dialogs
+```
+
+Python owns orchestration (the bottleneck is the LLM turn, not actuation); Rust owns OS-level input (a crash there can lock the whole system — isolated by process, restarted with bounded backoff). The driver is *never* imported as a Python module.
+
+## Design decisions (ADRs)
+
+The full project constitution lives in [`AGENTS.md`](AGENTS.md); key architecture and
 permission-governance decisions are recorded there as ADRs, including ADR-1,
 ADR-2, and ADR-4:
 
@@ -66,7 +109,12 @@ src/computeruse/
 │   ├── report.py    # Law 5: what happened overnight + per-run spend record
 │   └── client.py    # typed JSON-RPC client to the Rust driver
 ├── providers/
-│   └── openai.py    # `--model openai` transport (stdlib urllib; no SDK dep)
+│   ├── openai.py    # `--model openai` transport (stdlib urllib; no SDK dep)
+│   ├── cli_bridge.py# shared subprocess bridge (timeout+kill, env scrub, JSONL)
+│   ├── decision_schema.py # AgentTurn -> backend-strict JSON schema (pure)
+│   ├── codex_cli.py # `--model codex` (ChatGPT plan, schema-enforced)
+│   ├── claude_cli.py# `--model claude` (Claude plan, schema-enforced)
+│   └── opencode_cli.py # `--model opencode:p/m` (any opencode-authenticated provider)
 ├── skills/
 │   ├── schemas.py   # SkillSummary (Stage 1) + SkillDefinition (Stage 2)
 │   ├── registry.py  # two-stage search/load over the on-disk store
@@ -129,6 +177,22 @@ uv run python -m computeruse --goal "..." --real --driver driver/target/debug/ac
     --verify --model openai            # or openai:gpt-5.6-luna / openai:gpt-5.6-sol
 # ... a raw-text model of your own (module:callable, scaffolded):
 uv run python -m computeruse --goal "..." --model my_module:my_model
+# ... with the completion audit on a cheaper transport than the decide turns
+# (the audit re-reads one screen against one claim; token totals still
+# include audit calls, dollars bill at the main model's price):
+uv run python -m computeruse --goal "..." --model codex \
+    --audit-model opencode:opencode/muse-spark-1.3-contributor-free
+# ... or bill an existing subscription instead of metered API (headless
+# official CLIs; login required; each decide turn = one CLI call):
+uv run python -m computeruse --goal "..." --model codex            # ChatGPT plan via Codex CLI
+uv run python -m computeruse --goal "..." --model claude           # Claude plan via Claude Code CLI
+uv run python -m computeruse --goal "..." --model opencode:openrouter/gpt-4.1  # any opencode-authenticated provider/model (see `opencode models`)
+# Subscription notes: turns draw from the plan's quota (a 12-turn run is 12+
+# agent turns against the rolling window), so prefer --max-tokens over
+# --max-cost (no per-token price exists; --max-cost only warns). Codex runs
+# read-only with your interactive config ignored; MCP tools are unavailable
+# on schema-enforcing transports (call_tool is validated but never offered
+# by shape). Claude screenshots ride a temp file via the Read tool.
 # ... or bring your own state->AgentTurn provider:
 uv run python -m computeruse --goal "..." --provider my_provider:make_provider
 

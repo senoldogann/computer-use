@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -83,11 +84,13 @@ from computeruse.orchestrator.schemas import (
     MouseDrag,
     MouseMove,
     MouseScroll,
+    Navigate,
     PressHotkey,
     TypeText,
     Wait,
     WebFetch,
     WebSearch,
+    action_from_payload,
 )
 from computeruse.orchestrator.trace import StepTrace, truncate_for_stream
 from computeruse.security.approvals import ApprovalRequiredError
@@ -101,10 +104,19 @@ from computeruse.skills.distiller import Trajectory
 from computeruse.skills.playbook import PlaybookSummary
 from computeruse.skills.registry import (
     RelevanceMatch,
+    environment_fingerprint,
+    fast_path_eligible,
     routes_disagree_on_site,
     site_markers,
+    skill_for_goal,
 )
-from computeruse.skills.schemas import SkillDefinition, SkillSummary
+from computeruse.skills.schemas import (
+    RECIPE_COORDINATE_KEYS,
+    RecipeStep,
+    SkillDefinition,
+    SkillSummary,
+    summary_of,
+)
 from computeruse.tools import WebError, fetch_page
 from computeruse.vision.ax import (
     element_identity,
@@ -165,6 +177,11 @@ _PHYSICAL_ACTIONS: Final[frozenset[str]] = frozenset(
         "clipboard_paste",
         "press_hotkey",
         "activate_app",
+        # Composite: actuated as focus-bar + paste + submit through the
+        # driver, but verified as one outcome (the title must move). It
+        # never serializes to the wire itself — see _navigate_and_verify —
+        # so the driver contract needs no new method for it.
+        "navigate",
     }
 )
 # Tools reach the world without the host's input devices, so they are
@@ -245,9 +262,14 @@ AX_FROZEN_AFTER_FAILURES: Final[int] = 3
 
 # Physical actions whose identical repetition signals a stuck loop. mouse_move
 # is deliberately excluded: re-positioning the cursor to the same point is a
-# normal navigation pattern, not a lost-model signal.
+# normal navigation pattern, not a lost-model signal. navigate is included:
+# the same URL twice with no title movement is the live-observed retry loop
+# (a verified submit that never left the page, then the identical submit
+# again). Deliberately NOT in _CYCLE_SENSITIVE below: legitimate workflows
+# alternate between pages (compare, cross-check), and banning the revisit
+# would abort research that is genuinely advancing.
 _REPETITION_SENSITIVE: Final[frozenset[str]] = frozenset(
-    {"mouse_click", "click_mark", "mouse_drag", "mouse_scroll", "type_text", "clipboard_paste", "press_hotkey"}
+    {"mouse_click", "click_mark", "mouse_drag", "mouse_scroll", "type_text", "clipboard_paste", "press_hotkey", "navigate"}
 )
 
 #: Actions the *cycle* guard watches. Everything the repetition guard watches,
@@ -586,6 +608,64 @@ def mark_still_current(
         if abs(other_x - centre_x) <= tolerance and abs(other_y - centre_y) <= tolerance:
             return True
     return False
+
+
+def rebuild_recipe_action(
+    step: RecipeStep, marks: tuple[MarkElement, ...]
+) -> Action | None:
+    """Rebuild one recipe step against the live frame (pure).
+
+    Clicks re-ground by AX identity: the mark whose element matches the
+    recorded target becomes a ``ClickMark``, resolved downstream through the
+    existing path (exact centre, staleness-checked). The comparison is over
+    the canonical identity (``element_identity`` of the mark's own summary
+    line), not the display label: labels carry per-run state — field values,
+    focus markers, coordinates — and the value a field holds is exactly what
+    changes between two runs of one workflow. Comparing labels would make
+    every filled field unmatchable. Anything else replays verbatim from
+    stored params with coordinate keys dropped defensively — even though the
+    distiller never stores them. ``None`` means "cannot replay": unknown
+    target, unparseable payload, or an out-of-contract value. The caller
+    ends the fast path on ``None``, never guesses.
+    """
+    if step.action_type == "mouse_click":
+        if not step.target:
+            return None
+        wanted = step.target.casefold()
+        for mark in marks:
+            live = element_identity(mark.label)
+            if live is None or live.casefold() != wanted:
+                continue
+            raw_button = step.params.get("button", "left")
+            if raw_button == "left":
+                button: Literal["left", "right", "middle"] = "left"
+            elif raw_button == "right":
+                button = "right"
+            elif raw_button == "middle":
+                button = "middle"
+            else:
+                return None
+            raw_clicks = step.params.get("click_count", 1)
+            if raw_clicks == 1:
+                click_count: Literal[1, 2] = 1
+            elif raw_clicks == 2:
+                click_count = 2
+            else:
+                return None
+            return ClickMark(
+                type="click_mark",
+                mark=mark.index,
+                button=button,
+                click_count=click_count,
+            )
+        return None
+    payload: dict[str, object] = {
+        key: value
+        for key, value in step.params.items()
+        if key not in RECIPE_COORDINATE_KEYS
+    }
+    payload["type"] = step.action_type
+    return action_from_payload(payload)
 
 
 #: Splitter for tool-argument word sets (pure).
@@ -1261,6 +1341,41 @@ def cycle_signature(observation: Observation) -> str:
     )
 
 
+#: Window-title fragments that mean the browser itself is reporting failure,
+#: not a page. Kept tight on purpose: a legit headline containing an error
+#: word is rarer than a dead navigation, but a false positive here still
+#: only costs one ladder rung (retry), never the run — while a false
+#: negative confirms an error page as arrival.
+_NAV_ERROR_MARKERS: Final[tuple[str, ...]] = (
+    "can't be reached",
+    "can’t be reached",
+    "err_",
+    "server not found",
+    "unable to connect",
+    "connection refused",
+    "problem loading page",
+    "dns error",
+)
+
+
+def _looks_like_error_page(title: str) -> bool:
+    """Does this window title read as the browser's own failure (pure)?"""
+    lowered = title.lower()
+    return any(marker in lowered for marker in _NAV_ERROR_MARKERS)
+
+
+def _navigation_host_core(url: str) -> str:
+    """The registrable first label of a URL's host, for arrival checks (pure).
+
+    ``https://www.google.com/search?q=x`` -> ``"google"``. Used to confirm
+    a navigation that lands where it already was (same title, right place):
+    without it every same-page navigation reads as a miss.
+    """
+    host = url.split("://", 1)[-1].split("/", 1)[0].split("@", 1)[-1].split(":", 1)[0]
+    host = host.lower().removeprefix("www.")
+    return host.split(".")[0] if host else ""
+
+
 @dataclass
 class OodaRunner:
     """Imperative shell: drives the full autonomy cycle with real side effects.
@@ -1308,6 +1423,11 @@ class OodaRunner:
         | None
     ) = None
     skill_loader: Callable[[str], SkillDefinition] | None = None
+    #: Fast-path miss reporter: (skill_id, reason) back to the store's
+    #: bookkeeping, so a stale recipe resets the streak it would otherwise
+    #: keep spending. Same fire-and-forget contract as the end-of-run
+    #: verdict — bookkeeping must never end a run.
+    record_skill_failure: Callable[[str, str], None] | None = None
     playbook_scan: Callable[[str], PlaybookSummary | None] | None = None
     kill_switch: KillSwitch | None = None
     # VALIDATE (Law 5.1). Takes the observation as well as the decision:
@@ -1447,6 +1567,11 @@ class OodaRunner:
         self._acted_target: str = ""
         # The skill mounted by RETRIEVE in the current run (Law 3.2).
         self._skill: SkillDefinition | None = None
+        # Id of the skill the fast path already attempted. One attempt per
+        # mounted skill: a second attempt after a miss would replay the
+        # recipe the miss just disproved, while a newly mounted skill is a
+        # different recipe that deserves its own attempt.
+        self._fast_path_attempted_id: str | None = None
         self._working_app: str | None = None
         # Best-effort perception warnings are logged once per run, then
         # demoted to debug: a permanently-failing probe (e.g. consent missing)
@@ -1523,6 +1648,11 @@ class OodaRunner:
         # the run must close as a failure with an honest retrospective — never
         # as the model's unverified success.
         self._stalemate_rejected: bool = False
+        # Whether the run's target app has ever owned the screen. Until the
+        # first sighting the agent may legitimately work in a launcher
+        # (Spotlight) to *reach* an app that is not running yet — there is
+        # no drift away from somewhere never visited. Set in _observe.
+        self._target_seen_frontmost: bool = False
         # P1 frozen-app signal: consecutive target-AX probe failures, plus
         # whether the window probe answered on the current turn. The pair
         # distinguishes "the app stopped talking" from "the driver is down".
@@ -1614,6 +1744,17 @@ class OodaRunner:
             state = self._settle_progress(state)
             # UNDERSTAND / RETRIEVE: mount a relevant skill (Law 3, two-stage).
             state = self._retrieve(state)
+            # FAST PATH (PR D): a proven skill for exactly this goal replays
+            # with zero provider turns. Either the recipe replays cleanly —
+            # and this iteration spends the run's single provider turn
+            # verifying and finishing — or the miss folds back into this
+            # state and ordinary OODA continues below.
+            if (
+                self._skill is not None
+                and self._skill.skill_id != self._fast_path_attempted_id
+            ):
+                self._fast_path_attempted_id = self._skill.skill_id
+                state, _ = self._maybe_fast_path(state, goal)
             if state.active_window or state.ui_elements:
                 LOGGER.info(
                     "ooda observe: window=%r, ax_elements=%d%s",
@@ -2033,7 +2174,12 @@ class OodaRunner:
             # load_skill mounted earlier in this same iteration.
             skill=self._skill,
         )
-        return state, False, False
+        # A navigation invalidates the whole decision frame: every later
+        # action in this batch was aimed at the pre-navigation screen, so
+        # the batch ends here and the next turn re-observes. Without this,
+        # a [navigate, click] batch would click a coordinate that belonged
+        # to the departed page.
+        return state, False, isinstance(outcome.action, Navigate)
 
     def _resolve_mark_for(
         self, action: Action, marks: tuple[MarkElement, ...]
@@ -2134,6 +2280,13 @@ class OodaRunner:
         returned verdict is what the witnesses concluded, for the run trace —
         a contradiction has already raised by then.
         """
+        if isinstance(action, Navigate):
+            # Composite action: actuated as focus-bar + paste + submit, but
+            # verified as one outcome (the title must move). It never reaches
+            # the single-action machinery below — which would serialize the
+            # composite itself to the driver and verify three keystrokes
+            # while calling a stationary page success.
+            return self._navigate_and_verify(action)
         expectation = expectation_for(action)
         self._acted_target = ""
         # The quiet path is tried BEFORE the focus gate, not after. That gate
@@ -2198,6 +2351,81 @@ class OodaRunner:
             action, expectation, before, before_ui, before_content, before_window
         )
         return self._last_verdict
+
+    def _navigate_and_verify(self, action: Navigate) -> Evidence:
+        """Open a URL as one verified outcome instead of three blind keystrokes.
+
+        Focusing the address bar, pasting and submitting are individually
+        unverifiable as *navigation*: each step can confirm while the page
+        never moves (measured live — a verified submit that never left
+        GitHub, followed by a full three-step retry of the identical
+        sequence). So this verifies the outcome the goal actually needs —
+        the window title must move to the new page — and raises when it
+        does not, folding the miss into the recovery ladder like any other
+        verification failure.
+
+        Sub-steps ride :meth:`execute_physical` directly: they are fixed
+        primitives, not model decisions, so there is nothing to validate
+        per step — but the run-level gates still apply (credential refusal
+        for ``user:pass@`` URLs, background-mode warning, focus drift
+        re-activation). A batch ending here is the caller's business: see
+        the ``stop_batch`` rule in :meth:`_execute_one`.
+        """
+        # Credentials in the address bar are credentials typed: same refusal,
+        # same finality. A URL carrying userinfo pastes a secret where the
+        # browser happily remembers it (history, sync) — fail before touching.
+        authority = action.url.split("://", 1)[-1].split("/", 1)[0]
+        if "@" in authority:
+            raise CredentialEntryRefused(
+                f"{action.type} was refused: the URL carries a userinfo "
+                "credential, and the agent never types credentials anywhere. "
+                "Signing in is the person's to do"
+            )
+        self._warn_if_leaving_the_background(action)
+        self._guard_positional(action)
+        self._acted_target = ""
+        before = self._observation.window
+        self.execute_physical(
+            PressHotkey(type="press_hotkey", modifiers=["command"], key="l")
+        )
+        self.execute_physical(ClipboardPaste(type="clipboard_paste", text=action.url))
+        self.execute_physical(PressHotkey(type="press_hotkey", modifiers=[], key="return"))
+        # The screen is about to change unconditionally: drop the encode
+        # cache now, exactly like the single-action path does, so the next
+        # OBSERVE cannot reuse this frame.
+        self._physical_since_capture = True
+        self._last_capture_hash = None
+        self._last_screenshot_b64 = None
+        self._wait_for_settle(before)
+        if self.window_probe is None:
+            # No witness, no verdict: inconclusive is honest, and the next
+            # turn's observation judges where the submit actually landed.
+            self._last_verdict = Evidence.INCONCLUSIVE
+            return self._last_verdict
+        try:
+            post = self.window_probe()
+        except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+            LOGGER.debug("window probe failed after navigation: %s", exc)
+            self._last_verdict = Evidence.INCONCLUSIVE
+            return self._last_verdict
+        before_title = before.window_title if before is not None else ""
+        post_title = post.window_title or ""
+        if _looks_like_error_page(post_title):
+            raise NavigationFailedError(
+                f"navigation to {action.url} landed on an error page "
+                f"({post_title!r}); check the URL or the connection and retry"
+            )
+        host_core = _navigation_host_core(action.url)
+        if post_title != before_title or (
+            host_core and host_core in post_title.lower()
+        ):
+            self._last_verdict = Evidence.CONFIRMED
+            return self._last_verdict
+        raise NavigationFailedError(
+            f"address submitted but the page did not move (still "
+            f"{post_title!r}); the address bar may not have been focused — "
+            "retry the navigation"
+        )
 
     def _pre_action_frame(self, expectation: ActionExpectation) -> ScreenCapture | None:
         """The frame the bounds check and (optionally) the pixel witness read.
@@ -2457,7 +2685,7 @@ class OodaRunner:
         remain the job of post-action verification and the recovery ladder.
         """
         pointer = isinstance(action, (MouseClick, MouseDrag, MouseScroll))
-        keyboard = isinstance(action, (TypeText, ClipboardPaste, PressHotkey))
+        keyboard = isinstance(action, (TypeText, ClipboardPaste, PressHotkey, Navigate))
         if not pointer and not keyboard:
             return
         if self.window_probe is None:
@@ -2505,6 +2733,22 @@ class OodaRunner:
             and app_evidence(self.app, after.app_name, after.bundle_id)
             is Evidence.CONTRADICTED
         ):
+            if not self._target_seen_frontmost:
+                # Launch flow, not drift: the target has never owned the
+                # screen this run, so the agent is plausibly working in a
+                # launcher (Spotlight) to reach an app that is not running
+                # yet — and re-activating it just proved it cannot be
+                # brought forward. Raising here killed exactly such a run
+                # (pinned Calculator, six FocusLostErrors pasting into
+                # Spotlight, then unrecoverable). Allow loudly instead; the
+                # verification witnesses still judge where the action lands.
+                LOGGER.warning(
+                    "target %r never frontmost this run; allowing action in "
+                    "%r instead of failing a possible launch flow",
+                    self.app,
+                    after.app_name,
+                )
+                return
             raise FocusLostError(
                 f"the target application {self.app!r} is not frontmost "
                 f"({after.app_name!r} is), and re-activating it did not help; "
@@ -2909,6 +3153,111 @@ class OodaRunner:
     # OBSERVE
     # ------------------------------------------------------------------
 
+    def _apply_ax_success(
+        self, ax_result: AxProbeResult
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], bool, tuple[str, ...]]:
+        """Fold a fresh AX reading into the observation parts (shell).
+
+        Shared by the serial and parallel OBSERVE paths so the two can never
+        disagree about what a good reading means. Returns
+        ``(raw_ui_elements, content, open_tabs, asks_for_credential,
+        dialog_notes)``.
+        """
+        self._ax_probe_failures = 0
+        return (
+            ax_result.summaries,
+            ax_result.content,
+            ax_result.open_tabs,
+            ax_result.asks_for_credential,
+            ax_result.dialog_notes,
+        )
+
+    def _apply_ax_failure(self, exc: Exception) -> None:
+        """Fold a failed AX reading into warnings and the frozen counter.
+
+        Shared by the serial and parallel OBSERVE paths. Raises
+        :class:`AppFrozenError` on a streak while windows stay visible —
+        the accessible half of "not responding".
+        """
+        if self._ax_probe_warned:
+            LOGGER.debug("ui-element probe still failing: %s", exc)
+        else:
+            self._ax_probe_warned = True
+            LOGGER.warning("ui-element probe failed: %s", exc)
+        self._ax_probe_failures += 1
+        if (
+            self._ax_probe_failures >= AX_FROZEN_AFTER_FAILURES
+            and self._window_probe_ok
+        ):
+            # Windows are still visible but this app's tree will not
+            # answer: the accessible half of "not responding". One
+            # failed snapshot is a hiccup and stays best-effort; a
+            # streak is a diagnosis, and it travels as a typed
+            # failure so the ladder answers with first aid instead
+            # of another round of clicking into a beachball.
+            app = self.working_app or self.app or "unknown"
+            raise AppFrozenError(
+                f"the accessibility tree of {app!r} has not answered "
+                f"{self._ax_probe_failures} times in a row while its "
+                "windows are still visible; the application is not "
+                "responding"
+            ) from exc
+
+    def _fetch_perception(
+        self,
+    ) -> tuple[AxProbeResult | BaseException, ScreenCapture | None]:
+        """Fetch the AX tree and the screenshot concurrently (shell).
+
+        The two dominant OBSERVE costs are independent — attributes vs
+        pixels — so waiting for them in sequence pays both. Each runs on
+        its own thread against its own driver connection (the agent wires
+        ``ax_probe`` to a dedicated client) because one socket cannot pair
+        interleaved responses. Failures are returned, never raised, so both
+        fetches always complete: the AX outcome may be an exception for the
+        caller to fold in with identical handling, while a capture failure
+        degrades to ``None`` exactly like the serial path. Control-flow
+        exceptions (KeyboardInterrupt, SystemExit) travel back as outcomes
+        for the caller to re-raise — degrading them into probe failures
+        would swallow the user's kill switch.
+        """
+        ax_box: list[AxProbeResult | BaseException] = []
+        cap_box: list[ScreenCapture | BaseException | None] = []
+
+        def _run_ax() -> None:
+            probe = self.ax_probe
+            if probe is None:
+                ax_box.append(RuntimeError("AX probe detached mid-observe"))
+                return
+            try:
+                ax_box.append(probe())
+            except BaseException as exc:  # noqa: BLE001 - re-raised or folded by the caller, never swallowed here
+                ax_box.append(exc)
+
+        def _run_capture() -> None:
+            try:
+                cap_box.append(self._fetch_capture())
+            except BaseException as exc:  # noqa: BLE001 - same contract as above
+                cap_box.append(exc)
+
+        ax_thread = threading.Thread(target=_run_ax, daemon=True, name="ooda-ax-fetch")
+        cap_thread = threading.Thread(
+            target=_run_capture, daemon=True, name="ooda-capture-fetch"
+        )
+        ax_thread.start()
+        cap_thread.start()
+        ax_thread.join()
+        cap_thread.join()
+        ax_outcome = ax_box[0] if ax_box else RuntimeError("AX fetch produced nothing")
+        cap_outcome = cap_box[0] if cap_box else None
+        capture: ScreenCapture | None = None
+        if isinstance(cap_outcome, BaseException):
+            if not isinstance(cap_outcome, Exception):
+                raise cap_outcome
+            LOGGER.debug("screen capture failed during observe: %s", cap_outcome)
+        else:
+            capture = cap_outcome
+        return ax_outcome, capture
+
     def _observe(self, state: WorkingState) -> WorkingState:
         """Refresh the whole perception snapshot before a decision.
 
@@ -2938,6 +3287,11 @@ class OodaRunner:
         # losing sight of a password box must not read as "there isn't one".
         asks_for_credential = previous.asks_for_credential
         dialog_notes = previous.dialog_notes
+        # Parallel-fetch handoff: set only by the AX+sensor branch below;
+        # the capture block further down encodes the prefetched frame
+        # instead of fetching again.
+        prefetched_capture: ScreenCapture | None = None
+        use_prefetch = False
         carried = self._fresh_ax
         self._fresh_ax = None
         # Recorded so the observe log can say where the reading came from: a
@@ -2958,38 +3312,40 @@ class OodaRunner:
             dialog_notes = carried.dialog_notes
             self._ax_probe_failures = 0
         elif self.ax_probe is not None:
-            try:
-                ax_result = self.ax_probe()
-                self._ax_probe_failures = 0
-                raw_ui_elements = ax_result.summaries
-                content = ax_result.content
-                open_tabs = ax_result.open_tabs
-                asks_for_credential = ax_result.asks_for_credential
-                dialog_notes = ax_result.dialog_notes
-            except Exception as exc:
-                if self._ax_probe_warned:
-                    LOGGER.debug("ui-element probe still failing: %s", exc)
+            if self.sensor is not None:
+                # Parallel fetch: the AX walk and the screenshot are the two
+                # dominant OBSERVE costs and are independent (attributes vs
+                # pixels). Each runs on its own thread against its own driver
+                # connection — the agent wires ax_probe to a dedicated client
+                # because one socket cannot pair interleaved responses. The
+                # handling below is identical to the serial path; only the
+                # waiting overlaps.
+                ax_outcome, prefetched_capture = self._fetch_perception()
+                use_prefetch = True
+                if isinstance(ax_outcome, BaseException):
+                    if not isinstance(ax_outcome, Exception):
+                        raise ax_outcome
+                    self._apply_ax_failure(ax_outcome)
                 else:
-                    self._ax_probe_warned = True
-                    LOGGER.warning("ui-element probe failed: %s", exc)
-                self._ax_probe_failures += 1
-                if (
-                    self._ax_probe_failures >= AX_FROZEN_AFTER_FAILURES
-                    and self._window_probe_ok
-                ):
-                    # Windows are still visible but this app's tree will not
-                    # answer: the accessible half of "not responding". One
-                    # failed snapshot is a hiccup and stays best-effort; a
-                    # streak is a diagnosis, and it travels as a typed
-                    # failure so the ladder answers with first aid instead
-                    # of another round of clicking into a beachball.
-                    app = self.working_app or self.app or "unknown"
-                    raise AppFrozenError(
-                        f"the accessibility tree of {app!r} has not answered "
-                        f"{self._ax_probe_failures} times in a row while its "
-                        "windows are still visible; the application is not "
-                        "responding"
-                    ) from exc
+                    (
+                        raw_ui_elements,
+                        content,
+                        open_tabs,
+                        asks_for_credential,
+                        dialog_notes,
+                    ) = self._apply_ax_success(ax_outcome)
+            else:
+                try:
+                    ax_result = self.ax_probe()
+                    (
+                        raw_ui_elements,
+                        content,
+                        open_tabs,
+                        asks_for_credential,
+                        dialog_notes,
+                    ) = self._apply_ax_success(ax_result)
+                except Exception as exc:  # noqa: BLE001 - probe is best-effort perception
+                    self._apply_ax_failure(exc)
 
         frame = previous.frame
         screenshot_b64 = previous.screenshot_b64
@@ -3000,7 +3356,14 @@ class OodaRunner:
             screenshot_b64 = None
             screen_map = None
             signature = ""
-            captured = self._capture_frame(raw_ui_elements)
+            if use_prefetch:
+                captured = (
+                    self._encode_frame(prefetched_capture, raw_ui_elements)
+                    if prefetched_capture is not None
+                    else None
+                )
+            else:
+                captured = self._capture_frame(raw_ui_elements)
             if captured is not None:
                 frame, screenshot_b64, screen_map = captured
                 signature = coarse_fingerprint(frame)
@@ -3036,6 +3399,14 @@ class OodaRunner:
             marks=parse_ax_elements_to_marks(raw_ui_elements),
             asks_for_credential=asks_for_credential,
         )
+        # First-sighting log for the focus guard (see _guard_focus): the
+        # run's target owning the screen ends the launch phase. Mirrors the
+        # guard's own comparison exactly — anything short of CONTRADICTED
+        # counts, because inconclusive readings pass the guard too.
+        if window is not None and window.app_name and app_evidence(
+            self.working_app or self.app, window.app_name, window.bundle_id
+        ) is not Evidence.CONTRADICTED:
+            self._target_seen_frontmost = True
         active_window = window_summary(window) if window is not None else state.active_window
         return replace(
             state,
@@ -3059,6 +3430,26 @@ class OodaRunner:
             return summaries
         return summaries_to_image_space(summaries, screen_map)
 
+    def _fetch_capture(self) -> ScreenCapture | None:
+        """One frame from the sensor, failures degraded to None (shell).
+
+        Split out of :meth:`_capture_frame` so the OBSERVE fetch (I/O-bound,
+        parallelizable) and the encode (CPU-bound, needs the AX list) run as
+        separate phases. Warning state is identical to the old combined path.
+        """
+        sensor = self.sensor
+        if sensor is None:
+            return None
+        try:
+            return sensor()
+        except Exception as exc:  # noqa: BLE001 - perception degradation is recoverable
+            if self._screenshot_warned:
+                LOGGER.debug("screen capture still failing: %s", exc)
+            else:
+                self._screenshot_warned = True
+                LOGGER.warning("screen capture failed during observe: %s", exc)
+            return None
+
     def _capture_frame(
         self,
         raw_ui_elements: tuple[str, ...],
@@ -3071,18 +3462,22 @@ class OodaRunner:
         coordinate space is unknown is worse than none, because every click
         derived from it is confidently wrong.
         """
-        sensor = self.sensor
-        if sensor is None:
+        capture = self._fetch_capture()
+        if capture is None:
             return None
-        try:
-            capture = sensor()
-        except Exception as exc:  # noqa: BLE001 - perception degradation is recoverable
-            if self._screenshot_warned:
-                LOGGER.debug("screen capture still failing: %s", exc)
-            else:
-                self._screenshot_warned = True
-                LOGGER.warning("screen capture failed during observe: %s", exc)
-            return None
+        return self._encode_frame(capture, raw_ui_elements)
+
+    def _encode_frame(
+        self,
+        capture: ScreenCapture,
+        raw_ui_elements: tuple[str, ...],
+    ) -> tuple[ScreenCapture, str | None, ScreenMap] | None:
+        """Derive the model's map from an already-fetched frame (shell).
+
+        Pure-CPU phase of :meth:`_capture_frame`: cache lookup, downscale,
+        Set-of-Marks annotation and PNG encode. Takes the fetched frame so
+        the fetch itself can run beside the AX walk on another thread.
+        """
         if not self.vision_enabled:
             logical_size = capture.logical_size
             ratio = max(1.0, max(logical_size.width, logical_size.height) / SCREENSHOT_MAP_MAX_SIDE)
@@ -3789,6 +4184,119 @@ class OodaRunner:
             return state
         return replace(state, skill=self._skill)
 
+    def _end_fast_path(
+        self, state: WorkingState, skill: SkillDefinition, reason: str
+    ) -> WorkingState:
+        """Close a missed fast path: report, unmount, hand back to OODA.
+
+        Returns the state with the miss prefixed onto ``last_error``. The
+        step's own diagnosis (already there courtesy of ``_execute_one``)
+        is what the next provider turn recovers from, so the context
+        prefixes rather than replaces — and the state must travel back
+        even on a miss, or the failure the replay just paid for is lost.
+        """
+        LOGGER.info("fast path ended for skill %s: %s", skill.skill_id, reason)
+        if self.record_skill_failure is not None:
+            self.record_skill_failure(skill.skill_id, reason)
+        self._skill = None
+        return replace(
+            state,
+            last_error=(
+                f"fast-path replay of skill {skill.skill_id} missed ({reason}); "
+                "continuing with normal observation. " + (state.last_error or "")
+            ),
+        )
+
+    def _maybe_fast_path(
+        self, state: WorkingState, goal: str
+    ) -> tuple[WorkingState, bool]:
+        """Replay a proven skill's recipe with zero provider turns (shell).
+
+        The caller attempts each mounted skill at most once. Returns the
+        (possibly advanced) state plus whether the recipe replayed cleanly:
+        on a clean replay the loop continues to its single verify-and-finish
+        provider turn; on a miss the returned state carries the diagnosis and
+        the run continues as ordinary OODA.
+        """
+        skill = self._skill
+        if skill is None or not skill.recipe:
+            return state, False
+        env = environment_fingerprint(self.app, goal)
+        if not fast_path_eligible(skill, current_env=env):
+            return state, False
+        match = skill_for_goal([summary_of(skill)], app=self.app, description=goal)
+        if match is None or match.skill_id != skill.skill_id:
+            # Same-app, scored, but a different goal: guidance only, and the
+            # mounted skill stays mounted for exactly that.
+            return state, False
+        LOGGER.info(
+            "fast path: replaying %d recipe step(s) of skill %s with no model turn",
+            len(skill.recipe),
+            skill.skill_id,
+        )
+        for index, recipe_step in enumerate(skill.recipe):
+            try:
+                state = self._observe(state)
+            except AppFrozenError:
+                # Perception failed mid-replay: unmount and let the normal
+                # cycle meet the same failure with its own handling.
+                self._skill = None
+                return state, False
+            action = rebuild_recipe_action(recipe_step, self._observation.marks)
+            if action is None:
+                state = self._end_fast_path(
+                    state, skill, f"recipe step {index + 1} has no live target"
+                )
+                return state, False
+            turn = AgentTurn(
+                thought=(
+                    f"fast-path replay of skill {skill.skill_id} "
+                    f"step {index + 1}/{len(skill.recipe)}; no model turn spent"
+                ),
+                sub_goal=(
+                    skill.steps[index]
+                    if index < len(skill.steps)
+                    else f"replay step {index + 1} of skill {skill.skill_id}"
+                ),
+                action=action,
+            )
+            try:
+                state, finished, stop_batch = self._execute_one(
+                    state, turn, goal, marks=self._observation.marks
+                )
+            except (PermissionDeniedError, PermissionConfirmationRequired) as exc:
+                # A denial is the operator's policy, not a failure to route
+                # around: end the replay, record why, and let the normal
+                # cycle meet the same guard with its proper parked flow.
+                state = self._end_fast_path(
+                    state,
+                    skill,
+                    f"recipe step {index + 1} denied by guard: {exc}",
+                )
+                return state, False
+            if finished:
+                return state, True
+            if stop_batch:
+                state = self._end_fast_path(
+                    state,
+                    skill,
+                    state.last_error or f"recipe step {index + 1} did not verify",
+                )
+                return state, False
+        # Replay complete. The loop's next iteration observes and spends the
+        # run's single provider turn verifying the goal and finishing — the
+        # claim still belongs to a decision, and the decision to the audit.
+        state = replace(
+            state,
+            last_error=(
+                "fast-path replay of skill "
+                f"{skill.skill_id} completed {len(skill.recipe)} step(s); "
+                "verify the goal against the current screen and finish, "
+                "or continue working if anything is off."
+            ),
+        )
+        return state, True
+
 
 class UnknownMarkError(RuntimeError):
     """A ``click_mark`` named an index that is not in the current element list.
@@ -3930,6 +4438,17 @@ class MaxStepsError(RuntimeError):
         super().__init__(
             f"run exceeded max_steps={steps} on goal={goal!r} without finishing"
         )
+
+
+class NavigationFailedError(RuntimeError):
+    """The address bar was submitted but the page never arrived.
+
+    A navigation verifies by *outcome* — the window title must move to the
+    new page — because its three sub-steps (focus bar, paste, submit) each
+    verify cleanly while the page stays put. Classified as verification, so
+    the ladder answers with a re-look rather than a new tactic: the usual
+    cause is an unfocused bar or a slow load, not a wrong plan.
+    """
 
 
 class FocusLostError(RuntimeError):

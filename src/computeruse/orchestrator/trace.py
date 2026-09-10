@@ -93,14 +93,14 @@ class StepTrace:
     phase_s: dict[str, float] | None = None
 
 
-def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
-    """Serialise one step as a single JSON line (pure).
+def step_trace_dict(record: StepTrace, *, screenshot: str | None) -> dict[str, object]:
+    """One step as a plain dict (pure).
 
-    ``screenshot`` is the *filename* the tracer wrote, not the image — a trace
-    file has to stay greppable, and a base64 frame per line would make it tens
-    of megabytes for a thirty-step run.
+    Split out of :func:`step_trace_json` so the activity envelope can reuse
+    the exact same fields without a serialize/parse round-trip: one field
+    source, two renderings.
     """
-    payload: dict[str, object] = {
+    return {
         # Discriminator so the panel can tell a step from the sibling @@CU
         # records on the same stream ({"type": "plan"}, {"type": "stats"}):
         # a step is the only one carrying a numeric "step".
@@ -120,7 +120,20 @@ def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
         "phase_s": record.phase_s,
         "screenshot": screenshot,
     }
-    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def step_trace_json(record: StepTrace, *, screenshot: str | None) -> str:
+    """Serialise one step as a single JSON line (pure).
+
+    ``screenshot`` is the *filename* the tracer wrote, not the image — a trace
+    file has to stay greppable, and a base64 frame per line would make it tens
+    of megabytes for a thirty-step run.
+    """
+    return json.dumps(
+        step_trace_dict(record, screenshot=screenshot),
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 #: Marks a line on stdout as a structured event rather than human log text.

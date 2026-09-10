@@ -52,3 +52,6 @@ data/
 # silently ignored by `git add` and would have gone missing from a commit.
 /skills/
 /skills-lock.json
+
+# per-run traces (JSONL steps + screenshots)
+traces/

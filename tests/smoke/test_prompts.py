@@ -638,6 +638,18 @@ def test_system_prompt_documents_click_mark() -> None:
     assert "PREFERRED over coordinate estimation" in ACTION_CONTRACT
 
 
+def test_system_prompt_batches_form_fills_by_default() -> None:
+    """One model turn costs a full re-observation (~10s wall clock): a live
+    form run spent 12 turns filling 5 fields one action at a time while the
+    batching rule already allowed it. The contract now names form filling as
+    the canonical batch and keeps the submit click out of it."""
+    from computeruse.orchestrator.prompts import ACTION_CONTRACT
+
+    assert "FORM FILLING IS THE CANONICAL BATCH" in ACTION_CONTRACT
+    assert "batching routine fills is the DEFAULT" in ACTION_CONTRACT
+    assert "NEVER batch the submit/send click with the fills" in ACTION_CONTRACT
+
+
 def test_normalize_action_dict_normalizes_click_mark_aliases() -> None:
     assert _normalize_action_dict({"type": "mark", "mark": 3}) == {
         "type": "click_mark",

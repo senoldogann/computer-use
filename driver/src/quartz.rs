@@ -163,7 +163,8 @@ impl QuartzBackend {
         let location = CGPoint::new(at.x as f64, at.y as f64);
         let _ = CGDisplay::warp_mouse_cursor_position(location);
         self.move_instant(at)?;
-        std::thread::sleep(Duration::from_millis(30));
+        // Brief settle so the app reacts to the pointer before the press.
+        std::thread::sleep(Duration::from_millis(15));
 
         // Clamp to the contract (1..=2): a raw socket value of 255 would
         // otherwise loop for ~18s blocking the driver (protocol hardening).
@@ -180,11 +181,13 @@ impl QuartzBackend {
             up_event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
             let release = InputRelease { events: vec![up_event] };
             down_event.post(CGEventTapLocation::HID);
-            std::thread::sleep(Duration::from_millis(40));
+            // Press dwell: long enough for the app to register the down, short
+            // enough that a run never reads as a hesitant poke.
+            std::thread::sleep(Duration::from_millis(25));
             drop(release);
 
             if total > 1 && index + 1 < total {
-                std::thread::sleep(Duration::from_millis(60));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
         Ok(())
@@ -306,11 +309,11 @@ impl Backend for QuartzBackend {
             Button::Middle => (CGEventType::OtherMouseDown, CGEventType::OtherMouseUp),
         };
         self.button_sequence(at, down, up, quartz_button(button), click_count)?;
-        // Human dwell: a real hand lingers a moment after a click before the
+        // Human dwell: a real hand lingers a beat after a click before the
         // next action starts (and the UI needs that beat to render the
         // response). Without it, consecutive clicks fire back-to-back and the
         // whole run reads mechanical (Law 1 cadence).
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(70));
         Ok(())
     }
 

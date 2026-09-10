@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from computeruse.agent import Agent, AgentConfig
-from computeruse.cli import parse_args, resolve_cost_price
+from computeruse.cli import parse_args, resolve_cost_price, session_call_cost
 from computeruse.orchestrator.budget import (
     BudgetExceededError,
     RunBudget,
@@ -94,6 +94,51 @@ def test_cost_ceiling_needs_a_priced_transport() -> None:
 
     no_ceiling = parse_args(["--goal", "x", "--model", "my_mod:my_model"])
     assert resolve_cost_price(no_ceiling) is None
+
+
+@pytest.mark.parametrize("spec", ["codex", "codex:gpt-x", "claude", "opencode", "opencode:a/b"])
+def test_subscription_transport_warns_instead_of_pricing(
+    spec: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No published per-token price exists for subscriptions: --max-cost
+    cannot be enforced in dollars, so it warns (operator decision) and
+    yields no price — while --max-tokens still bounds the run."""
+    args = parse_args(["--goal", "x", "--model", spec, "--max-cost", "1.0"])
+    assert resolve_cost_price(args) is None
+    assert "--max-cost cannot price" in capsys.readouterr().err
+
+
+def test_session_bills_cost_from_tokens_not_from_a_missing_field() -> None:
+    """The stats object carries no cost field; reading one bills $0.00.
+
+    Measured on a real autonomous run: 15,807 tokens recorded at $0.00, so
+    the session's --max-cost guard watched a counter that could never move.
+    """
+    price = price_for("gpt-5.6-terra")
+    call = ModelCallStats(
+        total_tokens=15807,
+        prompt_tokens=15634,
+        completion_tokens=173,
+        elapsed_s=3.4,
+    )
+    tokens, cost = session_call_cost(price, call)
+    assert tokens == 15807
+    assert cost == pytest.approx(call_cost_usd(price, call))
+    assert cost > 0
+
+
+def test_session_without_a_cost_ceiling_records_tokens_only() -> None:
+    """No ceiling asked, no dollars invented — the single-run receipt shape."""
+    call = ModelCallStats(
+        total_tokens=100, prompt_tokens=80, completion_tokens=20, elapsed_s=0.5
+    )
+    assert session_call_cost(None, call) == (100, 0.0)
+
+
+def test_session_ignores_objects_that_are_not_model_calls() -> None:
+    price = price_for("gpt-5.6-terra")
+    assert session_call_cost(price, object()) == (0, 0.0)
+    assert session_call_cost(None, "not-a-call") == (0, 0.0)
 
 
 def test_the_guard_stops_the_loop_between_steps_not_mid_action() -> None:

@@ -254,6 +254,9 @@ def test_the_agent_captures_the_configured_display(tmp_path: Path) -> None:
         def __exit__(self, *_exc: object) -> None:
             return None
 
+        def close(self) -> None:
+            return None
+
         def capture(self, display_id: int = 0) -> ScreenCapture:
             requested.append(display_id)
             return frame

@@ -504,6 +504,63 @@ def test_runner_refuses_a_destructive_button_the_model_described_as_routine() ->
     assert executed == [], "a destructive control must never reach the driver"
 
 
+# --- the Finnish submit-button bypass (live miss, 2026-09-08) -----------------
+# A supervised run clicked "Lähetä viesti" (Finnish: "send message") on a
+# contact form with no confirmation at all: no send-family verb covered
+# Finnish, and "submit" — the verb forms actually carry — was not in the
+# family either. Same bypass class as the Trash precedent in the policy.
+
+
+def test_finnish_send_button_label_is_destructive() -> None:
+    turn = _click_turn(100, 200, "continue with the flow")
+    assert classify_risk(turn, target_label="Lähetä viesti") is Risk.DESTRUCTIVE
+
+
+def test_submit_is_a_send_family_synonym() -> None:
+    """Buttons say "Submit"; narrations say "submit the form". Both must ask,
+    exactly like "send" already did — a missing synonym is a bypass."""
+    assert classify_risk(_click_turn(10, 10, "submit the form")) is Risk.DESTRUCTIVE
+    labeled = _click_turn(10, 10, "continue")
+    assert classify_risk(labeled, target_label="Submit") is Risk.DESTRUCTIVE
+
+
+def test_pasted_text_mentioning_submit_stays_benign() -> None:
+    """The fix must not read the payload as intent: pasting a message that
+    talks about submitting is filling a field, not sending anything."""
+    turn = AgentTurn(
+        thought="fill the message",
+        sub_goal="fill the message field",
+        action=ClipboardPaste(
+            type="clipboard_paste", text="please submit my application"
+        ),
+    )
+    assert classify_risk(turn) is Risk.NONE
+
+
+def test_runner_stops_before_a_finnish_submit_button() -> None:
+    """End to end: the submit click asks first, the driver sees nothing."""
+    executed: list[object] = []
+
+    def provider(_state: WorkingState) -> AgentTurn:
+        return _click_turn(100, 200, "submit the ready form")
+
+    def ax_probe() -> AxProbeResult:
+        return AxProbeResult(
+            summaries=('Button "Lähetä viesti" at (100,200) 80x24',)
+        )
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=executed.append,
+        guard=guarded(AutonomyLevel.FULL, authorize=None),
+        ax_probe=ax_probe,
+        max_steps=3,
+    )
+    with pytest.raises(PermissionConfirmationRequired):
+        runner.run(goal="send the contact form")
+    assert executed == [], "a submit control must never reach the driver unasked"
+
+
 # --- SEC-01: an MCP call is read, not taken on trust ------------------------
 
 

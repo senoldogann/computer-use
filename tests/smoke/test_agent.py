@@ -267,6 +267,9 @@ class _SensorDeadClient:
     def __exit__(self, *_exc: object) -> None:
         return None
 
+    def close(self) -> None:
+        return None
+
     def focused_window(self) -> FocusedWindow:
         return FocusedWindow(
             pid=4242,
@@ -412,6 +415,9 @@ class _RecordingClient:
 
     def __exit__(self, *_exc: object) -> None:
         return None
+
+    def close(self) -> None:
+        self.calls.append("close")
 
     def activate_app(self, app: str) -> None:
         self.calls.append(f"activate:{app}")

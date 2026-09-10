@@ -23,7 +23,7 @@
 
 #![cfg(target_os = "macos")]
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -74,6 +74,11 @@ enum LineKind {
 
 struct Shared {
     lines: VecDeque<(LineKind, String)>,
+    // Pre-rendered JS waiting for the main thread: produced by background
+    // catalogue fetches (model palettes) and delivered by the same 30 Hz
+    // drain timer that owns the webview. Never evaluated here — the
+    // webview may only be touched on the main thread.
+    pending_js: Vec<String>,
     child_pid: Option<u32>,
     // Piped stdin of the agent child: the panel's Approve/Deny buttons write
     // the human answer here when the CLI is blocked on a Law 5.1 confirmation
@@ -86,6 +91,7 @@ struct Shared {
 
 static SHARED: Mutex<Shared> = Mutex::new(Shared {
     lines: VecDeque::new(),
+    pending_js: Vec::new(),
     child_pid: None,
     child_stdin: None,
     exit: None,
@@ -928,9 +934,10 @@ fn call_js(webview: &WKWebView, js: &str) {
 }
 
 fn drain_to_webview(webview: &WKWebView, idle_icon: &NSImage, busy_frames: &[Retained<NSImage>]) {
-    let (batch, finished_now, was_stopped, succeeded) = {
+    let (batch, pending_js, finished_now, was_stopped, succeeded) = {
         let mut s = SHARED.lock().unwrap();
         let batch: Vec<(LineKind, String)> = s.lines.drain(..).collect();
+        let pending_js: Vec<String> = std::mem::take(&mut s.pending_js);
         // A run finishes when: (a) exit is set AND (b) all lines have been
         // drained AND (c) we haven't already signalled completion.
         let done = s.exit.is_some() && !s.signalled && batch.is_empty() && s.lines.is_empty();
@@ -941,9 +948,16 @@ fn drain_to_webview(webview: &WKWebView, idle_icon: &NSImage, busy_frames: &[Ret
         if done {
             s.signalled = true;
         }
-        (batch, done, stopped, ok)
+        (batch, pending_js, done, stopped, ok)
     };
     update_status_icon(idle_icon, busy_frames);
+    // Background catalogue responses land here (main thread, ≤33 ms after
+    // the producer finished) so the webview is only ever touched here.
+    for js in pending_js {
+        if !js.is_empty() {
+            call_js(webview, &js);
+        }
+    }
     if !batch.is_empty() {
         let mut js = String::with_capacity(batch.len() * 64);
         for (kind, line) in &batch {
@@ -994,6 +1008,35 @@ fn drain_to_webview(webview: &WKWebView, idle_icon: &NSImage, busy_frames: &[Ret
         // (the child is gone anyway; this just keeps the handle honest).
         s.child_stdin = None;
     }
+}
+
+/// Render one ``if(window.NAME)window.NAME(payload);`` callback for the
+/// panel, from the background catalogue threads.
+fn js_callback(name: &str, payload: &serde_json::Value) -> String {
+    match serde_json::to_string(payload) {
+        Ok(json_str) => format!("if(window.{name})window.{name}({json_str});"),
+        Err(_) => String::new(),
+    }
+}
+
+/// Run a catalogue fetch on a background thread and deliver its JS callback
+/// through the 30 Hz drain timer, which is the only place the webview is
+/// touched. The model palette must never block the main runloop on CLI
+/// spawns or network: measured live, ``claude model list`` alone holds the
+/// main thread for ~4 s (and ``opencode models`` for ~2.4 s on a cold
+/// cache), which froze the panel exactly when the palette opened.
+/// A panicking producer yields an empty script (the panel's graceful
+/// "section stays empty" state) instead of aborting the app across the
+/// ObjC boundary.
+fn deliver_catalogue_async(compute: impl FnOnce() -> String + Send + 'static) {
+    std::thread::spawn(move || {
+        let js = std::panic::catch_unwind(std::panic::AssertUnwindSafe(compute)).unwrap_or_default();
+        if js.is_empty() {
+            return;
+        }
+        let mut s = SHARED.lock().unwrap();
+        s.pending_js.push(js);
+    });
 }
 
 fn handle_script_message(message: &WKScriptMessage) {
@@ -1153,107 +1196,145 @@ fn handle_script_message(message: &WKScriptMessage) {
                 }
             }
         }
-                Some("get_models") => {
-            let key = openai_key();
-            let has_openai = key.is_some();
-            let mut models: Vec<serde_json::Value> = Vec::new();
+                // Forward the model picker's provider-catalogue requests to the CLI
+        // helper functions below: each runs ONE detached command, parses the
+        // text rows it prints, and hands the panel {name, provider} entries.
+        // Off the main thread: a catalogue spawn can take seconds (claude
+        // model list ~4 s live) and the palette must stay responsive.
+        Some("get_provider_models") => {
+            let provider = value
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            deliver_catalogue_async(move || {
+                let rows: Vec<serde_json::Value> = match provider.as_str() {
+                    "codex" => codex_catalog_rows(),
+                    "claude" => claude_catalog_rows(),
+                    _ => Vec::new(),
+                };
+                js_callback(
+                    "onProviderModelsLoaded",
+                    &serde_json::json!({ "provider": provider, "models": rows }),
+                )
+            });
+        }
+        Some("get_models") => {
+            deliver_catalogue_async(|| {
+                let key = openai_key();
+                let has_openai = key.is_some();
+                let mut models: Vec<serde_json::Value> = Vec::new();
 
-            if let Some(ref api_key) = key {
-                let cache_path = std::path::Path::new("/tmp/computeruse_openai_models.json");
-                let mut loaded_from_cache = false;
-                if let Ok(cache_text) = std::fs::read_to_string(cache_path) {
-                    if let Ok(cached_json) = serde_json::from_str::<serde_json::Value>(&cache_text) {
-                        if let Some(list) = cached_json.as_array() {
-                            models = list.clone();
-                            loaded_from_cache = true;
+                if let Some(ref api_key) = key {
+                    let cache_path = std::path::Path::new("/tmp/computeruse_openai_models.json");
+                    let mut loaded_from_cache = false;
+                    if let Ok(cache_text) = std::fs::read_to_string(cache_path) {
+                        if let Ok(cached_json) =
+                            serde_json::from_str::<serde_json::Value>(&cache_text)
+                        {
+                            if let Some(list) = cached_json.as_array() {
+                                models = list.clone();
+                                loaded_from_cache = true;
+                            }
                         }
                     }
-                }
 
-                if !loaded_from_cache {
-                    if let Ok(output) = std::process::Command::new("curl")
-                        .args([
-                            "-s",
-                            "--max-time", "3",
-                            "-H", &format!("Authorization: Bearer {}", api_key),
-                            "https://api.openai.com/v1/models",
-                        ])
-                        .output()
-                    {
-                        if output.status.success() {
-                            if let Ok(json_resp) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                                if let Some(list) = json_resp.get("data").and_then(serde_json::Value::as_array) {
-                                    for item in list {
-                                        if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
-                                            // Sadece GPT-5.6 + GPT-6 Astra: /v1/models ham
-                                            // {"object":"list","data":[{"id":...}]} döner;
-                                            // resmi model sayfaları (developers.openai.com
-                                            // /api/docs/models/gpt-5.6-* ve /gpt-6-astra)
-                                            // dışında hiçbir id panele çıkmaz.
-                                            if id.starts_with("gpt-5.6")
-                                                || id.starts_with("gpt-6-astra")
+                    if !loaded_from_cache {
+                        if let Ok(output) = std::process::Command::new("curl")
+                            .args([
+                                "-s",
+                                "--max-time", "3",
+                                "-H", &format!("Authorization: Bearer {}", api_key),
+                                "https://api.openai.com/v1/models",
+                            ])
+                            .output()
+                        {
+                            if output.status.success() {
+                                if let Ok(json_resp) = serde_json::from_slice::<serde_json::Value>(
+                                    &output.stdout,
+                                ) {
+                                    if let Some(list) =
+                                        json_resp.get("data").and_then(serde_json::Value::as_array)
+                                    {
+                                        for item in list {
+                                            if let Some(id) =
+                                                item.get("id").and_then(serde_json::Value::as_str)
                                             {
-                                                models.push(serde_json::json!({
-                                                    "id": format!("openai:{}", id),
-                                                    "name": id,
-                                                    "provider": "openai",
-                                                    "available": true
-                                                }));
+                                                // Sadece GPT-5.6 + GPT-6 Astra: /v1/models ham
+                                                // {"object":"list","data":[{"id":...}]} döner;
+                                                // resmi model sayfaları (developers.openai.com
+                                                // /api/docs/models/gpt-5.6-* ve /gpt-6-astra)
+                                                // dışında hiçbir id panele çıkmaz.
+                                                if id.starts_with("gpt-5.6")
+                                                    || id.starts_with("gpt-6-astra")
+                                                {
+                                                    models.push(serde_json::json!({
+                                                        "id": format!("openai:{}", id),
+                                                        "name": id,
+                                                        "provider": "openai",
+                                                        "available": true
+                                                    }));
+                                                }
                                             }
                                         }
+                                        let _ = std::fs::write(
+                                            cache_path,
+                                            serde_json::to_string(&models).unwrap_or_default(),
+                                        );
                                     }
-                                    let _ = std::fs::write(cache_path, serde_json::to_string(&models).unwrap_or_default());
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // Eski cache'ler gpt-4o/o1/o3 içerebilir: izin listesi dışını at.
-            models.retain(|m| {
-                m.get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| {
-                        id.starts_with("gpt-5.6") || id.starts_with("gpt-6-astra")
-                    })
-            });
+                // Eski cache'ler gpt-4o/o1/o3 içerebilir: izin listesi dışını at.
+                models.retain(|m| {
+                    m.get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| {
+                            id.starts_with("gpt-5.6") || id.starts_with("gpt-6-astra")
+                        })
+                });
 
-            if models.is_empty() {
-                // Çevrimdışı / anahtarsız fallback: sadece 4 curated model.
-                for id in [
-                    "gpt-5.6-terra",
-                    "gpt-5.6-sol",
-                    "gpt-5.6-luna",
-                    "gpt-6-astra",
-                ] {
-                    models.push(serde_json::json!({
-                        "id": format!("openai:{}", id),
-                        "name": id,
-                        "provider": "openai",
-                        "available": has_openai
-                    }));
+                if models.is_empty() {
+                    // Çevrimdışı / anahtarsız fallback: sadece 4 curated model.
+                    for id in [
+                        "gpt-5.6-terra",
+                        "gpt-5.6-sol",
+                        "gpt-5.6-luna",
+                        "gpt-6-astra",
+                    ] {
+                        models.push(serde_json::json!({
+                            "id": format!("openai:{}", id),
+                            "name": id,
+                            "provider": "openai",
+                            "available": has_openai
+                        }));
+                    }
                 }
-            }
 
-            let response = serde_json::json!({
-                "providers": {
-                    "openai": { "configured": has_openai, "name": "OpenAI" },
-                    "anthropic": { "configured": false, "name": "Anthropic" },
-                    "google": { "configured": false, "name": "Google" },
-                    "local": { "configured": false, "name": "Ollama (Local)" }
-                },
-                "models": models
+                js_callback(
+                    "onModelsLoaded",
+                    &serde_json::json!({
+                        "providers": {
+                            "openai": { "configured": has_openai, "name": "OpenAI" },
+                            "anthropic": { "configured": false, "name": "Anthropic" },
+                            "google": { "configured": false, "name": "Google" },
+                            "local": { "configured": false, "name": "Ollama (Local)" }
+                        },
+                        "models": models
+                    }),
+                )
             });
-
-            if let Ok(json_str) = serde_json::to_string(&response) {
-                let ptr = WEBVIEW_PTR.load(core::sync::atomic::Ordering::SeqCst);
-                if !ptr.is_null() {
-                    let wv = unsafe { &*(ptr as *const WKWebView) };
-                    let js = format!("if(window.onModelsLoaded)window.onModelsLoaded({json_str});");
-                    call_js(wv, &js);
-                }
-            }
+        }
+        Some("get_opencode_models") => {
+            deliver_catalogue_async(|| {
+                js_callback(
+                    "onOpencodeModelsLoaded",
+                    &serde_json::json!({ "opencode_models": cached_opencode_models() }),
+                )
+            });
         }
         Some("stop") => stop_agent(),
         Some("toggle_panel") => toggle_panel_ui(),
@@ -1493,8 +1574,12 @@ fn run_agent(
         s.exit = Some(Some(1));
         return;
     };
+    // Subscription transports (codex/claude/opencode) bill their own plan
+    // through their CLIs and never read OPENAI_API_KEY — the bridge even
+    // scrubs it from the child env so a stale export cannot move billing.
+    // Gating them on the key would block runs that need no key at all.
     let key = openai_key();
-    if key.is_none() {
+    if requires_openai_key(model) && key.is_none() {
         push_err("OPENAI_API_KEY is not set (env or ~/.computeruse/env). The agent cannot call the model without it.".to_string());
         let mut s = SHARED.lock().unwrap();
         s.exit = Some(Some(1));
@@ -1534,7 +1619,12 @@ fn run_agent(
     cmd.args(agent_args(goal, app, &driver_bin_str, &socket, &store, level, mcp, trust, model));
     // The launcher owns the status icon; the spawned driver stays halo-only.
     cmd.env("COMPUTERUSE_NO_STATUS", "1");
-    cmd.env("OPENAI_API_KEY", key.expect("checked above"));
+    // Pass the key through only when one exists: subscription transports
+    // ignore it (their bridge scrubs API keys from the child), and a run
+    // that reached here without a key proved it needs none.
+    if let Some(api_key) = key {
+        cmd.env("OPENAI_API_KEY", api_key);
+    }
     // A GUI process inherits the minimal launchd PATH (/usr/bin:/bin:…), so
     // every bare-name lookup inside the agent (node, git, …) fails with
     // FileNotFoundError and the run dies before its first step. Widen the
@@ -1796,6 +1886,526 @@ fn find_uv() -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|candidate| candidate.is_file())
+}
+
+/// Whether this model spec needs OPENAI_API_KEY to run.
+///
+/// Only the OpenAI transport reads it — including the empty default, which
+/// ``agent_args`` resolves to ``openai``. Subscription transports
+/// (``codex*``, ``claude*``, ``opencode*``) authenticate through their own
+/// CLIs. Anything else keeps the old behaviour (key required): a custom
+/// ``module:callable`` transport *may* read the key itself, and failing
+/// closed here is safer than launching a run that dies on its first turn.
+fn requires_openai_key(model: Option<&str>) -> bool {
+    match model.map(str::trim) {
+        // Empty default resolves to ``openai`` in ``agent_args``.
+        None | Some("") => true,
+        Some(spec) => {
+            !(spec == "codex"
+                || spec.starts_with("codex:")
+                || spec == "claude"
+                || spec.starts_with("claude:")
+                || spec == "opencode"
+                || spec.starts_with("opencode:"))
+        }
+    }
+}
+
+/// Max opencode models sent to the panel. ``opencode models`` lists the
+/// whole Models.dev catalog per authenticated provider (~600 rows today);
+/// the panel search narrows client-side, so the cap is a sanity bound
+/// against catalog growth, not curation.
+const OPENCODE_MODEL_CAP: usize = 600;
+/// Cache TTL for CLI-produced model catalogues (opencode list, claude model
+/// list). Providers authenticate rarely, and spawning the CLI on every
+/// palette open would add seconds to it — measured live: ``opencode models``
+/// ~2.4 s, ``claude model list`` ~4 s.
+const MODEL_CACHE_SECS: u64 = 86400;
+
+/// Locate a CLI binary the way ``find_uv`` does: a GUI process inherits the
+/// minimal launchd PATH, so a bare ``Command::new("opencode")`` fails while
+/// the same binary works fine from a terminal.
+fn find_on_gui_path(name: &str) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            let candidate = Path::new(dir).join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    for dir in [
+        ".local/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/local/bin",
+    ] {
+        let candidate = if let Some(rest) = dir.strip_prefix('/') {
+            Path::new("/").join(rest).join(name)
+        } else {
+            Path::new(&home).join(dir).join(name)
+        };
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Runable Codex model ids, discovered from the installed CLI itself so the
+/// catalogue follows codex releases instead of drifting from a hardcoded
+/// list. Sources, in order:
+///   1. ids embedded in the codex platform binary (Mach-O builds carry the
+///      builtin ChatGPT-plan catalog as plain strings, e.g. ``gpt-5.3-codex``;
+///      the npm wrapper is a JS shim and is resolved to its real binary);
+///   2. ``~/.codex/models_cache.json`` — the CLI's own server-fetched
+///      catalog (what this install can actually run, router configs and
+///      plain installs alike);
+///   3. the operator's pinned default (``model = "..."`` in
+///      ``~/.codex/config.toml``), which the CLI resolves itself and is
+///      therefore always runnable.
+///
+/// Every id is passed to the transport verbatim with the ``codex:`` prefix;
+/// the CLI validates it at run time, so only ids the installed CLI itself
+/// names are offered.
+fn codex_catalog_rows() -> Vec<serde_json::Value> {
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    if let Some(bin) = codex_platform_binary() {
+        if let Ok(bytes) = std::fs::read(&bin) {
+            names.extend(extract_codex_binary_ids(&bytes));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_path = Path::new(&home).join(".codex/models_cache.json");
+        if let Ok(text) = std::fs::read_to_string(cache_path) {
+            names.extend(extract_cached_codex_ids(&text));
+        }
+        let config_path = Path::new(&home).join(".codex/config.toml");
+        if let Ok(text) = std::fs::read_to_string(config_path) {
+            if let Some(default_id) = codex_config_default(&text) {
+                names.insert(default_id);
+            }
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "provider": "codex",
+            })
+        })
+        .collect()
+}
+
+/// The codex CLI's real platform binary. ``codex`` on PATH is often an npm
+/// JS wrapper (``#!...node``), which embeds no catalog; the Mach-O builds
+/// live next to it in the npm platform package or inside the ChatGPT VS
+/// Code extension (``openai.chatgpt-*/bin/macos-aarch64/codex``). A Mach-O
+/// file is used directly; wrappers are resolved to their platform package;
+/// the newest VS Code-bundled binary is the last resort. Returns the first
+/// file that exists and looks like a binary.
+fn codex_platform_binary() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(bin) = find_on_gui_path("codex") {
+        candidates.push(bin.clone());
+        // npm layout: <prefix>/lib/node_modules/@openai/codex/bin/codex.js →
+        // platform package sits two levels up at @openai/codex-darwin-arm64.
+        if let Some(parent) = bin.parent() {
+            let pkg_root = parent
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent());
+            if let Some(root) = pkg_root {
+                for target in ["codex-darwin-arm64", "codex-darwin-x64"] {
+                    candidates.push(root.join(target).join("bin").join("codex"));
+                }
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let ext_root = Path::new(&home).join(".vscode/extensions");
+        if let Ok(entries) = std::fs::read_dir(ext_root) {
+            let mut ext_bins: Vec<PathBuf> = entries
+                .filter_map(|entry| entry.ok())
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    name.starts_with("openai.chatgpt-")
+                        .then(|| entry.path().join("bin/macos-aarch64/codex"))
+                })
+                .filter(|p| p.is_file())
+                .collect();
+            ext_bins.sort();
+            candidates.extend(ext_bins);
+        }
+    }
+    for candidate in candidates {
+        if let Ok(bytes) = std::fs::read(&candidate) {
+            if bytes.starts_with(&[0xCF, 0xFA, 0xED, 0xFE]) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Model ids from the codex CLI's own ``models_cache.json`` (the
+/// server-fetched catalog the CLI resolves against). Walks the JSON for
+/// string ids and keeps only plausible model tokens — the CLI's special
+/// slot names (``priority``, ``gpt-reserve``) are selection plumbing, not
+/// models, and would only confuse the palette.
+fn extract_cached_codex_ids(cache_text: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(cache_text) else {
+        return Vec::new();
+    };
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    fn walk(node: &serde_json::Value, out: &mut BTreeSet<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    if (key == "id" || key == "model" || key == "slug")
+                        && child.is_string()
+                    {
+                        if let Some(id) = child.as_str() {
+                            if is_plausible_model_id(id) {
+                                out.insert(id.to_string());
+                            }
+                        }
+                    }
+                    walk(child, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(&value, &mut out);
+    out.into_iter().collect()
+}
+
+/// Whether a token looks like a runnable model id rather than selection
+/// plumbing: plausible charset/length, and not the CLI's special slot names.
+fn is_plausible_model_id(token: &str) -> bool {
+    let len_ok = (3..=64).contains(&token.len());
+    let charset_ok = token
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_');
+    let not_plumbing = !matches!(token, "priority" | "gpt-reserve");
+    len_ok && charset_ok && not_plumbing
+}
+
+/// The operator's pinned codex model: the first top-level ``model = "..."``
+/// in ``~/.codex/config.toml``. Section-scoped keys (``[model_providers.*]``)
+/// configure router-specific ids and are not what ``codex exec`` uses by
+/// default, so only the top-level assignment is honored (TOML puts top-level
+/// keys before any ``[section]`` header).
+fn codex_config_default(config_text: &str) -> Option<String> {
+    for line in config_text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            return None;
+        }
+        let Some(value) = line.strip_prefix("model") else {
+            continue;
+        };
+        let Some(value) = value.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let Some(value) = value.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        let id = value.split('"').next()?;
+        if !id.is_empty() {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
+/// Model ids embedded in the installed codex binary, e.g. ``gpt-5.3-codex``.
+/// Matches only the codex-family pattern (``gpt-…-codex``) so unrelated
+/// strings (router configs, docs) cannot leak into the catalogue; a missing
+/// match just means this install does not embed its catalog (npm wrapper
+/// shims) and the config default carries the palette instead.
+fn extract_codex_binary_ids(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut ids: BTreeSet<String> = BTreeSet::new();
+    let mut rest = text.as_ref();
+    while let Some(start) = rest.find("gpt-") {
+        let tail = &rest[start..];
+        let end = tail
+            .char_indices()
+            .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '-' && *c != '.')
+            .map(|(i, _)| i)
+            .unwrap_or(tail.len());
+        let candidate = &tail[..end];
+        if is_codex_id(candidate) {
+            ids.insert(candidate.to_string());
+        }
+        if end >= tail.len() {
+            break;
+        }
+        // Advance past the WHOLE character at `end`: the real codex binary
+        // contains multibyte UTF-8, and skipping a single byte would resume
+        // mid-char and panic on the next slice.
+        let char_len = tail[end..].chars().next().map(char::len_utf8).unwrap_or(1);
+        rest = &tail[end + char_len..];
+    }
+    ids.into_iter().collect()
+}
+
+/// Whether a scanned token is a real codex model id: ``gpt-<version>-codex``
+/// with an optional single lowercase variant suffix from the observed
+/// builtin set (``-max``, ``-mini``, ``-spark``). An unknown suffix is
+/// dropped rather than shown: the CLI would reject it at run time, and a
+/// row that fails only after selection is exactly what the palette avoids.
+fn is_codex_id(candidate: &str) -> bool {
+    let Some(rest) = candidate.strip_prefix("gpt-") else {
+        return false;
+    };
+    let Some(codex_at) = rest.find("-codex") else {
+        return false;
+    };
+    let version = &rest[..codex_at];
+    let tail = &rest[codex_at + "-codex".len()..];
+    let version_ok = !version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let tail_ok = tail.is_empty()
+        || tail
+            .strip_prefix('-')
+            .is_some_and(|v| matches!(v, "max" | "mini" | "spark"));
+    version_ok && tail_ok
+}
+
+/// Runable Claude model selectors with a one-day /tmp cache: ``claude model
+/// list`` is the authoritative source when the subscription answers, and its
+/// spawn is the slowest catalogue path live (~4 s), so it must run at most
+/// once a day. The cache only ever holds rows the CLI itself produced.
+fn claude_catalog_rows() -> Vec<serde_json::Value> {
+    let cache_path = std::path::Path::new("/tmp/computeruse_claude_models.json");
+    let fresh = std::fs::metadata(cache_path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < MODEL_CACHE_SECS);
+    if fresh {
+        if let Ok(text) = std::fs::read_to_string(cache_path) {
+            if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                if !rows.is_empty() {
+                    return rows;
+                }
+            }
+        }
+    }
+    let rows = claude_catalog_live();
+    if !rows.is_empty() {
+        let _ = std::fs::write(
+            cache_path,
+            serde_json::to_string(&rows).unwrap_or_default(),
+        );
+    }
+    rows
+}
+
+/// The uncached claude catalogue: ``claude model list`` is authoritative
+/// when the subscription answers (its stdout rows name exactly the
+/// ids/aliases the plan can run). When the command is unavailable or
+/// quota-blocked (measured: the weekly-limit error exits nonzero), the ids
+/// embedded in the claude binary itself are used, plus the documented
+/// aliases from its own ``--help`` text. Rows are the CLI's own words
+/// either way — never a hardcoded catalogue.
+fn claude_catalog_live() -> Vec<serde_json::Value> {
+    let Some(bin) = find_on_gui_path("claude") else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(output) = std::process::Command::new(&bin)
+        .arg("model")
+        .arg("list")
+        .output()
+    {
+        if output.status.success() {
+            names = parse_model_list_rows(&String::from_utf8_lossy(&output.stdout));
+        }
+    }
+    if names.is_empty() {
+        if let Ok(bytes) = std::fs::read(&bin) {
+            names = extract_claude_binary_ids(&bytes);
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "provider": "claude",
+            })
+        })
+        .collect()
+}
+
+/// Model ids/aliases from ``claude model list`` stdout. Real selectors are
+/// bare tokens (``claude-opus-5``, ``sonnet``) while prose/headers carry
+/// flags, spaces, or punctuation — dropped here. Columnar output (one id
+/// per row with descriptive columns) is handled by evaluating each token
+/// separately.
+fn parse_model_list_rows(text: &str) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for line in text.lines() {
+        for token in line.split_whitespace() {
+            let token = token.trim_matches(['"', '\'', '`', ',']);
+            if token.is_empty() || token.len() <= 2 || token.starts_with('-') {
+                continue;
+            }
+            let plausible = token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+            let model_like = token.contains('-') || token.chars().any(|c| c.is_ascii_digit());
+            if plausible && model_like {
+                out.insert(token.to_string());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Versioned model ids embedded in the installed claude binary
+/// (``claude-opus-5``, ``claude-sonnet-4-5``, ...) plus the alias set its
+/// own ``--help`` documents (``opus``, ``sonnet``, ``haiku``, ``fable``).
+/// The aliases keep the fallback non-empty even when a build embeds no ids.
+fn extract_claude_binary_ids(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut ids: BTreeSet<String> = BTreeSet::new();
+    let mut rest = text.as_ref();
+    while let Some(start) = rest.find("claude-") {
+        let tail = &rest[start..];
+        let end = tail
+            .char_indices()
+            .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '-' && *c != '.')
+            .map(|(i, _)| i)
+            .unwrap_or(tail.len());
+        let candidate = &tail[..end];
+        let family = candidate.split('-').nth(1).unwrap_or("");
+        let has_version = candidate.chars().any(|c| c.is_ascii_digit());
+        if matches!(
+            family,
+            "opus" | "sonnet" | "haiku" | "fable" | "mythos" | "instant"
+        ) && has_version
+        {
+            ids.insert(candidate.to_string());
+        }
+        if end >= tail.len() {
+            break;
+        }
+        // Same multibyte discipline as the codex scanner: the claude binary
+        // is full of non-ASCII strings, so the resume point must skip a
+        // whole character, never one byte of it.
+        let char_len = tail[end..].chars().next().map(char::len_utf8).unwrap_or(1);
+        rest = &tail[end + char_len..];
+    }
+    for alias in ["opus", "sonnet", "haiku", "fable"] {
+        ids.insert(alias.to_string());
+    }
+    ids.into_iter().take(40).collect()
+}
+
+fn opencode_auth_providers() -> Vec<String> {
+    let mut providers = vec!["opencode".to_string()];
+    let path = std::env::var("HOME")
+        .ok()
+        .map(|home| Path::new(&home).join(".local/share/opencode/auth.json"));
+    if let Some(path) = path {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(map) = json.as_object() {
+                    for key in map.keys() {
+                        if key != "opencode" && !providers.contains(key) {
+                            providers.push(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    providers
+}
+
+fn parse_opencode_models(
+    text: &str,
+    authed: &[String],
+    cap: usize,
+) -> Vec<(String, String)> {
+    // ``opencode models`` prints one ``provider/model`` per line. Split at
+    // the FIRST slash (model ids contain slashes), drop blanks and providers
+    // without credentials — an entry the transport cannot bill is a dead row
+    // that fails only at run time, after quota-free hope.
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if out.len() >= cap {
+            break;
+        }
+        let line = line.trim();
+        let Some((provider, model)) = line.split_once('/') else {
+            continue;
+        };
+        let (provider, model) = (provider.trim(), model.trim());
+        if provider.is_empty() || model.is_empty() {
+            continue;
+        }
+        if !authed.iter().any(|id| id == provider) {
+            continue;
+        }
+        out.push((provider.to_string(), model.to_string()));
+    }
+    out
+}
+
+fn cached_opencode_models() -> Vec<serde_json::Value> {
+    let cache_path = std::path::Path::new("/tmp/computeruse_opencode_models.json");
+    let fresh = std::fs::metadata(cache_path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < MODEL_CACHE_SECS);
+    if fresh {
+        if let Ok(text) = std::fs::read_to_string(cache_path) {
+            if let Ok(cached) =
+                serde_json::from_str::<Vec<serde_json::Value>>(&text)
+            {
+                return cached;
+            }
+        }
+    }
+    let mut models = Vec::new();
+    if let Some(bin) = find_on_gui_path("opencode") {
+        if let Ok(output) = std::process::Command::new(bin).arg("models").output() {
+            if output.status.success() {
+                let authed = opencode_auth_providers();
+                for (provider, model) in parse_opencode_models(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &authed,
+                    OPENCODE_MODEL_CAP,
+                ) {
+                    models.push(serde_json::json!({
+                        "id": format!("opencode:{provider}/{model}"),
+                        "name": model,
+                        "provider": provider,
+                    }));
+                }
+            }
+        }
+    }
+    if !models.is_empty() {
+        let _ = std::fs::write(
+            cache_path,
+            serde_json::to_string(&models).unwrap_or_default(),
+        );
+    }
+    models
 }
 
 /// The agent model key: the launcher's own env first, then ``~/.computeruse/env``
@@ -2234,10 +2844,12 @@ fn spawn_toggle_hotkey_listener() {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_args as args, apple_script_string, collect_store_records,
-        completion_notification_text, edit_menu_items, icon_pixel, spinner_frame_for_tick,
-        spinner_pixel, stop_phase, StopPhase, SPINNER_FRAMES, SPINNER_TICKS_PER_FRAME,
-        STOP_FINAL_SIGNAL, STOP_FIRST_SIGNAL, STOP_GRACE_SECONDS,
+        agent_args as args, apple_script_string, codex_config_default, collect_store_records,
+        completion_notification_text, edit_menu_items, extract_cached_codex_ids,
+        extract_claude_binary_ids, extract_codex_binary_ids, icon_pixel, parse_model_list_rows,
+        parse_opencode_models, requires_openai_key, spinner_frame_for_tick, spinner_pixel,
+        stop_phase, StopPhase, SPINNER_FRAMES, SPINNER_TICKS_PER_FRAME, STOP_FINAL_SIGNAL,
+        STOP_FIRST_SIGNAL, STOP_GRACE_SECONDS,
     };
     use std::path::Path;
 
@@ -2263,6 +2875,154 @@ mod tests {
         }
         assert!(argv.windows(2).any(|w| w == ["--app", "Google Chrome"]));
         assert!(!argv.iter().any(|a| a == "--mcp"), "must not pass --mcp when disabled");
+    }
+
+    #[test]
+    fn subscription_models_skip_the_openai_key_gate() {
+        // The panel must not block runs that authenticate through their
+        // own CLIs; the empty default still resolves to openai.
+        for spec in ["codex", "codex:gpt-5.6-codex", "claude", "claude:sonnet",
+                     "opencode", "opencode:github-copilot/gpt-4.1"] {
+            assert!(!requires_openai_key(Some(spec)), "{spec} needs no key");
+        }
+        assert!(requires_openai_key(None));
+        assert!(requires_openai_key(Some("")));
+        assert!(requires_openai_key(Some("openai")));
+        assert!(requires_openai_key(Some("openai:gpt-5.6-luna")));
+        // Custom transports keep the old fail-closed behaviour.
+        assert!(requires_openai_key(Some("my_mod:my_model")));
+    }
+
+    #[test]
+    fn opencode_model_list_parses_first_slash_and_filters_unauthed() {
+        let authed = vec!["opencode".to_string(), "openrouter".to_string()];
+        let parsed = parse_opencode_models(
+            "opencode/muse-spark-1.3-contributor-free\nopenrouter/a/b/c\n\nno-slash-here\nnvidia/secret\nevil/\n",
+            &authed,
+            100,
+        );
+        assert_eq!(
+            parsed,
+            vec![
+                ("opencode".to_string(), "muse-spark-1.3-contributor-free".to_string()),
+                ("openrouter".to_string(), "a/b/c".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_model_list_respects_the_cap() {
+        let authed = vec!["openrouter".to_string()];
+        let text = (0..10).map(|i| format!("openrouter/m{i}")).collect::<Vec<_>>().join("\n");
+        assert_eq!(parse_opencode_models(&text, &authed, 3).len(), 3);
+    }
+
+    #[test]
+    fn codex_models_cache_yields_only_plausible_ids() {
+        let cache = r#"{"fetched_at":"2026-09-09","etag":"x","models":[
+            {"id":"gpt-5.6-sol","provider":"openai"},
+            {"id":"gpt-5.3-codex"},
+            {"slug":"priority"},
+            {"id":"gpt-reserve"},
+            {"id":"codex-auto-review"}
+        ]}"#;
+        let ids = extract_cached_codex_ids(cache);
+        assert_eq!(
+            ids,
+            vec!["codex-auto-review", "gpt-5.3-codex", "gpt-5.6-sol"]
+        );
+        assert!(extract_cached_codex_ids("not json").is_empty());
+    }
+
+    #[test]
+    fn codex_config_default_reads_only_top_level_assignment() {
+        let conf = "model_reasoning_effort = \"xhigh\"\nmodel = \"gpt-5.6-sol\"\n[model_providers.runpod]\nmodel = \"runpod/secret\"\n";
+        assert_eq!(codex_config_default(conf).as_deref(), Some("gpt-5.6-sol"));
+        // A section header before any assignment means there is no top-level default.
+        assert_eq!(
+            codex_config_default("[model_providers.x]\nmodel = \"nope\""),
+            None
+        );
+        assert_eq!(codex_config_default(""), None);
+    }
+
+    #[test]
+    fn codex_binary_scan_finds_only_codex_family_ids() {
+        let blob = b"gpt-5.3-codex gpt-5.1-codex-max gpt-5.6-sol o3 gpt-5-codex gpt-5.3-codex";
+        let ids = extract_codex_binary_ids(blob);
+        assert_eq!(
+            ids,
+            vec!["gpt-5-codex", "gpt-5.1-codex-max", "gpt-5.3-codex"]
+        );
+        // Suffixed lookalikes with unknown variants are not catalogue rows.
+        let blob2 = b"gpt-5.3-codex-endpoints";
+        assert!(extract_codex_binary_ids(blob2).is_empty());
+    }
+
+    #[test]
+    fn claude_model_list_rows_keep_only_model_tokens() {
+        let text = "claude-opus-5\n  claude-sonnet-4-5\nUsage: claude model list\n--verbose flag line\nopus\nprose with spaces claude-haiku-4\n";
+        let rows = parse_model_list_rows(text);
+        assert_eq!(
+            rows,
+            vec!["claude-haiku-4", "claude-opus-5", "claude-sonnet-4-5"]
+        );
+    }
+
+    #[test]
+    fn claude_binary_scan_returns_versioned_ids_and_aliases() {
+        // Non-model families (desktop/eval/code) must not leak into rows.
+        let blob = b"claude-opus-5 claude-sonnet-4-5 claude-desktop-3 claude-eval-9 claude-haiku-3";
+        let ids = extract_claude_binary_ids(blob);
+        assert_eq!(
+            ids,
+            vec![
+                "claude-haiku-3",
+                "claude-opus-5",
+                "claude-sonnet-4-5",
+                "fable",
+                "haiku",
+                "opus",
+                "sonnet",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_binary_scan_survives_multibyte_content() {
+        // The real claude binary is full of non-ASCII strings; resuming the
+        // scan after a match must skip a whole character, never one byte of
+        // it (that panics on the next slice).
+        let blob = "claude-opus-5\u{0130}claude-sonnet-5 \u{2014} claude-haiku-4".as_bytes();
+        let ids = extract_claude_binary_ids(blob);
+        assert_eq!(
+            ids,
+            vec![
+                "claude-haiku-4",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "fable",
+                "haiku",
+                "opus",
+                "sonnet",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_binary_scan_survives_multibyte_content() {
+        let blob = "gpt-5.3-codex\u{0130}gpt-5-codex \u{2014} gpt-5.1-codex-max".as_bytes();
+        let ids = extract_codex_binary_ids(blob);
+        assert_eq!(
+            ids,
+            vec!["gpt-5-codex", "gpt-5.1-codex-max", "gpt-5.3-codex"]
+        );
+    }
+
+    #[test]
+    fn agent_forwards_subscription_model_specs_verbatim() {
+        let argv = args("open notes", None, "/bin/driver", "/tmp/x.sock", "/tmp/store", 3, false, false, Some("codex"));
+        assert!(argv.windows(2).any(|w| w == ["--model", "codex"]));
     }
 
     #[test]

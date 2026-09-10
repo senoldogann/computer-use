@@ -14,6 +14,7 @@ import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
@@ -44,6 +45,49 @@ LOGGER: Final = logging.getLogger(__name__)
 
 #: Failures with nothing to show for them, after which a skill is withheld.
 DEMOTE_AFTER_FAILURES: Final[int] = 3
+
+#: Consecutive wins that make a skill's recipe replayable without a model
+#: turn. Two, not one: a single success may be luck or a forgiving screen;
+#: two in a row in the same environment is the beginning of a track record.
+FAST_PATH_MIN_CONSECUTIVE_WINS: Final[int] = 2
+
+#: Longest failure reason kept on a skill. The reason is a diagnostic for
+#: the next run's provider turn, not an archive: unbounded text in the
+#: Stage-1-adjacent record is context bloat by another name.
+FAILURE_REASON_MAX_CHARS: Final[int] = 200
+
+
+def environment_fingerprint(app: str, goal: str) -> str:
+    """Where a skill run earned its track record (pure).
+
+    App plus the single canonical site the goal names, when it names exactly
+    one. A recipe proven in one app or on one site does not replay in
+    another: the same clicks on a redesigned page are confidently wrong
+    clicks. Empty site for site-agnostic goals — the app alone still binds.
+    """
+    marked = site_markers(goal)
+    site = next(iter(marked)) if len(marked) == 1 else ""
+    return f"{app}\0{site}"
+
+
+def fast_path_eligible(definition: SkillDefinition, *, current_env: str) -> bool:
+    """May this skill's recipe replay without a model turn (pure)?
+
+    Four gates, all cheap: a recipe exists, the streak is proven (not merely
+    non-failing — ``consecutive_wins`` counts uninterrupted success), the
+    streak was earned *here*, and the skill is not demoted. Anything else —
+    including an empty environment on either side — fails closed to normal
+    OODA, which is always correct and merely slower.
+    """
+    if not definition.recipe:
+        return False
+    if definition.wins == 0:
+        return False
+    if definition.consecutive_wins < FAST_PATH_MIN_CONSECUTIVE_WINS:
+        return False
+    if not current_env or not definition.last_env:
+        return False
+    return definition.last_env == current_env
 
 
 def is_demoted(summary: SkillSummary) -> bool:
@@ -126,6 +170,7 @@ def refined_route(
             "signature": fresh.signature,
             "tags": fresh.tags,
             "parameters": fresh.parameters,
+            "recipe": fresh.recipe,
             "version": stored.version + 1,
         }
     )
@@ -303,12 +348,23 @@ class SkillRegistry:
             raise KeyError(f"no skill with id {skill_id!r} in {self._store_dir}")
         return _read_definition(path)
 
-    def record_outcome(self, skill_id: str, *, succeeded: bool) -> None:
+    def record_outcome(
+        self,
+        skill_id: str,
+        *,
+        succeeded: bool,
+        env: str = "",
+        failure_reason: str = "",
+    ) -> None:
         """Remember how a mounted skill fared on the run that used it.
 
         Without this the counters stay at zero and the ranking that reads them
         is dead code — which is exactly what distillation was before: a skill
-        was written once and never judged again.
+        was written once and never judged again. Beyond totals, the streak is
+        maintained: ``consecutive_wins`` counts uninterrupted success in one
+        environment, which is what the fast path trusts. A failure resets the
+        streak and records why (bounded); a later success clears the reason —
+        history, not archive.
 
         Missing or unreadable skills are ignored rather than raised on: a run
         has already finished by the time this is called, and failing its
@@ -321,14 +377,24 @@ class SkillRegistry:
         except (KeyError, OSError, ValueError) as exc:
             LOGGER.debug("cannot record outcome for skill %r: %s", skill_id, exc)
             return
-        self.save(
-            definition.model_copy(
-                update={
-                    "uses": definition.uses + 1,
-                    "wins": definition.wins + (1 if succeeded else 0),
-                }
-            )
-        )
+        if succeeded:
+            update = {
+                "uses": definition.uses + 1,
+                "wins": definition.wins + 1,
+                "consecutive_wins": definition.consecutive_wins + 1,
+                "last_success_at": datetime.now(UTC),
+                "last_env": env,
+                "last_failure_reason": "",
+            }
+        else:
+            update = {
+                "uses": definition.uses + 1,
+                "consecutive_wins": 0,
+                "last_failure_reason": " ".join(failure_reason.split())[
+                    :FAILURE_REASON_MAX_CHARS
+                ],
+            }
+        self.save(definition.model_copy(update=update))
 
     def save(self, definition: SkillDefinition) -> None:
         """Persist a skill definition as its id-named JSON file.

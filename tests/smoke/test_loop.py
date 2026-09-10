@@ -72,6 +72,110 @@ def test_decide_step_routes_wait_as_internal() -> None:
     assert outcome.route == "internal_wait"
 
 
+def _tiny_frame() -> ScreenCapture:
+    width, height = 64, 64
+    return ScreenCapture(
+        display_id=0, width=width, height=height, scale=1.0,
+        data=bytes(width * height * 4),
+    )
+
+
+def test_observe_reads_ax_and_frame_concurrently() -> None:
+    """The two dominant OBSERVE costs overlap instead of adding up.
+
+    The AX walk reads attributes while the capture reads pixels; waiting
+    for them in sequence pays both. Overlap is asserted from probe
+    timestamps, not wall time, so a loaded CI machine cannot flake it:
+    each probe must still be running when the other starts.
+    """
+    import threading
+    import time
+
+    events: list[tuple[str, str, float]] = []
+    events_lock = threading.Lock()
+
+    def record(name: str, phase: str) -> None:
+        with events_lock:
+            events.append((name, phase, time.monotonic()))
+
+    def slow_ax() -> AxProbeResult:
+        record("ax", "enter")
+        time.sleep(0.4)
+        record("ax", "exit")
+        return AxProbeResult(summaries=("Button \"Ok\" at (10,10) 40x20",))
+
+    def slow_sensor() -> ScreenCapture:
+        record("cap", "enter")
+        time.sleep(0.4)
+        frame = _tiny_frame()
+        record("cap", "exit")
+        return frame
+
+    runner = OodaRunner(
+        provider=lambda state: _turn(
+            Finish(type="finish", status="success", summary="done")
+        ),
+        execute_physical=lambda action: None,
+        ax_probe=slow_ax,
+        sensor=slow_sensor,
+        max_steps=5,
+    )
+    runner._observe(WorkingState(goal="x"))
+
+    def at(name: str, phase: str) -> float:
+        return next(t for n, p, t in events if n == name and p == phase)
+
+    assert at("ax", "enter") < at("cap", "exit"), "capture finished before AX started"
+    assert at("cap", "enter") < at("ax", "exit"), "AX finished before capture started"
+    assert runner._observation.raw_ui_elements == (
+        "Button \"Ok\" at (10,10) 40x20",
+    )
+
+
+def test_parallel_ax_failure_degrades_like_serial() -> None:
+    """A dead AX tree in parallel mode is the same best-effort gap: the run
+    keeps its previous context and continues, never aborts on perception."""
+
+    def bad_ax() -> AxProbeResult:
+        raise RuntimeError("ax walk wedged")
+
+    runner = OodaRunner(
+        provider=lambda state: _turn(
+            Finish(type="finish", status="success", summary="done")
+        ),
+        execute_physical=lambda action: None,
+        ax_probe=bad_ax,
+        sensor=_tiny_frame,
+        max_steps=5,
+    )
+    state = runner._observe(WorkingState(goal="x"))
+    assert state is not None
+    assert runner._ax_probe_failures == 1
+
+
+def test_parallel_capture_failure_keeps_previous_frame() -> None:
+    """A dead capture beside a live AX tree degrades to no frame — the same
+    answer the serial path gives — instead of failing the observation."""
+
+    def bad_sensor() -> ScreenCapture:
+        raise RuntimeError("capture refused")
+
+    runner = OodaRunner(
+        provider=lambda state: _turn(
+            Finish(type="finish", status="success", summary="done")
+        ),
+        execute_physical=lambda action: None,
+        ax_probe=lambda: AxProbeResult(summaries=("Button \"Ok\" at (10,10) 40x20",)),
+        sensor=bad_sensor,
+        max_steps=5,
+    )
+    runner._observe(WorkingState(goal="x"))
+    assert runner._observation.screenshot_b64 is None
+    assert runner._observation.raw_ui_elements == (
+        "Button \"Ok\" at (10,10) 40x20",
+    )
+
+
 def test_runner_executes_physical_then_finishes() -> None:
     executed: list[str] = []
 

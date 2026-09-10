@@ -394,7 +394,10 @@ def test_inbox_end_to_end_through_a_real_session(tmp_path: Path) -> None:
             sys.executable, "-m", "computeruse",
             "--autonomous", "2",
             "--watch", str(inbox),
-            "--max-cost", "0.01",
+            # Token budget, not cost: a cost ceiling needs a priced model
+            # and the session fails closed without one — the demo provider
+            # has no price, so --max-cost cannot be what bounds this run.
+            "--max-tokens", "100000",
             "--idle-seconds", "1",
             "--rest-seconds", "0",
             "--driver", str(DRIVER_BIN),

@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from computeruse.autonomous import propose_goal
 from computeruse.memory.episodic import EpisodicStore, episode_from_trace
@@ -60,10 +58,7 @@ def _propose(
     usage: tuple[UsageRecord, ...] = (),
     exclude: frozenset[str] = frozenset(),
 ) -> GoalProposal | None:
-    # Callable[..., Any] deliberately lets this test express the next API
-    # contract while the RED implementation still has the old rng parameter.
-    dynamic: Callable[..., Any] = propose_goal
-    result = dynamic(skills, episodes, usage=usage, exclude=exclude)
+    result = propose_goal(skills, episodes, usage=usage, exclude=exclude)
     assert result is None or isinstance(result, GoalProposal)
     return result
 

@@ -33,6 +33,7 @@ from computeruse.orchestrator.schemas import (
     ClipboardPaste,
     Finish,
     LoadSkill,
+    Navigate,
     PressHotkey,
     TypeText,
     Wait,
@@ -152,7 +153,14 @@ DESTRUCTIVE_FAMILIES: Final[dict[str, frozenset[str]]] = {
     "send": frozenset(
         {
             "send", "dispatch",
+            # "submit" is the verb forms actually carry: the button says
+            # "Submit" / "Lähetä viesti", the narration says "submit the
+            # form". Missing it let a live run click a Finnish contact-form
+            # send button with no confirmation at all — the same bypass
+            # class as the Trash precedent in the delete family above.
+            "submit",
             "gönder", "gonder",
+            "lähetä", "läheta",
             "envoyer", "envoie",
             "senden",
             "enviar",
@@ -392,6 +400,14 @@ class AutonomyPolicy:
             # it; full autonomy still runs it.
             return Risk.ROUTINE
         if _is_calculator_clear_control(target_label):
+            return Risk.ROUTINE
+        if isinstance(turn.action, Navigate):
+            # Opening a URL replaces page state (form input, scroll, login
+            # flows in flight) with remote content the model chose —
+            # recoverable via Back, but stateful. Routine-but-stateful is
+            # exactly the tier Guarded/Supervised exist to ask about while
+            # Full runs. Placed after the destructive word checks above on
+            # purpose: prose naming destruction still asks everywhere.
             return Risk.ROUTINE
         if words & self.routine_markers:
             return Risk.ROUTINE

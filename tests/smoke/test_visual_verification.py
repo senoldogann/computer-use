@@ -882,6 +882,74 @@ def test_focus_guard_is_inert_for_an_unpinned_run() -> None:
     assert dispatched == ["mouse_click"]
 
 
+def test_focus_guard_allows_launch_flow_before_first_sighting() -> None:
+    """A pinned run may work in a launcher to reach its target.
+
+    Live miss 2026-09-09: a run pinned (via goal inference) to Calculator
+    died pasting into Spotlight — re-activation could not help because the
+    app was not running, and the guard raised instead of yielding. Six
+    FocusLostErrors later the run was unrecoverable, although every action
+    targeted the right window. Until the target has owned the screen once,
+    there is no drift away from anywhere.
+    """
+    dispatched: list[str] = []
+
+    def execute(action: object) -> None:
+        dispatched.append(getattr(action, "type", "?"))
+        # Re-activation cannot help: the app is not installed/running, so
+        # frontmost stays Spotlight no matter how often it is requested.
+
+    def provider(state: WorkingState) -> AgentTurn:
+        if state.step_index == 0:
+            return _turn(ClipboardPaste(type="clipboard_paste", text="Calculator"))
+        return _turn(Finish(type="finish", status="success", summary="done"))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=execute,
+        window_probe=lambda: FocusedWindow(pid=1, app_name="Spotlight", window_title=""),
+        app="Calculator",
+        app_is_pinned=True,
+        max_steps=5,
+    )
+    runner.run(goal="open Calculator via Spotlight")
+    assert dispatched == ["activate_app", "clipboard_paste"]
+
+
+def test_focus_guard_reengages_after_first_sighting() -> None:
+    """Once the target has owned the screen, the old strictness returns:
+    drift plus a failed re-activation is a real focus loss, not a launch."""
+    calls = {"n": 0}
+    dispatched: list[str] = []
+
+    def window_probe() -> FocusedWindow:
+        calls["n"] += 1
+        # First reading sights the target; everything after is a hijack
+        # that re-activation (a no-op here) cannot fix.
+        app = "Calculator" if calls["n"] == 1 else "SneakyApp"
+        return FocusedWindow(pid=1, app_name=app, window_title="")
+
+    def provider(state: WorkingState) -> AgentTurn:
+        # Always retry, like the live run did: a failed decision still
+        # advances step_index, so keying on it would let the run surrender
+        # into a finish. Fresh coordinates every turn so the stuck-loop
+        # guard stays out of what is purely a focus story.
+        return _turn(MouseClick(type="mouse_click", x=10 + calls["n"], y=10))
+
+    runner = OodaRunner(
+        provider=provider,
+        execute_physical=lambda action: dispatched.append(action.type),
+        window_probe=window_probe,
+        app="Calculator",
+        app_is_pinned=True,
+        max_steps=20,
+    )
+    with pytest.raises(UnrecoverableFailureError) as excinfo:
+        runner.run(goal="click in Calculator")
+    assert "focus" in str(excinfo.value).lower()
+    assert dispatched[0] == "activate_app", "re-assertion is still attempted first"
+
+
 def test_idempotent_click_is_confirmed_by_target_focus() -> None:
     """Clicking a control already in its target state must not read as a miss.
 

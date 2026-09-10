@@ -14,8 +14,14 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from computeruse.orchestrator.schemas import Action, ActivateApp, CallTool
-from computeruse.skills.schemas import UNINFORMATIVE_WORDS, SkillDefinition
+from computeruse.orchestrator.schemas import Action, ActivateApp, CallTool, Navigate
+from computeruse.skills.schemas import (
+    RECIPE_COORDINATE_KEYS,
+    REPLAYABLE_ACTION_TYPES,
+    UNINFORMATIVE_WORDS,
+    RecipeStep,
+    SkillDefinition,
+)
 from computeruse.slug import ascii_slug
 
 
@@ -153,10 +159,41 @@ def distill(trajectory: Trajectory, known_signatures: set[str]) -> DistillResult
         description=trajectory.description,
         app=trajectory.app,
         tags=trajectory.tags or derive_tags(trajectory),
+        recipe=build_recipe(trajectory),
         steps=steps_readable,
         signature=signature,
     )
     return DistillResult(kind="skill", definition=definition, signature=signature)
+
+
+def build_recipe(trajectory: Trajectory) -> tuple[RecipeStep, ...]:
+    """Machine-replayable prefix of a trajectory (pure).
+
+    Only the *leading* run of replayable steps is kept: replay executes the
+    recipe in order and stops at the first step it cannot replay, so a
+    skipped middle (a tool call, a drag) would silently reorder the flow.
+    A click joins the recipe only with a recorded AX identity — without one
+    there is nothing to re-ground it against, and coordinates are never
+    stored. An empty recipe is a normal outcome (tool-first flows), not an
+    error: the skill stays valid, just never fast-path eligible.
+    """
+    targets = trajectory.step_targets
+    recipe: list[RecipeStep] = []
+    for index, step in enumerate(trajectory.steps):
+        if step.type not in REPLAYABLE_ACTION_TYPES:
+            break
+        target = targets[index] if index < len(targets) else ""
+        if step.type == "mouse_click" and not target:
+            break
+        params = {
+            key: value
+            for key, value in step.model_dump(exclude_none=True).items()
+            if key != "type" and key not in RECIPE_COORDINATE_KEYS
+        }
+        recipe.append(
+            RecipeStep(action_type=step.type, params=params, target=target)
+        )
+    return tuple(recipe)
 
 
 #: How many derived tags to keep. Enough to describe what a workflow did,
@@ -255,6 +292,20 @@ _SEMANTIC_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _abstract_url(url: str) -> str:
+    """Host + path of a URL with runs abstracted out, for signatures (pure).
+
+    ``https://WWW.Google.com/search?q=ai&page=2`` ->
+    ``"google/search?q=ai&page=<num>"``. Case and pagination/session counters
+    are naming accidents; the host and the route are the workflow.
+    """
+    rest = url.split("://", 1)[-1]
+    host, _, path = rest.partition("/")
+    host = host.rsplit("@", 1)[-1].split(":", 1)[0].lower().removeprefix("www.")
+    route = _DYNAMIC_NUMBER.sub("<num>", path)
+    return f"{host}/{route}" if route else host
+
+
 def _semantic_params(action: Action) -> str:
     """Return a stable, coordinate-free summary of an action's params.
 
@@ -269,6 +320,12 @@ def _semantic_params(action: Action) -> str:
     data.pop("type", None)
     kept = {k: data[k] for k in _SEMANTIC_KEYS if k in data and k not in _COORDINATE_KEYS}
     rendered: list[str] = []
+    if isinstance(action, Navigate):
+        # The URL *is* the workflow meaning here (unlike pasted text, which
+        # is an operand): "open the news" and "open the docs" are different
+        # flows that must not share a signature. Host + path, numbers
+        # abstracted, so tracking/__session query noise does not fork skills.
+        rendered.append(f"url={_abstract_url(action.url)}")
     if isinstance(action, CallTool):
         rendered.append(f"tool={action.tool}")
         if "code" in action.arguments:

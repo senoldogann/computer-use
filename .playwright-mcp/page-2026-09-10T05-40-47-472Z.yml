@@ -1,0 +1,8 @@
+- generic [active] [ref=e1]:
+  - generic: Tüm loglar panoya kopyalandı!
+  - contentinfo [ref=e2]:
+    - generic [ref=e3]:
+      - button "Genişlet" [ref=e4] [cursor=pointer]
+      - generic [ref=e14]:
+        - 'textbox "Ne yapmamı istersiniz? Örn: Chrome''da yapay zeka haberlerini ara…" [ref=e15]'
+        - button "Görevi Başlat (⌘⏎)" [ref=e16] [cursor=pointer]

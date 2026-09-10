@@ -30,12 +30,11 @@ def _usage(run_id: str, goal: str, cost: float) -> UsageRecord:
 
 
 def test_goal_proposal_carries_auditable_provenance() -> None:
-    proposal = GoalProposal(
+    proposal = make_proposal(
         goal="retry failed export",
         app="Finder",
         source_type="episode_retry",
         source_id="episode-42",
-        utility_score=207.5,
         confidence=0.75,
         expected_cost=0.12,
         reason="episode episode-42 failed",
@@ -45,46 +44,60 @@ def test_goal_proposal_carries_auditable_provenance() -> None:
     assert proposal.app == "Finder"
     assert proposal.source_type == "episode_retry"
     assert proposal.source_id == "episode-42"
-    assert proposal.utility_score == 207.5
+    assert proposal.utility_score == pytest.approx(207.38)
     assert proposal.confidence == 0.75
     assert proposal.expected_cost == 0.12
     assert proposal.reason == "episode episode-42 failed"
 
 
-def test_legacy_inbox_constructor_recovers_typed_provenance() -> None:
-    proposal = GoalProposal(
+def test_utility_score_is_derived_never_stored() -> None:
+    first = make_proposal(
         goal="operator task",
-        app="Finder",
-        reason="task file 'night shift.md' claimed from watched folder /tmp/inbox",
+        app=None,
+        source_type="operator_inbox",
+        source_id="task.md",
+        confidence=1.0,
+        expected_cost=None,
+        reason="operator supplied it",
+    )
+    second = make_proposal(
+        goal="operator task",
+        app=None,
+        source_type="operator_inbox",
+        source_id="task.md",
+        confidence=1.0,
+        expected_cost=None,
+        reason="operator supplied it",
     )
 
-    assert proposal.source_type == "operator_inbox"
-    assert proposal.source_id == "night shift.md"
-    assert proposal.confidence == 1.0
-    assert proposal.expected_cost is None
-    assert proposal.utility_score >= 500.0
+    assert first == second
+    assert first.utility_score == pytest.approx(510.0)
 
 
-def test_legacy_mission_constructor_recovers_typed_provenance() -> None:
-    proposal = GoalProposal(
-        goal="finish export",
-        app="Finder",
-        reason=(
-            "mission mission-42 was started and never finished "
-            "(2 attempt(s) so far)"
-        ),
-    )
-
-    assert proposal.source_type == "mission_resume"
-    assert proposal.source_id == "mission-42"
-    assert proposal.confidence == pytest.approx(0.6)
-    assert proposal.expected_cost is None
-    assert 400.0 <= proposal.utility_score < 500.0
-
-
-def test_unknown_legacy_constructor_fails_closed() -> None:
-    with pytest.raises(ValueError, match="explicit provenance"):
-        GoalProposal(goal="x", app=None, reason="some unstructured source")
+@pytest.mark.parametrize(
+    ("goal", "source_id", "confidence", "message"),
+    [
+        ("", "episode-1", 0.75, "goal"),
+        ("   ", "episode-1", 0.75, "goal"),
+        ("x", "", 0.75, "source_id"),
+        ("x", "   ", 0.75, "source_id"),
+        ("x", "episode-1", -0.01, "confidence"),
+        ("x", "episode-1", 1.01, "confidence"),
+    ],
+)
+def test_goal_proposal_rejects_invalid_identity(
+    goal: str, source_id: str, confidence: float, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        GoalProposal(
+            goal=goal,
+            app=None,
+            source_type="episode_retry",
+            source_id=source_id,
+            confidence=confidence,
+            expected_cost=None,
+            reason="fixture",
+        )
 
 
 @pytest.mark.parametrize("confidence", [-0.01, 1.01])

@@ -99,6 +99,36 @@ class ActivateApp(BaseModel):
     app: str = Field(min_length=1, description="Application name to bring to the front.")
 
 
+class Navigate(BaseModel):
+    """Open a URL in the frontmost browser, atomically.
+
+    One decision instead of three turns (focus address bar, paste, submit):
+    the loop actuates the sequence itself and verifies the *outcome* — the
+    window title must change to the new page — rather than each keystroke.
+    A paste followed by Return that silently lands nowhere (measured live:
+    a verified submit that never left GitHub, then a full 3-step retry) is
+    exactly what this replaces.
+
+    Only ``http``/``https`` URLs validate. Anything else is rejected at the
+    contract gate, before the loop ever sees it: ``javascript:`` would run
+    code in the browser's context, and ``file:``/``data:`` smuggle local
+    content past the permission model. The guard separately classifies every
+    navigation as routine-but-stateful (recoverable via Back).
+    """
+
+    type: Literal["navigate"]
+    url: str = Field(min_length=1, max_length=2048)
+
+    @model_validator(mode="after")
+    def _allow_web_only(self) -> Navigate:
+        scheme = self.url.split(":", 1)[0].lower()
+        if scheme not in ("http", "https"):
+            raise ValueError(
+                f"navigate accepts http/https URLs only, got scheme {scheme!r}"
+            )
+        return self
+
+
 class LoadSkill(BaseModel):
     """Stage-2 mount request — the one action whose payload names a file.
 
@@ -175,6 +205,7 @@ Action = (
     | CallTool
     | PressHotkey
     | ActivateApp
+    | Navigate
     | LoadSkill
     | Wait
     | Finish
